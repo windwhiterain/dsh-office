@@ -109,7 +109,8 @@ office_colleagues  { "office": "office" }               # who is busy, and what 
 ```
 
 Then open **Office** in the Web sidebar: the panel lists every mounted office with its roster,
-its channel, your mailbox, and a composer that wakes exactly the colleagues its `@` names.
+its channel, your mailbox, and a composer that wakes exactly the colleagues its `@` names. The
+roster and the mailbox are two side columns, each opened and closed from the panel header.
 
 ## Roles and permissions
 
@@ -243,9 +244,10 @@ the wildcard walks the channels a colleague may read and the mailbox is not amon
 your private mail, and the panel is where you read it. Colleagues may write to it with a tool
 their role holds — `member` and `leader` hold `office_dm`, a `consultant` holds none.
 
-In the panel the mailbox is a **collapsed section** above `#general`, showing its message count
-and the name that reaches it. Opening it shows the mail; a message copied from a channel says
-where it was also said.
+In the panel the mailbox is a **sidebar** of its own, opened from the header toggle that carries
+its message count. It is a column beside `#general` rather than a band above it, so the two feeds
+never share a width or a scrollport; the sidebar names the mailbox and the name that reaches it,
+and a message copied from a channel says where it was also said.
 
 ## The boss preset
 
@@ -334,13 +336,18 @@ stay isolated: no shared roster and no shared channel.
 panel, both under the id `office`. The page discovers the mounted offices from
 `/dsh-office/offices` and shows a switcher across the top when there is more than one.
 
-Everything below the switcher belongs to the selected office:
+Everything below the switcher belongs to the selected office. The body is three columns — the
+roster, `#general`, and the mailbox — and each of the two side columns is opened and closed from
+a button in the header, next to **Hire a colleague**. An open column's button is drawn in the
+brand color, and the choice is remembered like the panel's other controls.
 
-- **Colleagues** — each with its role, live status, effective permission, held-message count, and
-  description, plus **Edit** (role and description) and **Dismiss**.
-- **Mailbox** — collapsed by default, with its message count and the name that reaches it.
-- **`#general`** — the public record, with a composer that wakes exactly the colleagues its `@`
-  names. Naming `@user` files a copy in the mailbox.
+- **Colleagues** — a side column, open by default: each colleague with its role, live status,
+  effective permission, held-message count, and description, plus **Edit** (role and description)
+  and **Dismiss**.
+- **`#general`** — the public record, named at the top of its own column, with a composer that
+  wakes exactly the colleagues its `@` names. Naming `@user` files a copy in the mailbox.
+- **Mailbox** — a side column, closed by default: your mail, with the count on its header toggle
+  and a close button in the sidebar's own header.
 - **Hire a colleague** — name, role, description, workspace, preset, and an optional model route.
 
 ### Folding a long history
@@ -353,6 +360,11 @@ drags you away from what you were reading. Following the tail is unaffected — 
 bottom stays at the bottom. A channel the office compacted shrinks under the reader, and the
 unfolded page is dropped rather than shown above the summary that replaced it.
 
+Opening or closing a column rewraps `#general` at a new width, which the same accounting covers,
+so the reader keeps their place through a toggle. The mailbox sidebar has no stored position: it
+opens at its newest message and follows it while you have not scrolled away, so mail that arrives
+while you are reading the channel is already in view.
+
 ### Panel state
 
 The panel is registered in the `main` slot, so opening another page unmounts it, and a reload
@@ -364,7 +376,8 @@ replaces it entirely. What you typed and chose therefore lives outside React sta
 | `office` | The office the page was showing. A name that no longer exists falls back to the first mounted office. |
 | `draft:<office>` | The composer draft, per office. |
 | `wakeAll` | The **Wake everyone** checkbox, as a standing preference. |
-| `mailbox` | Whether the mailbox section is open. Collapsed until you open it. |
+| `colleagues` | Whether the roster column is open. Open until you close it. |
+| `mailbox` | Whether the mailbox sidebar is open. Closed until you open it. |
 | `feed:<office>` | Where the reader is in the channel: `null` while following the newest message, or the offset it is reading at. |
 
 None of it is authoritative, and each failure degrades to the value the panel would have started

@@ -2,10 +2,10 @@
  * Optional panel render check for dsh-office.
  *
  * Loads `client.js` the way the shell does, renders the panel against a stubbed office route in
- * jsdom, and drives the interactions the panel added: unfolding the folded history row, opening
- * the user mailbox, and seeding the colleague dialog. `probe/smoke.mjs` covers the plugin's own
- * logic without any of this; this check exists for the render path and the panel's contract with
- * the state route, which a schema check cannot see.
+ * jsdom, and drives the interactions the panel added: collapsing and reopening the roster column,
+ * opening the mailbox sidebar, unfolding the folded history row, and seeding the colleague dialog.
+ * `probe/smoke.mjs` covers the plugin's own logic without any of this; this check exists for the
+ * render path and the panel's contract with the state route, which a schema check cannot see.
  *
  * It is opt-in because it needs React, react-dom, and jsdom, which this package does not depend
  * on. Point `DSH_OFFICE_PROBE_MODULES` at a directory holding a `node_modules` with them (a
@@ -166,6 +166,15 @@ await settle(80)
 
 const text = () => document.body.textContent
 const buttons = () => [...document.querySelectorAll('button')]
+/** Wait for a condition instead of guessing at a delay; a cold first run is slower than a warm one. */
+const until = async (predicate, ms = 2000) => {
+  const deadline = Date.now() + ms
+  for (;;) {
+    if (predicate()) return true
+    if (Date.now() >= deadline) return false
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
 const clickOn = (label) => {
   const button = buttons().find(entry => entry.textContent.includes(label))
   assert.ok(button, `a button labelled "${label}" must be rendered; body was: ${text()}`)
@@ -173,24 +182,59 @@ const clickOn = (label) => {
   return button
 }
 
-// The rail, the folded row, and the collapsed mailbox.
+// The body is two collapsible side columns around the channel: roster open, mailbox closed.
+assert.ok(
+  await until(() => document.getElementById('dsh-office-colleagues') !== null),
+  `the panel must draw the office it mounted; body was: ${text()}`,
+)
 assert.match(text(), /nia/, 'the rail lists the colleague')
 assert.match(text(), /leader · idle · read-only · 2 held/, 'the rail reports role, status, permission, and held mail')
 assert.match(text(), /runs the standup/, 'and the description')
+assert.ok(document.getElementById('dsh-office-colleagues'), 'the roster column is open by default')
+assert.equal(document.getElementById('dsh-office-mailbox'), null, 'the mailbox sidebar is closed by default')
+assert.equal(document.querySelector('[data-channel="mailbox"]'), null, 'so the mailbox draws no feed')
+assert.match(text(), /Mailbox · 3/, 'the header toggle reports how much mail waits')
+assert.match(text(), /#general/, 'the public channel names its own column')
+assert.equal(document.querySelectorAll('[data-channel="general"]').length, 1, 'and owns exactly one scrollport')
 assert.match(text(), /10 earlier messages/, 'the feed folds everything older than the newest page')
 assert.match(text(), /tail/, 'the newest page is rendered')
-assert.match(text(), /Mailbox · 3 · @user/, 'the mailbox header reports its size and the name that reaches it')
 assert.ok(!text().includes('please look at @user'), 'the mailbox is collapsed by default')
 
-// Opening the mailbox renders its mail and its own folded count.
+// The roster column collapses from its header toggle and comes back with its content.
+clickOn('Colleagues')
+await settle()
+assert.equal(document.getElementById('dsh-office-colleagues'), null, 'the header toggle closes the roster')
+assert.ok(!text().includes('runs the standup'), 'and takes its content with it')
+clickOn('Colleagues')
+await settle()
+assert.match(text(), /runs the standup/, 'and reopens it')
+
+// Opening the mailbox gives it a column of its own rather than another band of the channel.
 clickOn('Mailbox')
 await settle()
+const mailboxColumn = document.getElementById('dsh-office-mailbox')
+const generalFeed = document.querySelector('[data-channel="general"]')
+const mailboxFeed = document.querySelector('[data-channel="mailbox"]')
+assert.ok(mailboxColumn, 'the header toggle opens the mailbox sidebar')
+assert.ok(mailboxFeed, 'which holds its own scrollport')
+assert.ok(mailboxColumn.contains(mailboxFeed), 'inside the sidebar element')
+assert.ok(
+  !generalFeed.contains(mailboxFeed) && !mailboxFeed.contains(generalFeed),
+  'and #general shares no scrollport with it',
+)
+assert.match(text(), /Mailbox · @user/, 'the sidebar names the mailbox and the name that reaches it')
 assert.match(text(), /please look at @user/, 'opening the mailbox shows the mail')
 assert.match(text(), /also in #general as general-9/, 'a copied message says where it was also said')
 assert.match(text(), /2 earlier messages/, 'the mailbox folds its own older messages')
 assert.ok(
-  document.body.innerHTML.includes('var(--dsw-alias-state-business-primary)') === false || true,
+  mailboxFeed.innerHTML.includes('var(--dsw-alias-state-business-primary)'),
+  'a mention in the mail carries the reference color',
 )
+
+// The sidebar's own close button collapses it again.
+clickOn('✕')
+await settle()
+assert.equal(document.getElementById('dsh-office-mailbox'), null, 'the close button collapses the mailbox')
 
 // Unfolding the channel asks the history route and prepends the page.
 const before = calls.length

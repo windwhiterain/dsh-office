@@ -46,10 +46,11 @@ node probe/panel-render.mjs
 
 It loads `client.js` the way the shell does — through `window.__ModuleLoader__`, with the client
 primitives stubbed — renders the panel into jsdom against a stubbed office route, and drives the
-interactions: unfolding a folded history row (asserting the history request is made *below* the
-oldest message the feed holds, and that the older page is prepended), opening the collapsed
-mailbox and reading its mail, and seeding the colleague dialog from the colleague it was opened
-on.
+interactions: collapsing and reopening the roster column, opening the mailbox sidebar and
+asserting its scrollport is not the channel's, closing it again from the sidebar's own button,
+unfolding a folded history row (asserting the history request is made *below* the oldest message
+the feed holds, and that the older page is prepended), and seeding the colleague dialog from the
+colleague it was opened on.
 
 It is opt-in because it needs `react`, `react-dom`, and `jsdom`, which this package does not
 depend on. Point `DSH_OFFICE_PROBE_MODULES` at a directory holding a `node_modules` with them (a

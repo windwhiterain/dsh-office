@@ -2,6 +2,9 @@
  * dsh-office Web panel: one page that switches between every mounted office, showing each
  * one's colleague roster, hire form, public channel, and composer.
  *
+ * The roster and the user mailbox are two side columns of that page, each opened and closed
+ * from a button in its header, so neither shares a scrollport with the public channel.
+ *
  * Loaded as a dynamic client module. The factory id must equal the package name so the
  * bundle route and the module-table identity agree. Data comes from the Host's office
  * routes, which apply the connection policy themselves.
@@ -59,8 +62,15 @@ window.__ModuleLoader__.load({
      * One record holds every field that must outlive that.
      */
     const PANEL_STATE_KEY = 'dsh-office.panel'
-    /** The mailbox disclosure, which is a standing preference rather than a per-visit default. */
+    /**
+     * The panel's two side columns. Whether each is open is a standing preference rather than a
+     * per-visit default, and each id is what the panel header's toggle addresses.
+     */
+    const RAIL_STATE_KEY = 'colleagues'
     const MAILBOX_STATE_KEY = 'mailbox'
+    /** One office panel mounts at a time, so these ids are fixed rather than generated. */
+    const RAIL_PANEL_ID = 'dsh-office-colleagues'
+    const MAILBOX_PANEL_ID = 'dsh-office-mailbox'
 
     /**
      * Build a URL for one office route.
@@ -293,15 +303,20 @@ window.__ModuleLoader__.load({
     const emptyTitle = { margin: '0 0 8px', fontSize: '15px', fontWeight: 600 }
     const emptyBody = { ...muted, margin: 0, lineHeight: 1.6 }
     const body = { display: 'flex', flex: 1, minHeight: 0 }
+    /**
+     * The roster column. Like the mailbox sidebar it is a head over a body, so all three columns
+     * of the page name themselves the same way and scroll on their own.
+     */
     const rail = {
       width: '260px',
       flex: 'none',
-      overflowY: 'auto',
-      padding: '12px 16px',
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: 0,
       borderRight: '1px solid var(--dsw-alias-border-l1)',
       background: 'var(--dsw-alias-bg-layer-1)',
     }
-    const sectionLabel = { ...muted, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '16px 0 6px' }
+    const railBody = { flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 16px' }
     const person = { padding: '6px 0', fontSize: '13px' }
     const personHead = { display: 'flex', alignItems: 'center', gap: '6px' }
     const personName = { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
@@ -324,34 +339,58 @@ window.__ModuleLoader__.load({
      * scrolls with the messages it precedes rather than floating over them.
      */
     const foldedRow = { display: 'flex', justifyContent: 'center' }
-    /** The user's mailbox: a collapsed-by-default section above the public channel. */
-    const mailboxSection = {
+    /**
+     * One channel's name, at the top of the column that holds it.
+     *
+     * The public channel and the mailbox are two columns of the same body and both draw the same
+     * message bubbles, so each is named where it starts: without a name the two feeds are told
+     * apart only by which side of the panel they are on.
+     */
+    const channelHead = {
       flex: 'none',
+      padding: '10px 20px',
       borderBottom: '1px solid var(--dsw-alias-border-l1)',
+      fontSize: '12px',
+      color: 'var(--dsw-alias-label-secondary)',
+    }
+    /**
+     * The user's mailbox: a sidebar of its own, opened from the panel header.
+     *
+     * It is a column beside the public channel rather than a disclosure above it, so the two
+     * feeds share neither a width nor a scrollport, and the mailbox gets the column's full height
+     * instead of pushing the channel down.
+     */
+    const mailboxSide = {
+      width: '320px',
+      flex: 'none',
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: 0,
+      borderLeft: '1px solid var(--dsw-alias-border-l1)',
       background: 'var(--dsw-alias-bg-layer-1)',
     }
-    const mailboxHeader = {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '6px',
-      width: '100%',
-      padding: '8px 20px',
-      border: 'none',
-      background: 'transparent',
-      color: 'var(--dsw-alias-label-primary)',
-      font: 'inherit',
-      fontSize: '12px',
-      textAlign: 'left',
-      cursor: 'pointer',
-    }
-    /** The mailbox's own scrollport: bounded, so opening it never hides the channel below. */
+    const mailboxHead = { ...channelHead, color: 'var(--dsw-alias-label-primary)' }
+    const mailboxTitle = { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+    /** The sidebar's own scrollport, which no other feed shares. */
     const mailboxFeed = {
-      maxHeight: '40vh',
+      flex: 1,
+      minHeight: 0,
       overflowY: 'auto',
-      padding: '4px 20px 12px',
+      padding: '12px 16px',
       display: 'flex',
       flexDirection: 'column',
       gap: '12px',
+    }
+    const mailboxClose = {
+      flex: 'none',
+      padding: '2px 8px',
+      borderRadius: '6px',
+      border: '1px solid var(--dsw-alias-border-l2)',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-secondary)',
+      font: 'inherit',
+      fontSize: '12px',
+      cursor: 'pointer',
     }
     const bubble = {
       border: '1px solid var(--dsw-alias-border-l1)',
@@ -487,6 +526,38 @@ window.__ModuleLoader__.load({
       font: 'inherit',
       fontSize: '12px',
       cursor: 'pointer',
+    }
+    /**
+     * An open column's toggle. The brand color is the one state cue that survives both color
+     * schemes, where the layer tokens for a raised surface are the same value in the light one.
+     */
+    const openedSmallButton = {
+      ...smallButton,
+      border: '1px solid var(--dsw-alias-brand-primary)',
+      color: 'var(--dsw-alias-brand-primary)',
+    }
+
+    /**
+     * One side column's toggle, in the panel header.
+     *
+     * Both columns open from here rather than from inside themselves, because a column that is
+     * closed has nothing left on screen to click.
+     * @param props.label - the column's name.
+     * @param props.count - how many entries the column holds, or undefined before the snapshot.
+     * @param props.open - whether the column is showing.
+     * @param props.controls - the id of the column element this button toggles.
+     * @param props.onToggle - receives the click.
+     * @returns the button.
+     */
+    function ColumnToggle(props) {
+      const { label, count, open, controls, onToggle } = props
+      return h('button', {
+        type: 'button',
+        style: open ? openedSmallButton : smallButton,
+        'aria-expanded': open,
+        'aria-controls': controls,
+        onClick: onToggle,
+      }, `${label}${count === undefined || count === 0 ? '' : ` · ${String(count)}`}`)
     }
 
     /**
@@ -1291,9 +1362,15 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** One office: its roster rail, public channel, and composer. */
+    /**
+     * One office: its roster rail, its public channel, and — when opened — the mailbox sidebar.
+     *
+     * Both side columns are opened from the panel header, which the panel owns, so whether each
+     * is open arrives here as a prop instead of living in this view: this view is keyed by office,
+     * and the choices are meant to outlive a switch between offices.
+     */
     function OfficeView(props) {
-      const { officeName, snapshot, error, refresh, onEdit } = props
+      const { officeName, snapshot, error, refresh, onEdit, railShown, mailboxShown, onToggleMailbox } = props
       const [postError, setPostError] = useState(undefined)
       const [pendingDismiss, setPendingDismiss] = useState(undefined)
       const feedRef = useRef(null)
@@ -1332,9 +1409,6 @@ window.__ModuleLoader__.load({
       const colleagues = snapshot?.colleagues ?? []
       const userName = snapshot?.user?.name
       const mailboxTotal = snapshot?.mailboxTotal ?? 0
-      // Collapsed by default, and remembered once the user opens it: the mailbox is a place to
-      // look, not a thing to read on every visit, so it must not push the channel down unasked.
-      const [mailboxShown, setMailboxShown] = useStoredState(MAILBOX_STATE_KEY, false)
       const general = useFeedHistory({
         officeName,
         channel: 'general',
@@ -1348,6 +1422,9 @@ window.__ModuleLoader__.load({
         total: mailboxTotal,
       })
       const messages = general.messages
+      /** The sidebar's own scrollport, and whether new mail should keep it at the newest message. */
+      const mailboxRef = useRef(null)
+      const mailboxFollowRef = useRef(true)
 
       /**
        * Write what the reader is doing: following the tail, or reading at this offset.
@@ -1410,7 +1487,7 @@ window.__ModuleLoader__.load({
         // Unsettled reader input owns the feed: a message that arrives mid-scroll must not pull it.
         if (sampleTimerRef.current !== null) return
         if (follow.following) follow.toBottom(node, follow.metrics(node))
-      }, [scrollKey, snapshot, messages.length, rememberPosition])
+      }, [scrollKey, snapshot, messages.length, mailboxShown, rememberPosition])
 
       /**
        * Hold the reader's place while the feed's content height changes.
@@ -1419,6 +1496,8 @@ window.__ModuleLoader__.load({
        * it; by scroll offset alone the reader would be dragged to different content each time. A
        * reader who is following the tail is handled above, and reader input that has not settled
        * owns the feed, so this only moves the offset by the height the content gained or lost.
+       * Opening or closing the sidebar rewraps the channel at a new width, which is the same
+       * problem from the side rather than from above, so the toggle is a dependency too.
        */
       useEffect(() => {
         const node = feedRef.current
@@ -1429,76 +1508,107 @@ window.__ModuleLoader__.load({
         if (sampleTimerRef.current !== null) return
         node.scrollTop += node.scrollHeight - previous
         rememberPosition(node)
-      }, [messages.length, mailbox.messages.length, snapshot, rememberPosition])
+      }, [messages.length, snapshot, mailboxShown, rememberPosition])
 
-      /** Toggle the mailbox disclosure; the choice is remembered like the panel's other controls. */
-      const toggleMailbox = () => { setMailboxShown(!mailboxShown) }
+      /**
+       * Keep the mailbox at its newest message while the reader has not scrolled away from it.
+       *
+       * A sidebar the operator is not watching must still show what arrived: it opens at the tail
+       * and a poll that appends follows it, while a reader who scrolled up keeps the place they
+       * chose. It has no stored position, unlike the channel, because it is a place to look rather
+       * than the record being read.
+       */
+      const onMailboxScroll = useCallback(() => {
+        const node = mailboxRef.current
+        if (node === null) return
+        mailboxFollowRef.current = node.scrollHeight - node.clientHeight - node.scrollTop
+          <= FEED_FOLLOW_THRESHOLD
+      }, [])
+
+      useEffect(() => {
+        const node = mailboxRef.current
+        if (node === null || !mailboxFollowRef.current) return
+        node.scrollTop = node.scrollHeight
+      }, [mailbox.messages.length])
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
         error === undefined ? null : h('p', { style: notice }, `Cannot reach office "${officeName}": ${error}`),
         h('div', { style: body },
-          h('div', { style: rail },
-            h('p', { style: sectionLabel }, 'Colleagues'),
-            colleagues.length === 0
-              ? h('p', { style: muted }, 'None yet. Use “Hire a colleague” above.')
-              : colleagues.map(colleague => h('div', { key: colleague.sessionId, style: person },
-                h('div', { style: personHead },
-                  h('div', { style: personName }, colleague.name),
-                  h('button', {
-                    type: 'button',
-                    style: dismissButton,
-                    title: "Change this colleague's role and description",
-                    onClick: () => { onEdit(colleague) },
-                  }, 'Edit'),
-                  h('button', {
-                    type: 'button',
-                    style: dismissButton,
-                    title: 'Remove from the roster; the session itself is kept',
-                    onClick: () => { void removeColleague(colleague.name) },
-                  }, pendingDismiss === colleague.name ? 'Confirm' : 'Dismiss'),
-                ),
-                h('div', { style: muted },
-                  `${colleague.role ?? 'member'} · ${colleague.status ?? 'unknown'}`
-                  + `${colleague.permission === undefined ? '' : ` · ${colleague.permission}`}`
-                  + `${colleague.pending === undefined || colleague.pending === 0
-                    ? ''
-                    : ` · ${String(colleague.pending)} held`}`),
-                colleague.description === undefined
-                  ? null
-                  : h('div', { style: personNote }, colleague.description),
-              )),
-          ),
+          railShown
+            ? h('div', { id: RAIL_PANEL_ID, style: rail },
+              h('div', { style: channelHead }, 'Colleagues'),
+              h('div', { style: railBody },
+                colleagues.length === 0
+                  ? h('p', { style: muted }, 'None yet. Use “Hire a colleague” above.')
+                  : colleagues.map(colleague => h('div', { key: colleague.sessionId, style: person },
+                    h('div', { style: personHead },
+                      h('div', { style: personName }, colleague.name),
+                      h('button', {
+                        type: 'button',
+                        style: dismissButton,
+                        title: "Change this colleague's role and description",
+                        onClick: () => { onEdit(colleague) },
+                      }, 'Edit'),
+                      h('button', {
+                        type: 'button',
+                        style: dismissButton,
+                        title: 'Remove from the roster; the session itself is kept',
+                        onClick: () => { void removeColleague(colleague.name) },
+                      }, pendingDismiss === colleague.name ? 'Confirm' : 'Dismiss'),
+                    ),
+                    h('div', { style: muted },
+                      `${colleague.role ?? 'member'} · ${colleague.status ?? 'unknown'}`
+                      + `${colleague.permission === undefined ? '' : ` · ${colleague.permission}`}`
+                      + `${colleague.pending === undefined || colleague.pending === 0
+                        ? ''
+                        : ` · ${String(colleague.pending)} held`}`),
+                    colleague.description === undefined
+                      ? null
+                      : h('div', { style: personNote }, colleague.description),
+                  )),
+              ),
+            )
+            : null,
           h('div', { style: channel },
-            h('div', { style: mailboxSection },
-              h('button', {
-                type: 'button',
-                style: mailboxHeader,
-                'aria-expanded': mailboxShown,
-                onClick: toggleMailbox,
-              }, `${mailboxShown ? '▾' : '▸'} Mailbox`
-                + `${mailboxTotal === 0 ? '' : ` · ${String(mailboxTotal)}`}`
-                + `${userName === undefined ? '' : ` · @${userName}`}`),
-              mailboxShown
-                ? h('div', { style: mailboxFeed },
-                  h(FoldedRow, { folded: mailbox.folded, onUnfold: () => { void mailbox.load() } }),
-                  mailbox.messages.length === 0
-                    ? h('p', { style: muted }, 'No message has been addressed to the user yet.')
-                    : mailbox.messages.map(message => messageNode(message, colleagues, userName)),
-                )
-                : null,
-            ),
-            h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll },
+            h('div', { style: channelHead }, '#general'),
+            h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll, 'data-channel': 'general' },
               h(FoldedRow, { folded: general.folded, onUnfold: () => { void general.load() } }),
               messages.length === 0
                 ? h('p', { style: muted }, '#general has no messages yet.')
                 : messages.map(message => messageNode(message, colleagues, userName)),
             ),
+            postError === undefined && general.failure === undefined
+              ? null
+              : h('p', { style: notice }, postError ?? general.failure),
+            h(Composer, { officeName, colleagues, userName, onPosted: refresh }),
           ),
+          mailboxShown
+            ? h('div', { id: MAILBOX_PANEL_ID, style: mailboxSide },
+              h('div', { style: mailboxHead },
+                h('span', { style: mailboxTitle },
+                  userName === undefined ? 'Mailbox' : `Mailbox · @${userName}`),
+                h('button', {
+                  type: 'button',
+                  style: mailboxClose,
+                  title: 'Close the mailbox',
+                  onClick: onToggleMailbox,
+                }, '✕'),
+              ),
+              h('div', {
+                ref: mailboxRef,
+                style: mailboxFeed,
+                onScroll: onMailboxScroll,
+                'data-channel': 'mailbox',
+              },
+                h(FoldedRow, { folded: mailbox.folded, onUnfold: () => { void mailbox.load() } }),
+                mailbox.messages.length === 0
+                  ? h('p', { style: muted }, 'No message has been addressed to the user yet.')
+                  : mailbox.messages.map(message => messageNode(message, colleagues, userName)),
+              ),
+              mailbox.failure === undefined ? null : h('p', { style: notice }, mailbox.failure),
+            )
+            : null,
         ),
-        postError === undefined && general.failure === undefined && mailbox.failure === undefined
-          ? null
-          : h('p', { style: notice }, postError ?? general.failure ?? mailbox.failure),
-        h(Composer, { officeName, colleagues, userName, onPosted: refresh }),
       )
     }
 
@@ -1512,6 +1622,11 @@ window.__ModuleLoader__.load({
       const [editing, setEditing] = useState(undefined)
       const active = offices.some(office => office.name === selected) ? selected : offices[0]?.name
       const { snapshot, error, refresh } = useOffice(active)
+      // Which side columns are open is a standing preference, like the draft and the office being
+      // read. The roster starts open because it is the office's state at a glance; the mailbox
+      // starts closed because it is a place to look when its count on the toggle says to.
+      const [railShown, setRailShown] = useStoredState(RAIL_STATE_KEY, true)
+      const [mailboxShown, setMailboxShown] = useStoredState(MAILBOX_STATE_KEY, false)
 
       /**
        * Wait until the mounted list shows what an office edit just asked for.
@@ -1552,11 +1667,27 @@ window.__ModuleLoader__.load({
           h('div', { style: headerForms },
             active === undefined
               ? null
-              : h('button', {
-                type: 'button',
-                style: smallButton,
-                onClick: () => { setDialog('hire') },
-              }, 'Hire a colleague'),
+              : h(React.Fragment, null,
+                h(ColumnToggle, {
+                  label: 'Colleagues',
+                  count: snapshot?.colleagues?.length,
+                  open: railShown,
+                  controls: RAIL_PANEL_ID,
+                  onToggle: () => { setRailShown(current => !current) },
+                }),
+                h(ColumnToggle, {
+                  label: 'Mailbox',
+                  count: snapshot?.mailboxTotal,
+                  open: mailboxShown,
+                  controls: MAILBOX_PANEL_ID,
+                  onToggle: () => { setMailboxShown(current => !current) },
+                }),
+                h('button', {
+                  type: 'button',
+                  style: smallButton,
+                  onClick: () => { setDialog('hire') },
+                }, 'Hire a colleague'),
+              ),
             h('button', {
               type: 'button',
               style: smallButton,
@@ -1566,7 +1697,17 @@ window.__ModuleLoader__.load({
         ),
         offices.length === 0
           ? h(OfficeEmptyState, { onManage: () => { setDialog('offices') } })
-          : h(OfficeView, { key: active, officeName: active, snapshot, error, refresh, onEdit: setEditing }),
+          : h(OfficeView, {
+            key: active,
+            officeName: active,
+            snapshot,
+            error,
+            refresh,
+            onEdit: setEditing,
+            railShown,
+            mailboxShown,
+            onToggleMailbox: () => { setMailboxShown(false) },
+          }),
         offices.length === 0
           ? null
           : h(HireDialog, {
