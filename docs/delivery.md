@@ -15,8 +15,10 @@ finds it.
 The order inside one post is fixed:
 
 1. The body is bounded by the office's `maxMessageChars`.
-2. The audience is resolved — the whole roster except the sender, or the named recipients — and
-   the channel is resolved (`#general`, or the direct channel for `kind: 'dm'`).
+2. The channel is resolved (`#general`, a group channel the caller is a member of, or the direct
+   channel for `kind: 'dm'`), and the audience with it — the whole roster except the sender for
+   the standing public channel, the group channel's **members** for one the office created, or
+   the named recipients.
 3. The sequence is allocated, and the message record is written with an empty `deliveries`.
 4. If the message also addresses the user, it is copied into the mailbox **after** the message
    itself is stored, so the office's own history never depends on the mailbox being writable. A
@@ -100,7 +102,8 @@ colleague actually got, and the detail is why it was not the splice its sender a
 
 | call | audience |
 |---|---|
-| `office_post` with no `mentions` | every colleague except the sender |
+| `office_post` to `#general` with no `mentions` | every colleague except the sender |
+| `office_post` to a group channel with no `mentions` | exactly that channel's members except the sender |
 | `office_post` with `mentions` | exactly the named colleagues |
 | `office_post` with `mention_all: false` | nobody; the message is written to the channel |
 | `office_post` naming the user | the named colleagues, and a copy in the mailbox |

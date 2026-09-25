@@ -96,7 +96,11 @@ const SNAPSHOT = {
   colleagues: [COLLEAGUE],
   roles: [{ id: 'member' }, { id: 'leader' }, { id: 'consultant', permission: 'read-only' }],
   user: { name: 'user' },
-  channels: [{ channelId: 'general', kind: 'public' }, { channelId: 'mailbox', kind: 'mailbox' }],
+  channels: [
+    { channelId: 'general', kind: 'public' },
+    { channelId: 'mailbox', kind: 'mailbox' },
+    { channelId: 'release', kind: 'group', topic: 'everything about cutting a release', members: ['session-nia'] },
+  ],
   messages: [
     { messageId: 'general-10', seq: 10, channelId: 'general', kind: 'public', senderName: 'nia', createdAt: 1, text: 'newest', mentions: [] },
     { messageId: 'general-11', seq: 11, channelId: 'general', kind: 'public', senderName: 'user', createdAt: 2, text: 'tail', mentions: [] },
@@ -126,9 +130,12 @@ let captured
 dom.window.__ModuleLoader__ = { load: (module) => { captured = module } }
 globalThis.fetch = async (path) => {
   calls.push(path)
+  const url = new URL(path, 'http://127.0.0.1:3081/')
   const body = path === '/dsh-office/offices'
     ? { offices: [{ id: 'office', name: 'office' }] }
-    : path.includes('/state') ? SNAPSHOT : OLDER
+    : url.pathname.endsWith('/state')
+      ? { ...SNAPSHOT, channel: url.searchParams.get('channel') ?? 'general' }
+      : OLDER
   return { ok: true, status: 200, json: async () => body }
 }
 
@@ -136,10 +143,26 @@ await import('../client.js')
 assert.equal(captured?.id, 'dsh-office', 'client.js registers the dsh-office module')
 
 const Modal = ({ open, children }) => (open ? React.createElement('div', { 'data-modal': true }, children) : null)
-const passthrough = (name) => (props) => React.createElement('div', { 'data-stub': name }, props.children ?? null)
+/**
+ * The Menu stub keeps the anchor visible even while it is closed, which is what the switchers
+ * need: the anchor is a plain outline button, and the items are only in the open state.
+ */
+const Menu = ({ open, items, onSelect, anchor }) => React.createElement(
+  React.Fragment,
+  null,
+  anchor ?? null,
+  open && Array.isArray(items)
+    ? React.createElement('div', { 'data-menu': true },
+      items.map(item => React.createElement('button', {
+        key: item.id,
+        'data-menu-item': item.id,
+        onClick: () => onSelect?.(item.id),
+      }, item.label)))
+    : null,
+)
 const primitives = {
   Modal,
-  Menu: passthrough('Menu'),
+  Menu,
   Button: ({ children, ...rest }) => React.createElement('button', rest, children),
   IconChevronDownOutlineRegular: () => React.createElement('span', null, 'v'),
 }
@@ -263,6 +286,40 @@ assert.ok(
 assert.match(text(), /nine/, 'the unfolded page is rendered')
 assert.match(text(), /8 earlier messages/, 'and the row now counts what is left')
 
+// Switching what the channel column reads: the column head's switcher names the channels the
+// snapshot carries, asks the state route with the chosen one, and shows what it got back.
+const switcherAnchor = () => [...document.querySelectorAll('button')]
+  .find(button => (button.getAttribute('aria-label') ?? '').startsWith('Channel:'))
+assert.ok(switcherAnchor(), 'the channel column owns a switcher')
+assert.equal(switcherAnchor().getAttribute('aria-label'), 'Channel: general')
+const beforeSwitch = calls.length
+switcherAnchor().click()
+await settle()
+const releaseItem = document.querySelector('button[data-menu-item="release"]')
+assert.ok(releaseItem, `the open switcher lists the group channels; body was: ${text()}`)
+releaseItem.click()
+await settle(80)
+assert.ok(
+  calls.slice(beforeSwitch).some(path => path.includes('/state') && path.includes('channel=release')),
+  `switching must ask the state route with the channel named; calls: ${calls.slice(beforeSwitch).join(', ')}`,
+)
+assert.ok(
+  await until(async () => switcherAnchor() !== undefined
+    && switcherAnchor().getAttribute('aria-label') === 'Channel: release'),
+  'the switcher shows the channel the snapshot answered with',
+)
+assert.match(text(), /Post to office #release/, 'the composer says which channel it will write to')
+// Back to the public record, so the sections below address the office's standing channel.
+switcherAnchor().click()
+await settle()
+document.querySelector('button[data-menu-item="general"]').click()
+await settle(80)
+assert.ok(
+  await until(async () => false || switcherAnchor().getAttribute('aria-label') === 'Channel: general'),
+  'the switcher shows what it got back',
+)
+await settle(80)
+
 // The configure dialog posts the role and the description of the colleague it was opened on.
 clickOn('Edit')
 await settle()
@@ -272,6 +329,26 @@ assert.equal(selects.length, 1, 'the edit dialog offers exactly the role picker'
 assert.equal(selects[0].value, 'leader', 'seeded from the colleague it was opened on')
 const description = [...document.querySelectorAll('input')].find(input => input.getAttribute('aria-label') === 'Colleague description')
 assert.equal(description.value, 'runs the standup', 'and from that colleague description')
+
+// The Channels dialog lists the group channels and opens their membership editing.
+clickOn('Channels')
+await settle()
+const channelsModal = [...document.querySelectorAll('[data-modal]')].at(-1)
+assert.ok(channelsModal, 'the channels dialog opens')
+assert.match(channelsModal.textContent, /#release/, 'the group channels are listed')
+assert.ok(
+  [...channelsModal.querySelectorAll('input')]
+    .some(input => input.getAttribute('aria-label') === 'New channel name'),
+  'and offers a creation form',
+)
+clickOn('Members')
+await settle()
+const checkboxList = [...document.querySelectorAll('[data-modal]')].at(-1)
+const checkboxes = [...checkboxList.querySelectorAll('input[type="checkbox"]')]
+assert.ok(
+  checkboxes.some(box => box.closest('label')?.textContent.includes('nia')),
+  'the member editor opens on the channel roster',
+)
 
 console.log('panel render check: ok')
 root.unmount()

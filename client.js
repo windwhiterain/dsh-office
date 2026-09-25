@@ -40,6 +40,10 @@ window.__ModuleLoader__.load({
     const CREATE_OFFICE_ROUTE = '/dsh-office/offices/create'
     const DELETE_OFFICE_ROUTE = '/dsh-office/offices/delete'
     const RENAME_OFFICE_ROUTE = '/dsh-office/offices/rename'
+    /** The routes that manage one office's channels, all sharing the office query parameter. */
+    const CHANNELS_CREATE_ROUTE = '/dsh-office/offices/channels/create'
+    const CHANNELS_DELETE_ROUTE = '/dsh-office/offices/channels/delete'
+    const CHANNELS_CONFIGURE_ROUTE = '/dsh-office/offices/channels/configure'
     /**
      * The roles offered before the snapshot arrives, and the one a colleague starts as.
      *
@@ -84,6 +88,21 @@ window.__ModuleLoader__.load({
      */
     function officeRoute(verb, officeName) {
       return `${OFFICES_ROUTE}/${verb}?${new URLSearchParams({ office: officeName })}`
+    }
+
+    /** Build the path of one channels-management route. */
+    function channelRoute(verb, officeName) {
+      return `${OFFICES_ROUTE}/channels/${verb}?${new URLSearchParams({ office: officeName })}`
+    }
+
+    /**
+     * Append one channel parameter to an office route so it names the feed it acts on.
+     * @param route - the office path {@link officeRoute} built.
+     * @param channelId - the channel id, as the snapshot's `channels` report it.
+     * @returns the request path.
+     */
+    function withChannel(route, channelId) {
+      return `${route}&${new URLSearchParams({ channel: channelId })}`
     }
 
     /**
@@ -290,6 +309,27 @@ window.__ModuleLoader__.load({
         panelState.set(key, resolved)
         setValue(resolved)
       }, [key, fallback])
+      return [value, update]
+    }
+
+    /**
+     * `useState` for one panel field keyed per office, which must outlive the panel
+     * unmounting, an office switch, and a reload.
+     * @param field - the field's name; the office suffix builds the storage key.
+     * @param officeName - the office the field belongs to.
+     * @returns the value, and a setter that writes every update through to storage.
+     */
+    function usePerOfficeState(field, officeName) {
+      const key = `${field}:${officeName}`
+      const [value, setValue] = useState(() => panelState.get(key, undefined))
+      // A switch into another office re-seeds the field from that office's own value: the two
+      // offices keep separate selections, like their composer drafts already do.
+      useEffect(() => { setValue(panelState.get(key, undefined)) }, [key])
+      const update = useCallback((next) => {
+        const resolved = typeof next === 'function' ? next(panelState.get(key, undefined)) : next
+        panelState.set(key, resolved)
+        setValue(resolved)
+      }, [key])
       return [value, update]
     }
 
@@ -676,7 +716,7 @@ window.__ModuleLoader__.load({
      * a post wakes exactly the colleagues it names.
      */
     function Composer(props) {
-      const { officeName, colleagues, userName, onPosted } = props
+      const { officeName, channelId, colleagues, userName, onPosted } = props
       // The draft is stored per office: switching offices, leaving the page, and reloading the
       // browser all keep a post that was typed but not sent.
       const [draft, setDraft] = useStoredState(`draft:${officeName}`, '')
@@ -762,8 +802,9 @@ window.__ModuleLoader__.load({
         setBusy(true)
         try {
           // Only the body is sent: the server derives the audience from the names written in
-          // it, so what the composer colors and whom the post wakes are the same set.
-          await submitJson(officeRoute('post', officeName), { text, mention_all: wakeAll })
+          // it and from the channel it is posted to, so what the composer colors and whom the
+          // post wakes are the same set.
+          await submitJson(withChannel(officeRoute('post', officeName), channelId), { text, mention_all: wakeAll })
           setDraft('')
           setTrigger(undefined)
           setFailure(undefined)
@@ -790,7 +831,7 @@ window.__ModuleLoader__.load({
             ref: inputRef,
             style: { ...composerInput, color: composing ? 'var(--dsw-alias-label-primary)' : 'transparent' },
             value: draft,
-            'aria-label': 'Post to general',
+            'aria-label': `Post to ${channelId}`,
             onChange: change,
             onKeyDown: key,
             onFocus: () => { setFocused(true) },
@@ -806,7 +847,7 @@ window.__ModuleLoader__.load({
             style: { ...composerOverlay, zIndex: 1, visibility: composing ? 'hidden' : 'visible' },
             'aria-hidden': true,
           }, draft.length === 0
-            ? h('span', { style: placeholderText }, `Post to ${officeName} #general — type @ to wake a colleague`)
+            ? h('span', { style: placeholderText }, `Post to ${officeName} #${channelId} — type @ to wake a colleague`)
             : segments),
           trigger === undefined || candidates.length === 0 ? null : h('div', { style: mentionMenu, role: 'listbox' },
             candidates.map((name, index) => h('button', {
@@ -898,7 +939,7 @@ window.__ModuleLoader__.load({
      * what the reader opened. The server owns the page size, so the request carries no limit —
      * the host's own ceiling is what one unfold costs.
      * @param props.officeName - the office the feed belongs to.
-     * @param props.channel - `general` or `mailbox`.
+     * @param props.channel - the channel id the feed reads, as the snapshot reports it.
      * @param props.newest - the newest page, from the snapshot.
      * @param props.total - how many messages the channel holds in all, from the snapshot.
      * @returns the combined messages, how many are still folded, the loader, and its failure.
@@ -930,7 +971,9 @@ window.__ModuleLoader__.load({
         if (loading.current || oldest === undefined) return
         loading.current = true
         try {
-          const page = await requestJson(`${officeRoute('history', officeName)}&channel=${channel}&before=${oldest}`)
+          const page = await requestJson(
+            `${withChannel(officeRoute('history', officeName), channel)}&before=${oldest}`,
+          )
           setOlder(current => [...(page?.messages ?? []), ...current])
           setFailure(undefined)
         } catch (error) {
@@ -988,26 +1031,30 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One office's snapshot: colleagues, channels, newest public messages, hire and adopt options.
+     * One office's snapshot: the selected channel, colleagues, channels, newest messages, hire
+     * and adopt options.
      *
      * The panel owns this, not the view, because the hire dialog needs the same snapshot and
-     * two pollers would double every request.
+     * two pollers would double every request. `channelId` decides which feed `messages` and
+     * `messagesTotal` carry — the servers' own fallback answers the public channel for a name
+     * it does not resolve — and each switch is a new request, not a refetch of one channel.
      * @param officeName - the office to read, or undefined while none is mounted.
+     * @param channelId - the channel whose `messages` the snapshot should carry.
      * @returns the snapshot, its error, and a refresh callback.
      */
-    function useOffice(officeName) {
+    function useOffice(officeName, channelId) {
       const [snapshot, setSnapshot] = useState(undefined)
       const [error, setError] = useState(undefined)
-      useEffect(() => { setSnapshot(undefined); setError(undefined) }, [officeName])
+      useEffect(() => { setSnapshot(undefined); setError(undefined) }, [officeName, channelId])
       const refresh = useCallback(async () => {
-        if (officeName === undefined) return
+        if (officeName === undefined || channelId === undefined) return
         try {
-          setSnapshot(await requestJson(officeRoute('state', officeName)))
+          setSnapshot(await requestJson(withChannel(officeRoute('state', officeName), channelId)))
           setError(undefined)
         } catch (failure) {
           setError(failure instanceof Error ? failure.message : String(failure))
         }
-      }, [officeName])
+      }, [officeName, channelId])
       useEffect(() => {
         void refresh()
         const timer = setInterval(() => { void refresh() }, POLL_MS)
@@ -1462,6 +1509,248 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The channel switcher: a dropdown of the channels the snapshot carries for reading,
+     * matching the office switcher's own select controls.
+     */
+    function ChannelSwitcher(props) {
+      const { channels, active, onSelect } = props
+      const [open, setOpen] = useState(false)
+      const items = channels.map(channel => ({ id: channel.channelId, label: `#${channel.channelId}` }))
+
+      return h(Menu, {
+        open,
+        items,
+        selectedId: active,
+        onSelect: (id) => { onSelect(id); setOpen(false) },
+        onClose: () => { setOpen(false) },
+        side: 'bottom',
+        align: 'start',
+        anchor: h(Button, {
+          variant: 'outline',
+          size: 'sm',
+          'aria-label': `Channel: ${active ?? 'none'}`,
+          'aria-haspopup': 'menu',
+          'aria-expanded': open,
+          disabled: items.length === 0,
+          onClick: () => { setOpen(!open) },
+        },
+        h('span', { style: switcherLabel }, `#${active ?? 'general'}`),
+        h('span', { style: switcherChevron, 'aria-hidden': true }, h(IconChevronDownOutlineRegular))),
+      })
+    }
+
+    /**
+     * The member-editing dialog for one group channel.
+     *
+     * It opens on the channel's stored membership and submits only the difference: the
+     * colleagues checked but not stored are added, and the stored but unchecked are removed,
+     * named by the session title the office addresses them by — the same spelling the
+     * membership routes take.
+     */
+    function ChannelMembersDialog(props) {
+      const { open, onClose, officeName, channelId, channel, colleagues, onSaved } = props
+      const [selected, setSelected] = useState([])
+      const [busy, setBusy] = useState(false)
+      const [failure, setFailure] = useState(undefined)
+
+      const stored = channel?.members ?? []
+      useEffect(() => {
+        if (!open) return
+        setSelected([...(channel?.members ?? [])])
+        setFailure(undefined)
+      }, [open, channelId])
+
+      const toggle = (sessionId) => {
+        setSelected(current => current.includes(sessionId)
+          ? current.filter(id => id !== sessionId)
+          : [...current, sessionId])
+      }
+
+      const save = async () => {
+        if (busy) return
+        setBusy(true)
+        setFailure(undefined)
+        try {
+          const namesOf = new Map(colleagues.map(colleague => [colleague.sessionId, colleague.name]))
+          const add = selected.filter(id => !stored.includes(id)).map(id => namesOf.get(id) ?? id)
+          const remove = stored.filter(id => !selected.includes(id)).map(id => namesOf.get(id) ?? id)
+          await submitJson(withChannel(channelRoute('configure', officeName), channelId), {
+            channel: channelId,
+            members: { add, remove },
+          })
+          await onSaved()
+          onClose()
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h(Modal, {
+        open,
+        onClose,
+        title: `Members of #${channelId ?? 'channel'}`,
+        closeLabel: 'Close',
+        description: 'The members decide who reads this channel and who a post there wakes. The difference '
+          + 'from the stored membership is what the save sends.',
+        footer: h('div', { style: dialogActions },
+          h('button', { type: 'button', style: smallButton, onClick: onClose }, 'Cancel'),
+          h('button', { type: 'button', style: button, disabled: busy, onClick: () => { void save() } }, busy ? 'Saving…' : 'Save')),
+      },
+      h('div', { style: dialogList },
+        colleagues.length === 0
+          ? h('p', { style: muted }, 'No colleague to admit yet.')
+          : colleagues.map(colleague => h('label', { key: colleague.sessionId, style: dialogRow },
+            h('input', {
+              type: 'checkbox',
+              checked: selected.includes(colleague.sessionId),
+              onChange: () => { toggle(colleague.sessionId) },
+            }),
+            h('span', { style: dialogRowName }, colleague.name),
+            h('span', { style: dialogTag }, colleague.role ?? 'member')))),
+      failure === undefined ? null : h('p', { style: dialogFailure }, failure))
+    }
+
+    /**
+     * The Channels dialog: create one group channel, remove one, and open its member editing.
+     *
+     * Each edit sends to the channel routes the same way the boss tools do — the panel is the
+     * user's own console — and reports an refused creation by keeping the dialog open.
+     */
+    function ChannelsDialog(props) {
+      const { open, onClose, officeName, snapshot, activeChannel, onSelectChannel, refresh } = props
+      const [draft, setDraft] = useState('')
+      const [topicDraft, setTopicDraft] = useState('')
+      const [confirming, setConfirming] = useState(undefined)
+      const [editingMembers, setEditingMembers] = useState(undefined)
+      const [busy, setBusy] = useState(false)
+      const [failure, setFailure] = useState(undefined)
+
+      const channels = (snapshot?.channels ?? []).filter(channel => channel.kind === 'group')
+      const colleagues = snapshot?.colleagues ?? []
+
+      const create = async () => {
+        const name = draft.trim()
+        if (name.length === 0 || busy) return
+        setBusy(true)
+        setFailure(undefined)
+        try {
+          const made = await submitJson(channelRoute('create', officeName), {
+            name,
+            ...(topicDraft.trim().length === 0 ? {} : { topic: topicDraft.trim() }),
+          })
+          setDraft('')
+          setTopicDraft('')
+          const channelId = typeof made?.channelId === 'string' ? made.channelId : name
+          await refresh()
+          onSelectChannel(channelId)
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const remove = async (channelId) => {
+        if (confirming !== channelId) {
+          setConfirming(channelId)
+          setFailure(undefined)
+          return
+        }
+        setConfirming(undefined)
+        setBusy(true)
+        try {
+          await submitJson(channelRoute('delete', officeName), { channel: channelId })
+          await refresh()
+          if (activeChannel === channelId) onSelectChannel('general')
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const row = (channel) => {
+        if (confirming === channel.channelId) {
+          return h('div', { key: channel.channelId, style: dialogRow },
+            h('span', { style: dialogRowName }, `Delete #${channel.channelId}? Its members and every message go with it.`),
+            h('button', {
+              type: 'button',
+              style: { ...smallButton, color: 'var(--dsw-alias-state-error-primary)' },
+              disabled: busy,
+              onClick: () => { void remove(channel.channelId) },
+            }, 'Delete'),
+            h('button', { type: 'button', style: smallButton, disabled: busy, onClick: () => { setConfirming(undefined) } }, 'Cancel'))
+        }
+        return h('div', { key: channel.channelId, style: dialogRow },
+          h('span', { style: dialogRowName },
+            `#${channel.channelId}${channel.topic === undefined ? '' : ` — ${channel.topic}`}`),
+          channel.channelId === activeChannel ? h('span', { style: dialogTag }, 'shown') : null,
+          h('span', { style: muted }, `${(channel.members ?? []).length} member(s)`),
+          h('button', {
+            type: 'button',
+            style: smallButton,
+            disabled: busy,
+            onClick: () => { setEditingMembers(channel.channelId) },
+          }, 'Members'),
+          h('button', {
+            type: 'button',
+            style: { ...smallButton, color: 'var(--dsw-alias-state-error-primary)' },
+            disabled: busy,
+            onClick: () => { void remove(channel.channelId) },
+          }, 'Delete'))
+      }
+
+      return h(React.Fragment, null,
+        h(Modal, {
+        open,
+        onClose,
+        title: 'Channels',
+        closeLabel: 'Close',
+        description: 'A channel is a shared feed whose members decide who reads it and who a post there wakes. '
+          + 'The office\'s two standing feeds — the public record and your mailbox — are not listed here.',
+        footer: h('div', { style: dialogActions },
+          h('button', { type: 'button', style: smallButton, onClick: onClose }, 'Done')),
+      },
+      h('div', { style: dialogList },
+        channels.length === 0
+          ? h('p', { style: muted }, 'No channel yet. Add one below.')
+          : channels.map(row)),
+      h('div', { style: { ...dialogRow, marginTop: '10px' } },
+        h('input', {
+          style: { ...field, marginBottom: 0, flex: 1 },
+          value: draft,
+          placeholder: 'New channel name',
+          'aria-label': 'New channel name',
+          disabled: busy,
+          onChange: event => setDraft(event.target.value),
+          onKeyDown: (event) => { if (event.key === 'Enter') { event.preventDefault(); void create() } },
+        }),
+        h('input', {
+          style: { ...field, marginBottom: 0, flex: 1 },
+          value: topicDraft,
+          placeholder: 'Topic (optional)',
+          'aria-label': 'New channel topic',
+          disabled: busy,
+          onChange: event => setTopicDraft(event.target.value),
+          onKeyDown: (event) => { if (event.key === 'Enter') { event.preventDefault(); void create() } },
+        }),
+        h('button', { type: 'button', style: smallButton, disabled: busy, onClick: () => { void create() } }, 'Add')),
+      failure === undefined ? null : h('p', { style: dialogFailure }, failure)),
+      h(ChannelMembersDialog, {
+        open: editingMembers !== undefined,
+        onClose: () => { setEditingMembers(undefined) },
+        officeName,
+        channelId: editingMembers,
+        channel: channels.find(channel => channel.channelId === editingMembers),
+        colleagues,
+        onSaved: refresh,
+      }),
+      )
+    }
+
+    /**
      * The panel with no office mounted.
      *
      * This state is reachable on purpose — deleting the last office lands here — so it
@@ -1487,8 +1776,8 @@ window.__ModuleLoader__.load({
      */
     function OfficeView(props) {
       const {
-        officeName, snapshot, error, refresh, onEdit, railShown, mailboxShown,
-        onToggleRail, onToggleMailbox,
+        officeName, channelId, channels, snapshot, error, refresh, onEdit, railShown, mailboxShown,
+        onToggleRail, onToggleMailbox, onChannelChange,
       } = props
       const [postError, setPostError] = useState(undefined)
       const [pendingDismiss, setPendingDismiss] = useState(undefined)
@@ -1501,13 +1790,23 @@ window.__ModuleLoader__.load({
       const restoredRef = useRef(false)
       /** The feed's last content height, which is how a prepend is told from a reader's scroll. */
       const heightRef = useRef(undefined)
-      const scrollKey = `feed:${officeName}`
+      const scrollKey = `feed:${officeName}:${channelId}`
       if (followRef.current === null) {
         // A feed with no stored position has never been scrolled away from the tail, so it starts
         // following the newest message — the same default the conversation view uses.
         const saved = panelState.get(scrollKey, undefined)
         followRef.current = new FeedFollow(saved === undefined || saved === null, FEED_FOLLOW_THRESHOLD)
       }
+
+      // Switching the channel the column reads resets both the follow intent and the restore:
+      // every channel keeps its reader position on its own, and each begins where that channel
+      // was last read — or at its tail.
+      useEffect(() => {
+        restoredRef.current = false
+        heightRef.current = undefined
+        const saved = panelState.get(scrollKey, undefined)
+        followRef.current = new FeedFollow(saved === undefined || saved === null, FEED_FOLLOW_THRESHOLD)
+      }, [channelId, scrollKey])
 
       /** Two-step removal: the first click arms the button, the second performs it. */
       const removeColleague = async (name) => {
@@ -1530,7 +1829,7 @@ window.__ModuleLoader__.load({
       const mailboxTotal = snapshot?.mailboxTotal ?? 0
       const general = useFeedHistory({
         officeName,
-        channel: 'general',
+        channel: channelId,
         newest: snapshot?.messages ?? [],
         total: snapshot?.messagesTotal ?? 0,
       })
@@ -1764,17 +2063,19 @@ window.__ModuleLoader__.load({
             )
             : null,
           h('div', { style: channel },
-            h('div', { style: columnHead }, '#general'),
+            h('div', { style: columnHead },
+              h(ChannelSwitcher, { channels, active: channelId, onSelect: onChannelChange }),
+            ),
             h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll, 'data-channel': 'general' },
               h(FoldedRow, { folded: general.folded, onUnfold: () => { void general.load() } }),
               messages.length === 0
-                ? h('p', { style: muted }, '#general has no messages yet.')
+                ? h('p', { style: muted }, `#${channelId} has no messages yet.`)
                 : messages.map(message => messageNode(message, colleagues, userName)),
             ),
             postError === undefined && general.failure === undefined
               ? null
               : h('p', { style: notice }, postError ?? general.failure),
-            h(Composer, { officeName, colleagues, userName, onPosted: refresh }),
+            h(Composer, { officeName, channelId, colleagues, userName, onPosted: refresh }),
           ),
           mailboxShown
             ? h('div', { id: MAILBOX_PANEL_ID, style: mailboxSide },
@@ -1816,7 +2117,24 @@ window.__ModuleLoader__.load({
       /** The colleague the edit dialog was opened on, or undefined while it is closed. */
       const [editing, setEditing] = useState(undefined)
       const active = offices.some(office => office.name === selected) ? selected : offices[0]?.name
-      const { snapshot, error, refresh } = useOffice(active)
+      // Which channel the public column reads, kept per office like the composer draft. The
+      // requested id is what the snapshot is asked for; the snapshot reports the channel its
+      // `messages` actually carry, so a name it fell back from converges on the public feed.
+      const [channelChoice, setChannelChoice] = usePerOfficeState('channel', active)
+      const requestedChannel = typeof channelChoice === 'string' && channelChoice.length > 0
+        ? channelChoice
+        : 'general'
+      const { snapshot, error, refresh } = useOffice(active, requestedChannel)
+      useEffect(() => {
+        if (typeof snapshot?.channel === 'string' && snapshot.channel !== requestedChannel) {
+          setChannelChoice(snapshot.channel)
+        }
+      }, [snapshot, requestedChannel, setChannelChoice])
+      const channelId = typeof snapshot?.channel === 'string' ? snapshot.channel : 'general'
+      // The feeds a switcher offers: the standing public record and every group channel. The
+      // mailbox is a sidebar of its own and the direct channels belong to one colleague.
+      const channelOptions = (snapshot?.channels ?? [])
+        .filter(entry => entry.kind === 'public' || entry.kind === 'group')
       // Which side columns are open is a standing preference, like the draft and the office being
       // read. The roster starts open because it is the office's state at a glance; the mailbox
       // starts closed because it is a place to look when its count on the toggle says to.
@@ -1887,6 +2205,11 @@ window.__ModuleLoader__.load({
                   style: smallButton,
                   onClick: () => { setDialog('adopt') },
                 }, 'Adopt a session'),
+                h('button', {
+                  type: 'button',
+                  style: smallButton,
+                  onClick: () => { setDialog('channels') },
+                }, 'Channels'),
               ),
             h('button', {
               type: 'button',
@@ -1900,6 +2223,8 @@ window.__ModuleLoader__.load({
           : h(OfficeView, {
             key: active,
             officeName: active,
+            channelId,
+            channels: channelOptions,
             snapshot,
             error,
             refresh,
@@ -1908,6 +2233,7 @@ window.__ModuleLoader__.load({
             mailboxShown,
             onToggleRail: () => { setRailShown(false) },
             onToggleMailbox: () => { setMailboxShown(false) },
+            onChannelChange: setChannelChoice,
           }),
         offices.length === 0
           ? null
@@ -1936,6 +2262,17 @@ window.__ModuleLoader__.load({
             colleague: editing,
             snapshot,
             onSaved: refresh,
+          }),
+        offices.length === 0
+          ? null
+          : h(ChannelsDialog, {
+            open: dialog === 'channels',
+            onClose: () => { setDialog(undefined) },
+            officeName: active,
+            snapshot,
+            activeChannel: channelId,
+            onSelectChannel: setChannelChoice,
+            refresh,
           }),
         h(OfficesDialog, {
           open: dialog === 'offices',

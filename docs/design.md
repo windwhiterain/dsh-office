@@ -221,6 +221,31 @@ turn, and the refusal is invisible until the model tries. Every roster event —
 configured, dismissed — and every office mount or unmount therefore only asks the host to resync
 the affected agents; only the host installs or withdraws.
 
+## Group channels and the `channels` capability
+
+Beside the standing `#general` and the mailbox, the boss and the leaders can build **group**
+channels: shared feeds whose stored `members` decide who may read them, who may write to them,
+and whom a post there wakes. A group channel is a `dm` with more than two people and a public
+name — the same membership record answers every question, `visibleChannels` is the same filter,
+and the wake audience is the same list. The boss is privy to every channel it manages, `#general`
+records no members because every colleague belongs to it, and the mailbox stays the one channel
+no colleague can read through a tool.
+
+The three management tools — `office_channel_create`, `office_channel_delete`, and
+`office_channel_members` — are the `channels` capability: the boss holds it because it runs the
+office, and a leader holds it because building and tending the channels an office carries is the
+growth of the record that role curates. `office_channels`, the listing tool, holds no gate at all:
+every role holds it, because a colleague that cannot find a channel it belongs to cannot take part
+in it, and the listing reports exactly the channels the caller is allowed to read — never more.
+
+Deleting a group channel deletes its messages with it, which is deliberate: a feed that the office
+no longer holds would otherwise keep history no tool could address, and the holds it owed its
+members are dropped rather than left stranded unread. Deletion is a boss and leader act through
+the same capability as creation. Every member a tool or route stores must resolve to a colleague
+of the office at the write, so membership cannot drift out of the roster by a typo; a colleague
+that is dismissed leaves its stored membership behind, but it loses the office tools at the same
+moment, so the stale entry is inert rather than a doorway.
+
 ## The user mailbox is a channel
 
 The user is not a session, so nothing can wake them and a colleague cannot answer them by

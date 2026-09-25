@@ -22,6 +22,7 @@ through the Cordis context, so it survives harness upgrades.
 - [Quick start](#quick-start)
 - [Roles and permissions](#roles-and-permissions)
 - [Tools](#tools)
+- [Channels](#channels)
 - [The user mailbox](#the-user-mailbox)
 - [The boss preset](#the-boss-preset)
 - [Configuration](#configuration)
@@ -133,10 +134,11 @@ once.
 
 | Capability | `member` | `leader` | `consultant` |
 |---|---|---|---|
-| `office_read`, `office_colleagues` | yes | yes | yes |
+| `office_read`, `office_colleagues`, `office_channels` | yes | yes | yes |
 | `office_post`, `office_dm` | yes | yes | yes |
 | `office_interrupt` | — | yes | — |
 | `office_compact`, `office_configure` | — | yes | — |
+| `office_channel_create`, `office_channel_delete`, `office_channel_members` | — | yes | — |
 
 The boss holds everything, because it runs the office. A colleague's tool set is the **union**
 of the roles it holds across the offices that adopted it, and every gated tool re-checks the
@@ -198,11 +200,15 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_dismiss` | Remove a colleague from the roster and withdraw its tools. The session itself keeps its history and workspace. |
 | `office_configure` | Set a colleague's role and/or description. |
 | `office_rename` | Rename one office. Storage, colleagues, channels, and messages stay where they are. |
+| `office_channel_create` | Create a group channel: a shared feed whose members decide who reads it and who a post there wakes. Takes a name, an optional topic, and the session titles of the colleagues that start on it. |
+| `office_channel_delete` | Delete a group channel the office created; its messages and the holds it owed go with it. The standing channels and the direct ones are refused. |
+| `office_channel_members` | Add or remove a group channel's members, named by session title — or read the current members back with neither list. |
 | `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. |
-| `office_post` | Post to `#general`. Wakes the whole roster by default; `mentions` narrows that, `mention_all: false` writes without waking anyone, and naming the user files a copy in the mailbox. |
+| `office_post` | Post to a channel: `#general` by default, where a post wakes the whole roster; a group channel wakes exactly its members. `mentions` narrows that, `mention_all: false` writes without waking anyone, and naming the user files a copy in the mailbox. |
 | `office_dm` | Private message to one colleague, or mail to the user, whose name writes to the mailbox. `notify` picks when a colleague that is mid-turn receives it: `turn-end` (default) after its turn, `step-end` at the next step boundary of the turn it is running. |
-| `office_read` | Read channel history by sequence range and filters. |
+| `office_read` | Read channel history by sequence range and filters, addressed by name, by a colleague's title for a DM, or by `*` for everything you can read. |
 | `office_compact` | Replace a sequence range with a summary the boss wrote, so a long channel stays bounded. |
+| `office_channels` | List the channels this caller may read, with their kind, topic, and members. A pure query: it wakes nobody. |
 
 Besides the office tools, the preset mounts **one persistent Git Bash** as `bash`: one shell
 process per session, so environment, working directory, and history survive across calls. It
@@ -221,12 +227,13 @@ Installed into every colleague's session, and into a session the moment it is ad
 | Tool | `member` | `leader` | `consultant` |
 |---|---|---|---|
 | `office_read` | yes | yes | yes |
-| `office_colleagues` | yes | yes | yes |
+| `office_colleagues`, `office_channels` | yes | yes | yes |
 | `office_post` | yes | yes | — |
 | `office_dm` | yes | yes | — |
 | `office_interrupt` | — | yes | — |
 | `office_compact` | — | yes | — |
 | `office_configure` | — | yes | — |
+| `office_channel_create`, `office_channel_delete`, `office_channel_members` | — | yes | — |
 
 ### Installation lifetime
 
@@ -239,6 +246,21 @@ re-roling a session, each only ask the host to bring the affected agents back in
 
 Every office tool's result carries `office`, the name of the office that produced it, so a
 presenter stays a pure function of the result it is given.
+
+## Channels
+
+The office ships two standing feeds: `#general` (`kind: 'public'`), which every colleague shares,
+and the user's mailbox, which no tool reaches. The boss and the leaders build more with the
+`channels` capability: a **group** channel is a shared feed whose stored members decide everything
+about reach — a session reads it and is woken by a post there exactly as a member, `#general`'s
+"every colleague" default becomes that channel's own member list, and a boss is privy to all of
+them because it runs the office. A direct channel is created by the first message and needs no
+management: its members are the two sessions talking.
+
+Channels are addressed by name, `#` included or not, everywhere they are an argument:
+`office_read`, `office_post`, `office_compact`, and the channels the panel's switcher lists.
+A colleague's session title for a DM keeps the older address, and the mailbox is refused through
+every spelling — a colleague may write to it, and nothing reads it.
 
 ## The user mailbox
 
@@ -351,7 +373,7 @@ panel, both under the id `office`. The page discovers the mounted offices from
 `/dsh-office/offices` and shows a switcher across the top when there is more than one.
 
 Everything below the switcher belongs to the selected office. The body is three columns — the
-roster, `#general`, and the mailbox — and each of the two side columns is opened from a button in
+roster, the channel, and the mailbox — and each of the two side columns is opened from a button in
 the header, next to **Hire a colleague**, and closed either from that button again or from the
 **✕** in its own head. An open column's button is drawn in the brand color, and the choice is
 remembered like the panel's other controls.
@@ -363,9 +385,15 @@ without a tool call.
 - **Colleagues** — a side column, open by default: each colleague with its role, live status,
   effective permission, held-message count, and description, plus **Edit** (role and description)
   and **Dismiss**.
-- **`#general`** — the public record, named at the top of its own column, with a composer that
-  wakes exactly the colleagues its `@` names. Naming `@user` files a copy in the mailbox.
+- **Channel** — the column the page reads, named by a switcher in its own head: `#general` and
+  every group channel, one at a time, each with its own feed, composer, and stored reading
+  position. A post goes to the channel the switcher shows and wakes exactly the colleagues the
+  body's `@` names — the whole office for `#general`, the channel's members for a group one.
+  Naming `@user` files a copy in the mailbox.
 - **Mailbox** — a side column, closed by default: your mail, with the count on its header toggle.
+- **Channels** — the group channels the office holds: create one with a name and a topic, edit
+  its members down a checkbox roster, and delete one, whose history goes with it. The office's
+  two standing feeds are not listed here.
 - **Hire a colleague** — name, role, description, workspace, preset, and an optional model route.
 - **Adopt a session** — an existing session becomes a colleague, named by its title, with the role
   and description rows the hire and edit dialogs share. The picker lists the sessions the office
@@ -401,12 +429,13 @@ replaces it entirely. What you typed and chose therefore lives outside React sta
 | Field | Meaning |
 |---|---|
 | `office` | The office the page was showing. A name that no longer exists falls back to the first mounted office. |
+| `channel:<office>` | The channel the page's channel column reads, per office; an id the office no longer holds falls back to `#general` in the snapshot itself. |
 | `draft:<office>` | The composer draft, per office. |
 | `wakeAll` | The **Wake everyone** checkbox, as a standing preference. |
 | `colleagues` | Whether the roster column is open. Open until you close it. |
 | `mailbox` | Whether the mailbox sidebar is open. Closed until you open it. |
-| `feed:<office>` | Where the reader is in the channel: `null` while following the newest message, or the offset it is reading at. |
-| `mail:<office>` | Where the reader is in the mailbox, stored the same way `feed:<office>` is. |
+| `feed:<office>:<channel>` | Where the reader is in one channel: `null` while following the newest message, or the offset it is reading at. |
+| `mail:<office>` | Where the reader is in the mailbox, stored the same way `feed:<office>:<channel>` is. |
 
 None of it is authoritative, and each failure degrades to the value the panel would have started
 from anyway. Submitting a post clears the stored draft.
@@ -420,10 +449,11 @@ server, not from what the panel claims: a mention is `@` at the body's start or 
 then a colleague's exact name — longest first — ending at a boundary, so `@张三x` and
 `mail x@张三` are prose. The user's name is scanned by the same rule.
 
-`Wake everyone` starts checked: a post from the panel notifies the whole office, and unchecking it
+`Wake everyone` starts checked: a post from the panel notifies the channel it is written to — the
+whole office for `#general`, a group channel's members for one of its own — and unchecking it
 narrows the notification to the names the body carries. The model's `office_post` expresses the
-same choice structurally: no `mentions` means the whole roster, `mentions` narrows it, and
-`mention_all: false` wakes nobody.
+same choice structurally: no `mentions` means the channel's own default audience, `mentions`
+narrows it, and `mention_all: false` wakes nobody.
 
 Waking is not the same as reading: `mention_all: false` still writes the message to the channel,
 where anyone can find it with `office_read`.
@@ -447,13 +477,16 @@ including none:
 
 | Route | Purpose |
 |---|---|
-| `GET /dsh-office/offices/state?office=<name>` | Colleagues, channels, the newest public messages and the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived or unaccounted ones never offered), and the hire options. |
-| `GET /dsh-office/offices/history?office=<name>&channel=general\|mailbox&before=<seq>&limit=<n>` | One page of messages older than `before`, oldest first, with the channel's `total` and whether anything older remains. This is what a folded row asks for. |
-| `POST /dsh-office/offices/post?office=<name>` | `{ text, mention_all? }`; posts as `userName` and notifies the whole roster unless `mention_all` is `false`, in which case only the names the body carries are notified. `@user` files a mailbox copy. |
+| `GET /dsh-office/offices/state?office=<name>&channel=<channel>` | Colleagues, channels (with their members), the newest messages of `channel` — `#general` unless the request names a group channel, and the fallback is the public feed — beside the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived or unaccounted ones never offered), and the hire options. |
+| `GET /dsh-office/offices/history?office=<name>&channel=<channel>&before=<seq>&limit=<n>` | One page of messages older than `before`, oldest first, with the channel's `total` and whether anything older remains. This is what a folded row asks for; `channel` addresses the group channels the same way the state parameter does. |
+| `POST /dsh-office/offices/post?office=<name>` | `{ text, mention_all?, channel? }`; posts as `userName` to `channel` (`#general` unless named) and notifies the whole office for the public channel or the group channel's members, unless `mention_all` is `false`, in which case only the names the body carries are notified. `@user` files a mailbox copy. |
 | `POST /dsh-office/offices/hire?office=<name>` | `{ name, role?, description?, workspace_id?, agent_preset?, provider?, model?, reasoning_effort? }`. |
 | `POST /dsh-office/offices/adopt?office=<name>` | `{ session_id, role?, description? }` — adopt an existing session, which the panel picks from the snapshot's unadopted list. |
 | `POST /dsh-office/offices/configure?office=<name>` | `{ name, role?, description? }` — set a colleague's role and description. |
 | `POST /dsh-office/offices/dismiss?office=<name>` | `{ name }` — remove a colleague from the roster. |
+| `POST /dsh-office/offices/channels/create?office=<name>` | `{ name, topic?, members? }` — create one group channel, its members named by session title. |
+| `POST /dsh-office/offices/channels/delete?office=<name>` | `{ channel }` — delete one group channel the office created; its messages and holds go with it. |
+| `POST /dsh-office/offices/channels/configure?office=<name>` | `{ channel, topic?, members?: { add, remove } }` — set a channel's topic and edit its membership; each named field is applied only when sent. |
 
 A request naming an office that is not mounted answers 404, and the office resolves by name or,
 for a caller that holds an id, by storage key. The web server enforces no authentication of its
@@ -470,7 +503,6 @@ unauthenticated.
 - **A renamed office leaves a stale seed in the profile.** The stored name wins from then on, so
   the patch keeps showing the name the office was created with; a delete resolves a mounted
   office through its storage key rather than through the row's written name.
-- **No group channels beyond `#general` and the mailbox.** There is no tool to create a channel.
 - **No custom session events.** All office state lives in the domain, because an out-of-tree
   plugin must not add `SessionEventMap` members.
 - **A colleague is addressed by its session title**, compared trimmed, NFC-canonical, and

@@ -33,8 +33,13 @@ What it covers, by area:
 - **The user mailbox** — `@user` in a public post filing a copy with its `origin`, `office_dm` to
   the user waking nobody, and every spelling of the mailbox being refused to `office_read` and
   `office_compact` while `channel: "*"` never reaches it.
-- **The panel routes** — the state snapshot (roster, roles, mailbox, totals), the history page a
-  folded row asks for, hire, configure, dismiss, and the connection policy each one applies.
+- **Group channels** — the `channels` capability per role, creating (and the reserved ids, the
+  duplicates, and the unknown members it refuses), the membership-gated listings and reads, the
+  audience a post to a group channel wakes, membership edits, the panel routes that mirror them,
+  and a deletion taking its messages and its holds with it.
+- **The panel routes** — the state snapshot (roster, roles, mailbox, totals, the channel the feed
+  asked for), the history page a folded row asks for, hire, configure, dismiss, and the connection
+  policy each one applies.
 
 Keep it out of `index.js`: the shipped plugin carries no test code, and `package.json`'s `files`
 list ships neither `probe/` nor `docs/`.
@@ -51,8 +56,11 @@ primitives stubbed — renders the panel into jsdom against a stubbed office rou
 interactions: collapsing and reopening the roster column from the header toggle and from the ✕ in
 its own head, opening the mailbox sidebar and asserting its scrollport is not the channel's,
 closing it again from its own ✕, unfolding a folded history row (asserting the history request is
-made *below* the oldest message the feed holds, and that the older page is prepended), and seeding
-the colleague dialog from the colleague it was opened on.
+made *below* the oldest message the feed holds, and that the older page is prepended), switching
+the channel column between `#general` and a group channel through the switcher (asserting the
+state route is asked with the channel named and the switcher shows what it got back), opening the
+Channels dialog onto the group channels, and seeding the colleague dialog from the colleague it
+was opened on.
 
 It is opt-in because it needs `react`, `react-dom`, and `jsdom`, which this package does not
 depend on. Point `DSH_OFFICE_PROBE_MODULES` at a directory holding a `node_modules` with them (a

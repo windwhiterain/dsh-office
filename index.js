@@ -51,6 +51,18 @@ const GENERAL_CHANNEL = 'general'
 const MAILBOX_CHANNEL = 'mailbox'
 
 /**
+ * The kind of the channels the boss and the leaders build and manage.
+ *
+ * A `group` channel is a shared feed whose **members** decide who sees it: unlike the one
+ * standing `public` channel every colleague belongs to, a group channel is visible to a
+ * session only when that session is one of its members (a boss, which runs the office, is
+ * privy to all of them). Membership is stored in the channel record's `members` list —
+ * sorted session ids, the same shape a direct channel carries — which is what keeps the
+ * office from inventing a second roster table.
+ */
+const GROUP_CHANNEL_KIND = 'group'
+
+/**
  * The predefined colleague roles. A colleague's stored `role` is one of these and nothing
  * else: the role decides which office tools that colleague's session receives, so a
  * free-text label would be a permission nobody can predict from the roster.
@@ -74,12 +86,12 @@ const COLLEAGUE_ROLES = [ROLE_MEMBER, ROLE_LEADER, ROLE_CONSULTANT]
  */
 const ROLE_CAPABILITIES = {
   [ROLE_MEMBER]: ['read', 'colleagues', 'post', 'dm'],
-  [ROLE_LEADER]: ['read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure'],
+  [ROLE_LEADER]: ['read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure', 'channels'],
   [ROLE_CONSULTANT]: ['read', 'colleagues', 'post', 'dm'],
 }
 
 /** Capabilities a boss holds: it runs the office, so it holds every capability there is. */
-const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure']
+const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure', 'channels']
 
 /** Role a colleague holds when its stored role is absent or no longer predefined. */
 const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
@@ -351,6 +363,11 @@ const OFFICES_ROUTE = '/dsh-office/offices'
 const CREATE_OFFICE_ROUTE = '/dsh-office/offices/create'
 const DELETE_OFFICE_ROUTE = '/dsh-office/offices/delete'
 const RENAME_OFFICE_ROUTE = '/dsh-office/offices/rename'
+
+/** Office routes that manage one office's group channels, all served beside the state routes. */
+const CHANNELS_CREATE_ROUTE = '/dsh-office/offices/channels/create'
+const CHANNELS_DELETE_ROUTE = '/dsh-office/offices/channels/delete'
+const CHANNELS_CONFIGURE_ROUTE = '/dsh-office/offices/channels/configure'
 
 /**
  * The mounted office host, which owns the agent tool set and the Web panel.
@@ -791,11 +808,10 @@ function channelLabel(message) {
 const OFFICE_SILENCE_RULE = 'Your reply stays in this session and reaches nobody. Most messages '
   + 'need no answer, and silence is a normal one.'
 
-/** Where an answer belongs when a delivered public message does need one. */
-const OFFICE_PUBLIC_ANSWER_RULE = 'Post important information to #general so everyone can learn from it; '
-  + 'send short exchanges privately with office_dm. Never post to acknowledge a message, to agree '
-  + 'with it, or to say that you are working on it: a public post wakes every colleague, and each '
-  + 'of them spends a turn on it.'
+/** The shared tail of the rule that keeps an answer from waking the office again. */
+const OFFICE_ACKNOWLEDGE_RULE = 'Never post to acknowledge a message, to agree '
+  + 'with it, or to say that you are working on it: a public post wakes every colleague, and '
+  + 'each of them spends a turn on it.'
 
 /**
  * Where an answer belongs, for the message kind that arrived and the role that received it.
@@ -806,16 +822,19 @@ const OFFICE_PUBLIC_ANSWER_RULE = 'Post important information to #general so eve
  * no channel-write tool would be told instead that whoever needs its answer reads this session.
  * @param kind - the delivered message's kind: `dm` or `public`.
  * @param role - the receiving colleague's predefined role.
+ * @param channelName - the channel the public message arrived on; a colleague answers where
+ *   the message stands, not somewhere else.
  * @returns the sentence appended to the frame that colleague receives.
  */
-function answerRule(kind, role) {
+function answerRule(kind, role, channelName = GENERAL_CHANNEL) {
   const capabilities = ROLE_CAPABILITIES[canonicalRole(role)]
   if (!capabilities.includes('post') && !capabilities.includes('dm')) {
     return 'Nothing you write here reaches the office: your role holds no tool that writes to a channel, '
       + 'so whoever needs your answer reads this session.'
   }
   if (kind === 'dm') return 'To answer the sender, use office_dm.'
-  return OFFICE_PUBLIC_ANSWER_RULE
+  return `Post important information to #${channelName} so everyone can learn from it; `
+    + `send short exchanges privately with office_dm. ${OFFICE_ACKNOWLEDGE_RULE}`
 }
 
 /**
@@ -835,7 +854,7 @@ function answerRule(kind, role) {
  * @returns the framed text delivered as the colleague's user turn.
  */
 function frameDelivery(message, newestSeq, role) {
-  const answer = `${OFFICE_SILENCE_RULE} ${answerRule(message.kind, role)}`
+  const answer = `${OFFICE_SILENCE_RULE} ${answerRule(message.kind, role, message.channelName)}`
   const freshness = newestSeq === undefined || newestSeq <= message.seq
     ? undefined
     : `(${channelLabel(message)} had already reached ${message.channelId}-${String(newestSeq)} when this turn was queued. `
@@ -867,7 +886,7 @@ function frameBatch(officeName, messages, newestSeq, role) {
     : `(${channelLabel(last)} had already reached ${last.channelId}-${String(newestSeq)} when this turn was queued.)`
   const guidance = 'These arrived while your previous turn was running. They are one turn because '
     + 'they arrived together, not because each one asks for an answer. '
-    + `${OFFICE_SILENCE_RULE} ${answerRule('public', role)}`
+    + `${OFFICE_SILENCE_RULE} ${answerRule(last.kind, role, last.channelName)}`
   return [
     `[office ${officeName} | ${String(messages.length)} messages arrived while you were working]`,
     ...messages.map(message => `[office ${whereOf(message)} | ${message.messageId}]\n${message.text}`),
@@ -971,18 +990,140 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
-   * Every channel one colleague can read: the public channel and its own direct-message ones.
+   * Every channel one session can read: the standing public channel, its own direct-message
+   * ones, and every group channel it is a member of — all of them when the session runs the
+   * office's boss preset, because a boss is privy to everything it manages.
    *
    * The user's mailbox is never in this list. It is the user's private mail, and `office_read`
    * with `channel: "*"` walks exactly this list, so excluding it here is what keeps a colleague
    * from reading mail addressed to the user.
    * @param sessionId - the reading session.
+   * @param isBoss - whether that session runs the office's boss preset.
    * @returns the channels it may read.
    */
-  const visibleChannels = (sessionId) => listChannels().filter((channel) => {
+  const visibleChannels = (sessionId, isBoss = false) => listChannels().filter((channel) => {
     if (channel.kind === 'mailbox') return false
-    return channel.kind !== 'dm' || channel.members.includes(sessionId)
+    if (channel.kind === 'dm') return channel.members.includes(sessionId)
+    if (channel.kind === GROUP_CHANNEL_KIND) return isBoss || channel.members.includes(sessionId)
+    return true
   })
+
+  /**
+   * Create one group channel: a shared feed whose members decide who reads it.
+   *
+   * The id is the name, normalized the way the standing channels are; the two standing
+   * channels and the direct-message idspace are refused rather than shadowed. A channel
+   * starts empty at sequence 1, and its record carries the membership it was born with —
+   * every member id must already be a colleague, so a typo fails instead of building a
+   * channel nobody can reach.
+   * @param name - the channel's spelling, normalized into its id here.
+   * @param topic - one sentence describing the channel.
+   * @param members - the session ids of the colleagues that join at creation, in any order.
+   * @returns the stored channel record.
+   */
+  const createChannel = async ({ name, topic, members }) => {
+    const channelId = normalizeName(name)
+    if (channelId.length === 0) {
+      throw new TypeError('dsh-office: a channel name must keep letters or digits; letters, digits, and hyphens in any script are kept')
+    }
+    if (channelId === GENERAL_CHANNEL || channelId === MAILBOX_CHANNEL || channelId.startsWith('dm-')) {
+      throw new Error(`dsh-office: "${channelId}" is a reserved channel id; a group channel needs its own`)
+    }
+    if (channels.get(channelId) !== undefined) {
+      throw new Error(`dsh-office: a channel named "${channelId}" already exists`)
+    }
+    const roster = new Set([...colleagues.keys()])
+    const unknown = (members ?? []).filter(sessionId => !roster.has(sessionId))
+    if (unknown.length > 0) {
+      throw new Error(`dsh-office: "${unknown.join('", "')}" ${unknown.length === 1 ? 'is not a colleague' : 'are not colleagues'} of office "${name()}"`)
+    }
+    const created = {
+      channelId,
+      kind: GROUP_CHANNEL_KIND,
+      name: channelId,
+      topic,
+      members: [...new Set(members ?? [])].sort(),
+      createdAt: Date.now(),
+      nextSeq: 1,
+    }
+    await channels.put(channelId, created)
+    return created
+  }
+
+  /**
+   * Remove one group channel and everything stored in it.
+   *
+   * A channel that no longer exists must not leave orphan messages behind: its records go
+   * with it, including the holds the office still kept for colleagues that had not received
+   * them — nothing will deliver those once the channel is gone. The standing channels and
+   * the direct-message channels are not group channels and are refused here.
+   * @param channelId - the channel to remove.
+   * @returns the display name of the removed channel.
+   */
+  const deleteChannel = async (channelId) => {
+    const record = validateChannel(channels.get(channelId))
+    if (record.kind !== GROUP_CHANNEL_KIND) {
+      throw new Error(`dsh-office: "${channelId}" is not a group channel; only the channels the office created can be deleted`)
+    }
+    const keys = [...messages.keys()].filter(key => key.startsWith(`${channelId}#`))
+    for (const key of keys) await messages.delete(key)
+    // The office must not keep holds for a feed that is gone: they would sit unread for ever.
+    for (const [key, value] of pendingWakes.entries()) {
+      if (requireRecord('pending', value).channelId === channelId) await pendingWakes.delete(key)
+    }
+    await channels.delete(channelId)
+    return record.name
+  }
+
+  /**
+   * Set one group channel's topic, replacing whatever it carried.
+   *
+   * An empty spelling removes the topic, so the channel is a fact on the roster rather than
+   * a promise it never keeps. The standing channels and the direct-message channels are not
+   * group channels and are refused here.
+   * @param channelId - the channel to edit.
+   * @param topic - the sentence to carry, or `undefined` to remove the topic.
+   * @returns the channel's topic after the edit, when one stands.
+   */
+  const updateChannelTopic = async (channelId, topic) => {
+    const record = validateChannel(channels.get(channelId))
+    if (record.kind !== GROUP_CHANNEL_KIND) {
+      throw new Error(`dsh-office: "${channelId}" is not a group channel; only channels the office created are edited`)
+    }
+    const next = { ...record, topic: topic === undefined || topic.length === 0 ? undefined : topic }
+    await channels.put(channelId, compact(next))
+    return next.topic
+  }
+
+  /**
+   * Add and remove the members of one group channel.
+   *
+   * Every listed id must already be a colleague, so membership cannot drift out of the
+   * roster: a dismissed colleague must not keep a channel that only it could act on.
+   * Omitted lists are no-ops; the two lists may be sent together.
+   * @param channelId - the channel to edit.
+   * @param changes - `add` and/or `remove`, as session ids.
+   * @returns the channel's members after the edit, sorted.
+   */
+  const updateChannelMembers = async (channelId, { add, remove } = {}) => {
+    const record = validateChannel(channels.get(channelId))
+    if (record.kind !== GROUP_CHANNEL_KIND) {
+      throw new Error(`dsh-office: "${channelId}" is not a group channel; its members are the participants the office already knows`)
+    }
+    const roster = new Set([...colleagues.keys()])
+    const admitted = add ?? []
+    const unknown = [...admitted, ...(remove ?? [])].filter(sessionId => !roster.has(sessionId))
+    if (unknown.length > 0) {
+      throw new Error(`dsh-office: "${unknown.join('", "')}" is not a colleague of office "${name()}"`)
+    }
+    const members = new Set(record.members)
+    for (const sessionId of admitted) members.add(sessionId)
+    for (const sessionId of remove ?? []) members.delete(sessionId)
+    const next = { ...record, members: [...members].sort() }
+    await channels.put(channelId, next)
+    return next.members
+  }
+
 
   /** Record the outcome of one delivery attempt on the message that caused it. */
   const recordDelivery = async (key, colleagueName, entry) => {
@@ -1506,24 +1647,39 @@ function createOffice(ctx, domain, config, hooks) {
         deliveries: [mailboxDelivery()],
       }
     }
-    // A broadcast addresses every other colleague; a session never receives its own message.
-    const audience = mentionAll
-      ? (await listColleagues()).filter(colleague => colleague.sessionId !== sender.sessionId)
+    // A direct message needs the recipient before the channel exists; a shared channel is
+    // resolved first, because a group feed's own members are the default audience.
+    let channelId
+    let channelRecord
+    if (kind !== 'dm') {
+      channelId = normalizeName(channel)
+      channelRecord = channels.get(channelId)
+      if (channelRecord === undefined) {
+        throw new Error(`dsh-office: unknown channel "${channelId}"; it is not a channel of office "${name()}"`)
+      }
+    }
+    // A broadcast addresses every other member of the channel it is written to: the whole
+    // roster for the standing public channel — which records no members of its own — and
+    // exactly the subscribed colleagues for a group one. Either way a session never
+    // receives its own message.
+    const roster = await listColleagues()
+    const audience = mentionAll === true
+      ? (channelId === undefined || channelId === GENERAL_CHANNEL
+        ? roster
+        : roster.filter(colleague => validateChannel(channelRecord).members.includes(colleague.sessionId))
+      ).filter(colleague => colleague.sessionId !== sender.sessionId)
       : recipients
     if (kind === 'dm' && audience[0] === undefined) {
       throw new Error('dsh-office: a direct message needs exactly one recipient colleague')
     }
-    const channelId = kind === 'dm'
+    channelId = kind === 'dm'
       ? await ensureDirectChannel(
         sender.sessionId,
         audience[0].sessionId,
         `${sender.name} ↔ ${audience[0].name}`,
       )
-      : normalizeName(channel)
-    const channelRecord = channels.get(channelId)
-    if (channelRecord === undefined) {
-      throw new Error(`dsh-office: unknown channel "${channelId}"; post to "#general" or use office_dm`)
-    }
+      : channelId
+    channelRecord = channels.get(channelId)
     const seq = await allocateSequence(channelId)
     const message = {
       messageId: `${channelId}-${seq}`,
@@ -1796,10 +1952,14 @@ function createOffice(ctx, domain, config, hooks) {
     // The greeting names the tools this colleague actually holds, because the role decides them:
     // a colleague told about a tool its scope lacks would spend its first turn on it regardless.
     const described = [
-      'office_read reads #general or a direct channel',
+      'office_read reads any channel office_channels lists for you',
       'office_colleagues lists the roster with each colleague\'s role, description, and current status',
-      held.includes('post') ? 'office_post posts important information to #general for everyone' : undefined,
+      'office_channels lists the channels the office holds: #general, your direct ones, and the channels you are a member of',
+      held.includes('post') ? 'office_post writes to a channel with a channel argument; #general wakes the whole office by default' : undefined,
       held.includes('dm') ? 'office_dm sends one colleague a private message for short exchanges' : undefined,
+      held.includes('channels')
+        ? 'office_channel_create and office_channel_delete add and remove a group channel, and office_channel_members edits its membership'
+        : undefined,
       held.includes('interrupt')
         ? 'office_interrupt cancels a colleague\'s running turn, which then receives everything the office held for it as one turn'
         : undefined,
@@ -2044,6 +2204,10 @@ function createOffice(ctx, domain, config, hooks) {
     listChannels,
     visibleChannels,
     ensureChannel,
+    createChannel,
+    deleteChannel,
+    updateChannelMembers,
+    updateChannelTopic,
     readMessages,
     resolveRecipients,
     isUser,
@@ -2152,24 +2316,41 @@ function renderPostResult(value) {
 }
 
 /**
- * Resolve the channel one direct-message tool call addresses, from the caller's view.
+ * Resolve the channel one tool call addresses, from the caller's view.
  *
  * The user's mailbox is refused here rather than by each caller: it is not a direct channel
  * between two sessions, and no office tool may read it, so the refusal lives with the
- * resolution every reading tool shares.
+ * resolution every reading tool shares. A spell of `requested` may address a colleague's
+ * title — that caller's direct channel — or a channel the office holds by id, `#` or bare:
+ * the colleague wins, because a title is the older and the more personal address.
+ * @param office - the acting office.
+ * @param sender - the calling session's identity, required to name a direct channel.
+ * @param requested - the caller's `channel` spelling.
+ * @param caller - the registered tool name, prefixed onto a refusal.
+ * @param kinds - which channel kinds the caller addresses; defaults to both.
+ * @returns the resolved channel id.
  */
-async function resolveDirectChannel(office, sender, requested, caller) {
-  if (office.isUser(requested) || nameKey(requested) === nameKey(MAILBOX_CHANNEL)) {
+async function resolveKnownChannel(office, sender, requested, caller, kinds = {}) {
+  const { allowDirect = true, allowGroup = true } = kinds
+  if (office.isUser(requested) || nameKey(String(requested)) === nameKey(MAILBOX_CHANNEL)) {
     throw new Error(`${caller}: "${requested}" is the user's mailbox, which no office tool reads`)
   }
-  const other = await office.colleagueByName(requested)
-  if (other === undefined) {
-    throw new Error(`${caller}: "${requested}" is neither "#general" nor a known colleague`)
+  if (allowDirect) {
+    const other = await office.colleagueByName(requested)
+    if (other !== undefined) {
+      if (sender === undefined) {
+        throw new Error(`${caller}: addressing a direct-message channel requires an owning agent session`)
+      }
+      return directMessageChannelId(sender.sessionId, other.sessionId)
+    }
   }
-  if (sender === undefined) {
-    throw new Error(`${caller}: addressing a direct-message channel requires an owning agent session`)
+  if (allowGroup) {
+    const spelled = String(requested)
+    const id = normalizeName(spelled.startsWith('#') ? spelled.slice(1) : spelled)
+    const channel = office.listChannels().find(candidate => candidate.channelId === id)
+    if (channel !== undefined && channel.kind === GROUP_CHANNEL_KIND) return id
   }
-  return directMessageChannelId(sender.sessionId, other.sessionId)
+  throw new Error(`${caller}: "${requested}" is neither "#general", a known colleague, nor a known channel`)
 }
 
 /**
@@ -2463,7 +2644,7 @@ function createManagementTools(agent, host, tool) {
                 required: ['channelId', 'kind', 'members'],
                 properties: {
                   channelId: { type: 'string' },
-                  kind: { type: 'string', enum: ['public', 'dm', 'mailbox'] },
+                  kind: { type: 'string', enum: ['public', 'group', 'dm', 'mailbox'] },
                   topic: { type: 'string' },
                   members: { type: 'array', items: { type: 'string' } },
                 },
@@ -2783,9 +2964,10 @@ function createCompactTool(agent, tool) {
       + 'and bounded. Read the range with office_read first, then pass the sequences you covered. The summary '
       + 'takes the lowest sequence of the range and the covered messages are deleted, so anyone reading the '
       + 'channel afterwards meets the summary exactly where they stood. Compact ranges nobody will need in '
-      + 'full; a colleague that has already been woken past the range never sees the summary.',
+      + 'full; a colleague that has already been woken past the range never sees the summary. Compaction is '
+      + 'the record-keeping capability, so only the boss and the leaders hold it.',
     parameters: tool.parameters(['from', 'to', 'summary'], {
-      channel: { type: 'string', description: 'Channel to compact: "#general" (the default), or a colleague\'s session title for your DM with it.' },
+      channel: { type: 'string', description: 'Channel to compact: "#general" (the default), a channel you are a member of, or a colleague\'s session title for your DM with it.' },
       from: { type: 'integer', description: 'First message sequence number to replace, inclusive.' },
       to: { type: 'integer', description: 'Last message sequence number to replace, inclusive.' },
       summary: { type: 'string', description: 'The text that replaces the range. Say what happened and what was decided, not that a range was compacted.' },
@@ -2827,9 +3009,16 @@ function createCompactTool(agent, tool) {
       const requested = typeof args?.channel === 'string' ? args.channel.trim() : ''
       const isGeneral = requested === '' || requested === 'general' || requested === '#general'
       const sender = await office.senderOf(agent)
+      const isBoss = tool.roleIn(resolved) === 'boss'
       const channelId = isGeneral
         ? office.generalChannel
-        : await resolveDirectChannel(office, sender, requested, 'office_compact')
+        : await resolveKnownChannel(office, sender, requested, 'office_compact')
+      if (!isGeneral
+        && !office.visibleChannels(sender.sessionId, isBoss).some(channel => channel.channelId === channelId)) {
+        throw new Error(
+          'office_compact: this session is not a member of that channel; office_channels lists the channels it may tend',
+        )
+      }
       const compacted = await office.compactRange({
         channelId,
         from: args.from,
@@ -3080,6 +3269,275 @@ function createConfigureTool(tool) {
 }
 
 /**
+ * Build the channel-listing tool for one agent.
+ *
+ * Every role holds it: a colleague cannot take part in a channel it cannot find. The list is
+ * what the session is actually allowed to read — the standing public channel, its own direct
+ * channels, and the group channels its membership admits — so a refusal from `office_read`
+ * later in the session cannot surprise it. A pure query: it wakes nobody.
+ * @param agent - the agent whose scope receives the tool.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the channel-listing tool definition.
+ */
+function createChannelsTool(agent, tool) {
+  return {
+    name: 'office_channels',
+    description:
+      'List the channels this office holds that you can read: "#general", the direct channels you are a '
+      + 'party to, and every channel you are a member of — a boss reads all of them. Each channel names its '
+      + 'topic and its members, and office_read addresses one by the id reported here. Reading this never '
+      + 'wakes anybody.',
+    parameters: tool.parameters([], {}),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'channels'],
+        properties: {
+          office: { type: 'string' },
+          channels: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['channelId', 'name', 'kind', 'members'],
+              properties: {
+                channelId: { type: 'string' },
+                name: { type: 'string' },
+                kind: { type: 'string', enum: ['public', 'dm', 'group'] },
+                topic: { type: 'string' },
+                members: { type: 'array', items: { type: 'string' } },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        if (value.channels.length === 0) return tool.text(`[${value.office}] No channel is readable.`)
+        const lines = value.channels.map((channel) => {
+          const detail = [
+            channel.topic === undefined ? undefined : channel.topic,
+            channel.members.length === 0 ? undefined : `members: ${channel.members.join(', ')}`,
+          ].filter(part => part !== undefined)
+          return `- ${channel.kind === 'dm' ? channel.channelId : `#${channel.channelId}`}`
+            + `${detail.length === 0 ? '' : ` — ${detail.join('; ')}`}`
+        })
+        return tool.text(`[${value.office}] Channels:\n${lines.join('\n')}`)
+      },
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, 'office_channels')
+      const { office, name: officeName } = resolved
+      const sender = await office.senderOf(agent)
+      const isBoss = tool.roleIn(resolved) === 'boss'
+      const roster = await office.listColleagues()
+      const bySession = new Map(roster.map(colleague => [colleague.sessionId, colleague.name]))
+      return {
+        office: officeName,
+        channels: office.visibleChannels(sender.sessionId, isBoss).map(channel => compact({
+          channelId: channel.channelId,
+          name: channel.name,
+          kind: channel.kind,
+          topic: channel.topic,
+          // Members are named the way the roster addresses them, so the listed channels are
+          // directly addressable by office_read and office_post, which both take titles.
+          members: channel.members.map(sessionId => bySession.get(sessionId) ?? shortSessionId(sessionId)),
+        })),
+      }
+    },
+  }
+}
+
+/**
+ * Build the channel-management tools for one agent.
+ *
+ * They are the `channels` capability: the boss holds it because it runs the office, and a
+ * leader holds it because building and tending the office's channels is the growth of the
+ * record its role curates. A `member` may not create, remove, or edit a channel — the
+ * channels an office carries decide who is woken, so they are not a thing to scatter.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the channel-management tool definitions.
+ */
+function createChannelManagementTools(tool) {
+  const definitions = []
+
+  /** Resolve a managed channel from the caller's spelling, or name the failure. */
+  const managedChannel = (office, requested, tool2) => {
+    if (typeof requested !== 'string' || requested.trim().length === 0) {
+      throw new TypeError(`${tool2}: channel must be the channel's name, as office_channels lists it`)
+    }
+    const spelled = requested.trim()
+    const id = normalizeName(spelled.startsWith('#') ? spelled.slice(1) : spelled)
+    const channel = office.listChannels().find(candidate => candidate.channelId === id)
+    if (channel === undefined || channel.kind !== GROUP_CHANNEL_KIND) {
+      throw new Error(`${tool2}: "${requested}" is not a group channel; only channels the office created are managed`)
+    }
+    return id
+  }
+
+  /** Resolve one member spelling into a colleague of this office, refusing the user. */
+  const namedMember = async (office, name, tool2) => {
+    if (typeof name !== 'string' || name.trim().length === 0) {
+      throw new TypeError(`${tool2}: members must be an array of colleague session titles`)
+    }
+    if (office.isUser(name)) {
+      throw new Error(`${tool2}: the user reads the office in the Web panel and holds no session, so "${name}" cannot be a channel member`)
+    }
+    const colleague = await office.colleagueByName(name)
+    if (colleague === undefined) {
+      throw new Error(`${tool2}: "${name}" does not match any colleague's session title`)
+    }
+    return colleague
+  }
+
+  definitions.push({
+    name: 'office_channel_create',
+    description:
+      'Create one group channel: a shared feed whose membership decides who reads it and who is woken by a post there. '
+      + 'Give it a topic so the roster can see what it is for, and name the colleagues who start on it. The channel '
+      + 'begins empty; the members you name are addressed by their session titles.',
+    parameters: tool.parameters(['name'], {
+      name: { type: 'string', description: 'The new channel\'s name; it becomes the id the other tools address it by.' },
+      topic: { type: 'string', description: 'One sentence describing what this channel is for.' },
+      members: { type: 'array', items: { type: 'string' }, description: "Session titles of the colleagues that belong to it from the start." },
+    }),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'channelId'],
+        properties: {
+          office: { type: 'string' },
+          channelId: { type: 'string' },
+          topic: { type: 'string' },
+          members: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => tool.text(
+        `[${value.office}] Created #${value.channelId}`
+        + `${value.topic === undefined ? '' : ` — ${value.topic}`}`
+        + `${value.members.length === 0 ? '' : ` with ${value.members.join(', ')}`};`
+        + ' post to it with office_post and read it with office_read.',
+      ),
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, 'office_channel_create')
+      const { office, name: officeName } = resolved
+      tool.require(resolved, 'channels', 'office_channel_create')
+      if (typeof args?.name !== 'string' || args.name.trim().length === 0) {
+        throw new TypeError('office_channel_create: name must be a non-empty channel name')
+      }
+      const topicText = typeof args?.topic === 'string' ? args.topic.trim() : undefined
+      const topic = topicText === undefined || topicText.length === 0 ? undefined : topicText
+      const members = []
+      for (const raw of args?.members ?? []) {
+        if (typeof raw !== 'string') {
+          throw new TypeError('office_channel_create: members must be an array of colleague session titles')
+        }
+        const colleague = await namedMember(office, raw, 'office_channel_create')
+        if (colleague !== undefined && !members.some(entry => entry.sessionId === colleague.sessionId)) members.push(colleague)
+      }
+      const created = await office.createChannel({ name: args.name, topic, members: members.map(entry => entry.sessionId) })
+      return {
+        office: officeName,
+        channelId: created.channelId,
+        ...compact({ topic }),
+        members: members.map(colleague => colleague.name),
+      }
+    },
+  })
+
+  definitions.push({
+    name: 'office_channel_delete',
+    description:
+      'Delete one group channel the office created. Every message held in it goes with it — including what the office '
+      + 'still owed its members — so a channel nobody reads any more is the thing to delete. "#general", the mailbox, and '
+      + 'the direct channels are standing or private and cannot be deleted here.',
+    parameters: tool.parameters(['channel'], {
+      channel: { type: 'string', description: 'The channel\'s name, as office_channels reports it.' },
+    }),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'channelId'],
+        properties: {
+          office: { type: 'string' },
+          channelId: { type: 'string' },
+        },
+      },
+      render: (_args, value) => tool.text(
+        `[${value.office}] Deleted #${value.channelId}; its messages went with it.`,
+      ),
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, 'office_channel_delete')
+      const { office, name: officeName } = resolved
+      tool.require(resolved, 'channels', 'office_channel_delete')
+      const channelId = managedChannel(office, args?.channel, 'office_channel_delete')
+      await office.deleteChannel(channelId)
+      return { office: officeName, channelId }
+    },
+  })
+
+  definitions.push({
+    name: 'office_channel_members',
+    description:
+      'Edit the membership of one group channel. The members decide who reads it and who a post there wakes: add '
+      + 'colleagues to admit them, remove them to shut the door, or pass neither to read the current members back.',
+    parameters: tool.parameters(['channel'], {
+      channel: { type: 'string', description: 'The channel\'s name, as office_channels reports it.' },
+      add: { type: 'array', items: { type: 'string' }, description: "Session titles of colleagues to admit." },
+      remove: { type: 'array', items: { type: 'string' }, description: "Session titles of colleagues to remove." },
+    }),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'channelId', 'members'],
+        properties: {
+          office: { type: 'string' },
+          channelId: { type: 'string' },
+          members: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => tool.text(
+        `[${value.office}] #${value.channelId} members:`
+        + `${value.members.length === 0 ? ' none' : `\n${value.members.map(name => `- ${name}`).join('\n')}`}`,
+      ),
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, 'office_channel_members')
+      const { office, name: officeName } = resolved
+      tool.require(resolved, 'channels', 'office_channel_members')
+      const channelId = managedChannel(office, args?.channel, 'office_channel_members')
+      const changes = {}
+      for (const list of ['add', 'remove']) {
+        const raw = args?.[list]
+        if (raw === undefined) continue
+        if (!Array.isArray(raw)) throw new TypeError(`office_channel_members: ${list} must be an array of colleague session titles`)
+        const ids = []
+        for (const name of raw) {
+          const colleague = await namedMember(office, name, 'office_channel_members')
+          if (!ids.some(sessionId => sessionId === colleague.sessionId)) ids.push(colleague.sessionId)
+        }
+        changes[list] = ids
+      }
+      const roster = await office.listColleagues()
+      const bySession = new Map(roster.map(colleague => [colleague.sessionId, colleague.name]))
+      const members = await office.updateChannelMembers(channelId, changes)
+      return {
+        office: officeName,
+        channelId,
+        members: members.map(sessionId => bySession.get(sessionId) ?? shortSessionId(sessionId)),
+      }
+    },
+  })
+
+  return definitions
+}
+
+/**
  * Build the channel-read tool for one agent.
  *
  * It is installed for both roles: a colleague reads to take part, and a boss reads to
@@ -3161,15 +3619,16 @@ function createReadTool(agent, tool, config) {
   return {
     name,
     description:
-      'Read office channel history, oldest first. Use "#general" for the public channel, a colleague\'s session '
-      + 'title for the direct-message channel with that colleague, or "*" for every channel you can read. Narrow '
-      + 'it with from/to over message sequence numbers, with sender, with contains over the body, with mentions, '
-      + 'or with since/until over time. A wake carries only what was addressed to you, so this is how '
-      + 'you see anything the office did not notify you about.',
+      'Read office channel history, oldest first. Address a channel by "#general", by a channel name the '
+      + 'office_channels listing reports, by a colleague\'s session title for your direct-message channel with '
+      + 'that colleague, or by "*" for every channel you can read. Narrow it with from/to over message sequence '
+      + 'numbers, with sender, with contains over the body, with mentions, or with since/until over time. A wake '
+      + 'carries only what was addressed to you, so this is how you reach anything the office did not notify '
+      + 'you about.',
     parameters: tool.parameters(['channel'], {
       channel: {
         type: 'string',
-        description: 'Channel to read: "#general", a colleague\'s session title for a DM, or "*" for every channel you can read.',
+        description: 'Channel to read: "#general", a channel name, a colleague\'s session title for a DM, or "*" for every channel you can read.',
       },
       from: { type: 'integer', description: 'First message sequence number to include, inclusive.' },
       to: { type: 'integer', description: 'Last message sequence number to include, inclusive.' },
@@ -3241,7 +3700,8 @@ function createReadTool(agent, tool, config) {
       },
     },
     async execute(args) {
-      const { office, name: officeName, config: officeConfig } = tool.entry(args, name)
+      const resolved = tool.entry(args, name)
+      const { office, name: officeName, config: officeConfig } = resolved
       const limit = args?.limit === undefined ? config.readLimit : args.limit
       if (!Number.isSafeInteger(limit) || limit <= 0 || limit > config.readLimitMax) {
         throw new TypeError(`${name}: limit must be a positive integer no greater than ${String(config.readLimitMax)}`)
@@ -3260,16 +3720,29 @@ function createReadTool(agent, tool, config) {
         // omits it must be described as the omission it is, not as an unknown channel named
         // "undefined".
         throw new TypeError(
-          `${name}: channel is required — pass "#general", a colleague's session title for a direct `
-          + 'channel, or "*" for every channel you can read',
+          `${name}: channel is required — pass "#general", a channel name, a colleague's session title for a `
+          + 'direct channel, or "*" for every channel you can read',
         )
       }
       const everyChannel = requested === '*' || requested === 'all'
       const isGeneral = requested === 'general' || requested === '#general'
       const sender = await office.senderOf(agent)
+      const isBoss = tool.roleIn(resolved) === 'boss'
       const channelIds = everyChannel
-        ? office.visibleChannels(sender.sessionId).map(channel => channel.channelId)
-        : [isGeneral ? office.generalChannel : await resolveDirectChannel(office, sender, requested, name)]
+        ? office.visibleChannels(sender.sessionId, isBoss).map(channel => channel.channelId)
+        : [isGeneral
+          ? office.generalChannel
+          : await resolveKnownChannel(office, sender, requested, name, { allowGroup: true, allowDirect: true })]
+      if (!everyChannel) {
+        // The listing is what the session is actually allowed to read; a specific spelling of a
+        // channel it does not belong to is refused here rather than trusted to resolution.
+        const readable = office.visibleChannels(sender.sessionId, isBoss)
+        if (!readable.some(channel => channel.channelId === channelIds[0])) {
+          throw new Error(
+            `${name}: "${channelIds[0]}" is not a channel this session is a member of; office_channels lists what it may read`,
+          )
+        }
+      }
       const fromSender = await senderFilter(office, args?.sender, officeConfig.userName)
       const mentioning = await mentionsFilter(office, args?.mentions, sender)
       const matched = []
@@ -3327,13 +3800,19 @@ function createCommunicationTools(agent, tool) {
     definitions.push({
       name: 'office_post',
       description:
-        'Post to the public office channel "#general". Post important information the whole office '
-        + 'should learn from, and never to acknowledge a message, to agree with one, or to announce '
-        + 'that you are working — a public post wakes every colleague, and each of them spends a turn '
-        + 'reading it. Name the colleagues who need to read it in mentions to wake only them, or pass '
-        + 'mention_all:false to write to the record without waking anyone. Use office_dm for short or '
-        + 'private exchanges.',
-      parameters: tool.parameters(['text'], {
+        'Post to a channel of the office. Without a channel argument it is "#general", the public record: '
+        + 'a post there wakes every colleague, and each of them spends a turn reading it, so post only what '
+        + 'every colleague should learn from, and never to acknowledge a message, to agree with one, or to '
+        + 'announce that you are working. Pass a channel name to post to one you are a member of instead — '
+        + 'a group channel wakes its own members, so only those subscribed read a turn of it. Name the '
+        + 'colleagues who need to read it in mentions to wake only them, or pass mention_all:false to write '
+        + 'to the record without waking anyone. Use office_dm for short or private exchanges, and'
+        + ' office_channels for the channels you hold.',
+      parameters: tool.parameters(['channel', 'text'], {
+        channel: {
+          type: 'string',
+          description: 'The channel to write to: "#general" (the default), or a channel you are a member of.',
+        },
         text: { type: 'string', description: 'The message body.' },
         mentions: {
           type: 'array',
@@ -3355,6 +3834,20 @@ function createCommunicationTools(agent, tool) {
         tool.require(resolved, 'post', 'office_post')
         const body = requireText(args, 'office_post')
         const sender = await office.senderOf(agent)
+        // The standing public channel keeps its spellings; anything else must name a channel the
+        // caller belongs to. Direct channels are office_dm's business, not a spelling of this.
+        const requested = typeof args?.channel === 'string' && args.channel.trim().length > 0
+          ? args.channel.trim()
+          : GENERAL_CHANNEL
+        const isGeneral = requested === office.generalChannel || requested === 'general' || requested === '#general'
+        const channelId = isGeneral
+          ? office.generalChannel
+          : await resolveKnownChannel(office, sender, requested, 'office_post', { allowDirect: false })
+        const isBoss = tool.roleIn(resolved) === 'boss'
+        if (!isGeneral && !isBoss
+          && !office.visibleChannels(sender.sessionId, isBoss).some(channel => channel.channelId === channelId)) {
+          throw new Error('office_post: this session is not a member of that channel; the members decide who it holds')
+        }
         const audience = await office.resolveRecipients(args?.mentions, 'office_post')
         if (args?.mention_all !== undefined && typeof args.mention_all !== 'boolean') {
           throw new TypeError('office_post: mention_all must be a boolean')
@@ -3364,7 +3857,7 @@ function createCommunicationTools(agent, tool) {
         // posts a notice that nobody is woken for.
         const mentionAll = args?.mention_all ?? args?.mentions === undefined
         return toPostResult(await office.post({
-          channel: office.generalChannel,
+          channel: channelId,
           sender,
           text: body,
           recipients: audience.colleagues,
@@ -3449,6 +3942,8 @@ function createOfficeTools(agent, host) {
   if (acting.capabilities.includes('interrupt')) definitions.push(createInterruptTool(agent, tool))
   if (acting.capabilities.includes('configure')) definitions.push(createConfigureTool(tool))
   if (acting.capabilities.includes('compact')) definitions.push(createCompactTool(agent, tool))
+  if (acting.capabilities.includes('channels')) definitions.push(...createChannelManagementTools(tool))
+  definitions.push(createChannelsTool(agent, tool))
   definitions.push(...createCommunicationTools(agent, tool))
   definitions.push(createReadTool(agent, tool, host.config))
   definitions.push(createColleaguesTool(tool))
@@ -3724,18 +4219,25 @@ async function unadoptedSessions(ctx, office, limit) {
  * @param mounted - the mounted office entry.
  * @returns the panel snapshot.
  */
-async function officeState(ctx, mounted) {
+async function officeState(ctx, mounted, requestedChannel) {
   const { office } = mounted
   const colleagues = await office.rosterStatus()
   // The user name is a mention target like a colleague name, so the panel colors it in the same
   // pass: a body that named the user is exactly what the mailbox exists to collect.
   const names = [...colleagues.map(entry => entry.name), mounted.config.userName]
   const limit = hostConfig().readLimit
-  const general = office.readMessages(office.generalChannel, Infinity)
   const mailbox = office.readMessages(office.mailboxChannel, Infinity)
+  // The channel feed the panel is reading: the standing public one unless the request names
+  // another. A channel that no longer exists falls back to the public one — the panel
+  // converges through this fallback instead of reporting a channel it just deleted.
+  const channelId = resolvePanelChannel(office, requestedChannel)
+  const selected = office.readMessages(channelId, Infinity)
   return {
     office: mounted.name,
     officeId: mounted.id,
+    // Which channel the `messages` page is from, so a client can tell a fallback from its own
+    // choice without re-deriving the resolution.
+    channel: channelId,
     colleagues,
     // What the hire and edit dialogs offer. A role's mapped preset travels with it, so the panel
     // shows what choosing a role does to that colleague's session rather than only its name.
@@ -3753,9 +4255,13 @@ async function officeState(ctx, mounted) {
       channelId: c.channelId,
       kind: c.kind,
       topic: c.topic,
+      members: c.members,
     })),
-    messages: general.slice(-limit).map(m => panelMessage(m, names)),
-    messagesTotal: general.length,
+    // The selected channel's newest page, general when the selected channel *is* general. The
+    // two totals travel with their lists, because the panel renders the newest page and folds
+    // the rest behind one row.
+    messages: selected.slice(-limit).map(m => panelMessage(m, names)),
+    messagesTotal: selected.length,
     mailbox: mailbox.slice(-limit).map(m => panelMessage(m, names)),
     mailboxTotal: mailbox.length,
     workspaces: (ctx.get('workspaceRegistry')?.list() ?? []).map(workspace => ({
@@ -3772,6 +4278,28 @@ async function officeState(ctx, mounted) {
         name: `${group.name} / ${entry.name}`,
       }))),
   }
+}
+
+/**
+ * Resolve the channel one panel feed wants to read.
+ *
+ * The standing public channel is the default and the fallback; a name that spells no channel
+ * the office holds — including the mailbox, which the panel reads through its own field —
+ * resolves to it. A made-up name therefore costs nothing: the feed shows the public channel
+ * and the caller can see which channel it got.
+ * @param office - the acting office.
+ * @param requested - the request's `channel` parameter, or undefined.
+ * @returns the channel id to read.
+ */
+function resolvePanelChannel(office, requested) {
+  if (typeof requested !== 'string' || requested.trim().length === 0) return office.generalChannel
+  const spelled = requested.trim()
+  if (spelled === 'general' || spelled === '#general') return office.generalChannel
+  const id = normalizeName(spelled.startsWith('#') ? spelled.slice(1) : spelled)
+  const channel = office.listChannels().find(candidate => candidate.channelId === id)
+  return channel !== undefined && (channel.kind === GROUP_CHANNEL_KIND || channel.kind === 'public')
+    ? id
+    : office.generalChannel
 }
 
 /**
@@ -3858,7 +4386,11 @@ function registerHostRoutes(ctx, config) {
         const mounted = officeOr404(req, res)
         if (mounted === undefined) return undefined
         try {
-          return respondJson(res, 200, await officeState(ctx, mounted))
+          return respondJson(res, 200, await officeState(
+            ctx,
+            mounted,
+            new URL(req.url ?? '/', 'http://x').searchParams.get('channel') ?? undefined,
+          ))
         } catch (error) {
           return respondJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         }
@@ -3880,7 +4412,11 @@ function registerHostRoutes(ctx, config) {
         try {
           const query = new URL(req.url ?? '/', 'http://x').searchParams
           const wanted = query.get('channel') ?? mounted.office.generalChannel
-          const channelId = wanted === 'mailbox' ? mounted.office.mailboxChannel : mounted.office.generalChannel
+          // "mailbox" keeps its meaning; every other spelling resolves like the snapshot's own
+          // channel parameter does, so a group channel unfolds its history by the same page.
+          const channelId = wanted === 'mailbox'
+            ? mounted.office.mailboxChannel
+            : resolvePanelChannel(mounted.office, wanted)
           const beforeRaw = query.get('before')
           const before = beforeRaw === null ? undefined : Number(beforeRaw)
           if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) {
@@ -3924,8 +4460,14 @@ function registerHostRoutes(ctx, config) {
             mentionsIn(body.text, [...roster.map(entry => entry.name), mounted.config.userName]),
             'office',
           )
+          // The panel may write to any channel the office holds for reading: the standing public
+          // one unless it names another. The mailbox has its own composer concerns and the
+          // direct channels belong to office_dm, so neither resolution passes here.
           const posted = await mounted.office.post({
-            channel: mounted.office.generalChannel,
+            channel: resolvePanelChannel(
+              mounted.office,
+              typeof body.channel === 'string' ? body.channel : undefined,
+            ),
             sender: { sessionId: undefined, name: mounted.config.userName },
             text: body.text,
             recipients: audience.colleagues,
@@ -4095,6 +4637,140 @@ function registerHostRoutes(ctx, config) {
       }
       return mounted
     }
+
+    /**
+     * Resolve the channel strings a management request carries, or the status to answer with.
+     * As in `office_channel_members`, the user reads the office in the panel and holds no
+     * session, so its name is never a member spelling.
+     */
+    const memberIdsOr400 = async (office, names, field, res) => {
+      if (names === undefined) return { value: undefined }
+      if (!Array.isArray(names)) {
+        respondJson(res, 400, { error: `${field} must be an array of colleague session titles` })
+        return undefined
+      }
+      const ids = []
+      for (const name of names) {
+        if (typeof name !== 'string' || name.trim().length === 0) {
+          respondJson(res, 400, { error: `${field} must be an array of colleague session titles` })
+          return undefined
+        }
+        if (office.isUser(name)) {
+          respondJson(res, 400, {
+            error: `${field}: the user reads the office in the Web panel and holds no session, so "${name}" cannot be a channel member`,
+          })
+          return undefined
+        }
+        const colleague = await office.colleagueByName(name)
+        if (colleague === undefined) {
+          respondJson(res, 404, { error: `${field}: "${name}" does not match any colleague's session title` })
+          return undefined
+        }
+        if (!ids.includes(colleague.sessionId)) ids.push(colleague.sessionId)
+      }
+      return { value: ids }
+    }
+
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: CHANNELS_CREATE_ROUTE,
+      handler: async (req, res) => {
+        const refused = refusal(req)
+        if (refused !== undefined) return respondJson(res, refused, { error: 'not authorized' })
+        if (req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
+        const mounted = officeOr404(req, res)
+        if (mounted === undefined) return undefined
+        try {
+          const body = await readJson(req)
+          const members = await memberIdsOr400(mounted.office, body.members, 'members', res)
+          if (members === undefined) return undefined
+          const topic = typeof body.topic === 'string' ? body.topic.trim() : undefined
+          const created = await mounted.office.createChannel({
+            name: body.name,
+            topic: topic === undefined || topic.length === 0 ? undefined : topic,
+            members: members.value ?? [],
+          })
+          return respondJson(res, 200, compact({
+            channelId: created.channelId,
+            topic: created.topic,
+            members: created.members,
+          }))
+        } catch (error) {
+          return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }))
+
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: CHANNELS_DELETE_ROUTE,
+      handler: async (req, res) => {
+        const refused = refusal(req)
+        if (refused !== undefined) return respondJson(res, refused, { error: 'not authorized' })
+        if (req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
+        const mounted = officeOr404(req, res)
+        if (mounted === undefined) return undefined
+        try {
+          const body = await readJson(req)
+          const wanted = typeof body.channel === 'string' ? body.channel : undefined
+          if (wanted === undefined) {
+            return respondJson(res, 400, { error: 'channel must name the channel to delete' })
+          }
+          const channelId = resolvePanelChannel(mounted.office, wanted)
+          await mounted.office.deleteChannel(channelId)
+          return respondJson(res, 200, { channelId })
+        } catch (error) {
+          return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }))
+
+    // The route twin of `office_channel_members`: it sets a channel's topic and edits its
+    // membership, named by session title the same way the tool names them.
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: CHANNELS_CONFIGURE_ROUTE,
+      handler: async (req, res) => {
+        const refused = refusal(req)
+        if (refused !== undefined) return respondJson(res, refused, { error: 'not authorized' })
+        if (req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
+        const mounted = officeOr404(req, res)
+        if (mounted === undefined) return undefined
+        try {
+          const body = await readJson(req)
+          const wanted = typeof body.channel === 'string' ? body.channel : undefined
+          if (wanted === undefined) {
+            return respondJson(res, 400, { error: 'channel must name the channel to edit' })
+          }
+          const channelId = resolvePanelChannel(mounted.office, wanted)
+          if (channelId === mounted.office.generalChannel) {
+            return respondJson(res, 400, { error: `"${wanted}" is not a group channel; only channels the office created are edited` })
+          }
+          // Each named field is applied only when sent: a topic-only edit must not touch the
+          // membership, and member-only edits must not remove a topic the request never named.
+          if (typeof body.topic === 'string') {
+            await mounted.office.updateChannelTopic(channelId, body.topic.trim())
+          }
+          const added = await memberIdsOr400(mounted.office, body.members?.add, 'members.add', res)
+          if (added === undefined) return undefined
+          const removed = await memberIdsOr400(mounted.office, body.members?.remove, 'members.remove', res)
+          if (removed === undefined) return undefined
+          const roster = await mounted.office.listColleagues()
+          const edited = await mounted.office.updateChannelMembers(channelId, {
+            add: added.value,
+            remove: removed.value,
+          })
+          return respondJson(res, 200, {
+            channelId,
+            // Members read by the name the roster addresses them, exactly as the tool reports.
+            members: edited.map(sessionId => roster.find(entry => entry.sessionId === sessionId)?.name
+              ?? sessionId),
+          })
+        } catch (error) {
+          return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }))
 
     web.effect(() => web.webServer.register({
       kind: 'exact',

@@ -78,11 +78,11 @@ switched afterwards is invisible in it.
 
 | Field | Meaning |
 |---|---|
-| `channelId` | The record key, and the prefix of every message key in the channel. `general`, `mailbox`, or `dm-<ids>`. |
-| `kind` | `public`, `dm`, or `mailbox`. |
-| `name` | The display name: the channel id for the two standing channels, `A ↔ B` for a direct channel. |
+| `channelId` | The record key, and the prefix of every message key in the channel. `general`, `mailbox`, `dm-<ids>`, or the name a group channel was created with. |
+| `kind` | `public`, `group`, `dm`, or `mailbox`. |
+| `name` | The display name: the channel id for a `public` or `group` channel, `A ↔ B` for a direct channel. |
 | `topic` | A sentence describing the channel. |
-| `members` | The session ids of a direct channel, sorted. Empty for `general` and `mailbox`. |
+| `members` | The session ids of a direct channel, sorted; of a `group` channel, the colleagues that belong to it. Empty for `general` and `mailbox`. |
 | `createdAt`, `nextSeq` | When the channel was created, and the next sequence number to allocate. |
 
 Two channels exist on activation: `general` (`kind: 'public'`) and `mailbox`
@@ -92,6 +92,12 @@ from their titles, so renaming a colleague cannot split one conversation across 
 The **mailbox** kind exists beside `public` and `dm` so that the one channel every colleague is
 refused is identifiable by kind rather than by name: `visibleChannels` filters on it, which is
 what keeps `office_read({ channel: '*' })` out of the user's mail.
+
+A **group** channel is one the boss or a leader created: it is a shared feed whose `members`
+decide who reads it and who a post there wakes, exactly as they do for a `dm` — a session sees a
+group channel only as one of its members, or as a boss that runs the office. Creating one refuses
+the two standing ids and the `dm-` idspace, so no created channel can shadow the office's own
+feeds or a direct channel.
 
 ### `messages`
 

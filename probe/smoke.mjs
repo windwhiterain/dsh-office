@@ -833,6 +833,10 @@ await check('no office tool is ever registered globally', () => {
 await check('the boss holds the office complete tool set, the colleague only its role', () => {
   assert.deepEqual(toolNames(boss), [
     'office_adopt',
+    'office_channel_create',
+    'office_channel_delete',
+    'office_channel_members',
+    'office_channels',
     'office_colleagues',
     'office_compact',
     'office_configure',
@@ -865,8 +869,8 @@ await check('adopting a live session installs the tools its role holds', async (
   titles.set('session-bob', 'bob')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-alice', role: 'member' })
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-bob' })
-  assert.deepEqual(toolNames(alice), ['office_colleagues', 'office_dm', 'office_post', 'office_read'])
-  assert.deepEqual(toolNames(bob), ['office_colleagues', 'office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(alice), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(bob), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
   assert.deepEqual(toolNames(outsider), [], 'adoption does not spread to other sessions')
   const roster = await callBoss(boss, 'office', 'office_roster', {})
   assert.deepEqual(roster.colleagues.map(entry => entry.name).sort(), ['Alice Smith', 'bob'])
@@ -1256,7 +1260,9 @@ await check('office_hire creates a session, titles it, adopts it, and arms it', 
   assert.equal(titles.get('session-hired-1'), 'New Hire', 'the colleague name IS the session title')
   assert.deepEqual(
     toolNames(liveAgents.get('session-hired-1')),
-    ['office_colleagues', 'office_compact', 'office_configure', 'office_dm', 'office_interrupt', 'office_post', 'office_read'],
+    ['office_channel_create', 'office_channel_delete', 'office_channel_members', 'office_channels',
+      'office_colleagues', 'office_compact', 'office_configure', 'office_dm', 'office_interrupt',
+      'office_post', 'office_read'],
     'the new colleague is armed with exactly the tools its role holds, in the same activation',
   )
   await assert.rejects(
@@ -1280,7 +1286,7 @@ await check('hiring greets the new colleague privately, and that greeting makes 
   assert.match(text, /^\[office office \| you were hired\]/, 'it is framed as an onboarding note, not as a channel post')
   assert.match(text, /You are "Greeted", a colleague of the office "office"/, 'the greeting states who it is')
   assert.match(text, /Your role: member\./)
-  assert.match(text, /office_post posts important information to #general/, 'and what it can do')
+  assert.match(text, /office_post writes to a channel with a channel argument/, 'and what it can do')
   assert.match(text, /nothing here was posted to a channel/)
   assert.equal(greeted.sent[0].message.source.channelId, 'office-onboarding')
   const feed = await callBoss(boss, 'office', 'office_read', { channel: '#general' })
@@ -1424,7 +1430,7 @@ await check('the panel can hire, and can post without waking anyone', async () =
   assert.equal(hires.at(-1).agentPreset, 'standard')
   assert.deepEqual(
     toolNames(liveAgents.get(hired.payload.colleague.sessionId)),
-    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
   )
 
   const quiet = await callRoute(routes, officeRoute('post', 'office'), {
@@ -1514,7 +1520,7 @@ await check('a disposed agent loses its office tools', async () => {
   const temp = harness.publish('session-temp')
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
-  assert.equal(temp.tools.size, 4)
+  assert.equal(temp.tools.size, 5)
   harness.dispose(temp)
   assert.equal(temp.tools.size, 0, 'the scoped registrations unwind with the agent')
 })
@@ -1523,7 +1529,7 @@ await check('office_dismiss removes a colleague and withdraws its channel tools'
   const temp = harness.publish('session-temp')
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
-  assert.equal(temp.tools.size, 4, 'adoption arms the session')
+  assert.equal(temp.tools.size, 5, 'adoption arms the session')
   const dismissed = await callBoss(boss, 'office', 'office_dismiss', { name: 'temp' })
   assert.deepEqual(dismissed.colleague, { name: 'temp', sessionId: 'session-temp' })
   assert.equal(temp.tools.size, 0, 'the channel tools withdraw from the live session')
@@ -1557,7 +1563,7 @@ await check('officeName makes a fully independent office behind one shared tool 
   await callBoss(studioBoss, 'studio', 'office_adopt', { session_id: 'session-member' })
   assert.deepEqual(
     toolNames(member),
-    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
   )
   const roster = await callBoss(studioBoss, 'studio', 'office_roster', {})
   assert.deepEqual(roster.channels.map(entry => entry.channelId), ['general', 'mailbox'], 'the office seeds the public channel and the user mailbox')
@@ -2370,8 +2376,12 @@ await check('each predefined role holds exactly the office tools it is defined w
       description: `the office ${role}`,
     })
   }
-  assert.deepEqual(toolNames(sessions.member), ['office_colleagues', 'office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(sessions.member), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
   assert.deepEqual(toolNames(sessions.leader), [
+    'office_channel_create',
+    'office_channel_delete',
+    'office_channel_members',
+    'office_channels',
     'office_colleagues',
     'office_compact',
     'office_configure',
@@ -2382,7 +2392,7 @@ await check('each predefined role holds exactly the office tools it is defined w
   ])
   assert.deepEqual(
     toolNames(sessions.consultant),
-    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
     'a consultant speaks like a member and carries no leader-only tool',
   )
   const roster = await callBoss(chief, 'roles', 'office_roster', {})
@@ -2414,7 +2424,7 @@ await check('changing a role moves the live session to the tool set the new role
   })
   assert.deepEqual(
     toolNames(dana),
-    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
     'a demotion withdraws the leader-only tools rather than leaving them to refuse at call time',
   )
   assert.equal(demoted.colleague.description, 'reads the record and writes no files')
@@ -2454,7 +2464,7 @@ await check('a stored role that is no longer predefined reads as the default mem
     Number.isSafeInteger(stored.adoptedAt),
     'the next write rewrites the label, so storage stops carrying a role nobody can resolve',
   )
-  assert.deepEqual(toolNames(old), ['office_colleagues', 'office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(old), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
 })
 
 await check('office_colleagues reports the roster with each colleague live status', async () => {
@@ -2683,8 +2693,8 @@ await check('a consultant speaks into the office while its session runs read-onl
   const greeted = quiet.liveAgents.get(greeting.colleague.sessionId)
   const text = greeted.sent[0].message.content[0].text
   assert.match(text, /Your role: consultant\./)
-  assert.match(text, /office_post posts important information to #general/, 'the greeting lists the tools the role actually holds')
-  assert.match(text, /You hold 4 tools/)
+  assert.match(text, /office_post writes to a channel with a channel argument/, 'the greeting lists the tools the role actually holds')
+  assert.match(text, /You hold 5 tools/)
   assert.ok(!text.includes('You hold no tool that writes into the office'), 'a consultant holds the messaging tools')
 })
 
@@ -2718,7 +2728,7 @@ await check('the panel snapshot offers the roles, and the configure route edits 
   assert.equal(configured.payload.colleague.permission, 'read-only')
   assert.deepEqual(
     toolNames(pia),
-    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
     'the panel edit reaches the live session exactly as the tool does',
   )
   assert.ok(pia.tools.has('office_post'), 'and a consultant the panel created holds the messaging tools')
@@ -2791,7 +2801,7 @@ await check('the panel adopts an existing session as a colleague', async () => {
   }, 'the colleague is named by the adopted session title, like every colleague')
   assert.deepEqual(
     toolNames(sam),
-    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
     'adoption from the panel arms the live session exactly as the tool does',
   )
   const after = (await callRoute(routes, officeRoute('state', 'guiadopt'))).payload
@@ -2958,6 +2968,191 @@ await check('the reported model is the session selection, not the route the agen
     listed.every(entry => entry.provider !== 'probe-provider'),
     'and the route the agent was built with is never mistaken for the session current model',
   )
+})
+
+await check('the boss and the leaders manage channels, whose members decide who reads and who wakes', async () => {
+  // A fresh office mounts into the shared harness, so the checks run on a roster of their own
+  // while the one host keeps serving the routes the panel asks for.
+  harness.ctx.fiber.entry.options.id = 'office_teams'
+  await apply(harness.ctx, { officeName: 'teams' })
+  harness.titles.set('session-teams-boss', 'chief')
+  harness.titles.set('session-lea', 'lea')
+  harness.titles.set('session-mia', 'mia')
+  const chief = harness.publish('session-teams-boss', { preset: 'office-boss' })
+  const lea = harness.publish('session-lea')
+  const mia = harness.publish('session-mia')
+  await callBoss(chief, 'teams', 'office_adopt', { session_id: 'session-lea', role: 'leader' })
+  await callBoss(chief, 'teams', 'office_adopt', { session_id: 'session-mia' })
+  assert.ok(lea.tools.has('office_channel_create'), 'a leader holds the channel-management tools')
+  assert.ok(!mia.tools.has('office_channel_create'), 'a member holds none of them')
+  await assert.rejects(
+    () => call(mia, 'office_channel_create', { office: 'teams', name: 'shadow' }),
+    /tool office_channel_create must be installed/,
+    'a member never reaches a management tool',
+  )
+
+  const created = await call(lea, 'office_channel_create', { office: 'teams', name: 'Release Log', members: ['mia'] })
+  assert.equal(created.channelId, 'release-log', 'the spelling is normalized into the id the other tools address')
+  assert.deepEqual(created.members, ['mia'])
+  for (const bad of ['general', 'mailbox', 'dm-x']) {
+    await assert.rejects(
+      () => call(lea, 'office_channel_create', { office: 'teams', name: bad }),
+      /reserved channel id/,
+      `${bad} is not an id a group channel may take`,
+    )
+  }
+  await assert.rejects(
+    () => call(lea, 'office_channel_create', { office: 'teams', name: 'release-log' }),
+    /already exists/,
+    'a second channel of one id would be unaddressable',
+  )
+  await assert.rejects(
+    () => call(lea, 'office_channel_create', { office: 'teams', name: 'empty', members: ['nobody'] }),
+    /does not match any colleague's session title/,
+    'a typo fails instead of building a channel nobody can reach',
+  )
+  assert.deepEqual(
+    (await callBoss(chief, 'teams', 'office_roster', {})).channels.map(entry => entry.channelId),
+    ['general', 'mailbox', 'release-log'],
+    'the boss sees every channel, the mailbox included',
+  )
+
+  const listed = await call(mia, 'office_channels', { office: 'teams' })
+  assert.deepEqual(
+    listed.channels.map(channel => channel.channelId).sort(),
+    ['general', 'release-log'],
+    'a member reads the channels its membership admits',
+  )
+  assert.ok(listed.channels.every(channel => channel.kind !== 'mailbox'), 'the mailbox is refused everywhere')
+  const wide = await call(lea, 'office_channels', { office: 'teams' })
+  assert.deepEqual(
+    wide.channels.filter(channel => channel.kind === 'group').map(channel => channel.channelId),
+    [],
+    'a leader reads only the channels it is a member of, like any other colleague',
+  )
+  assert.deepEqual(
+    (await callBoss(chief, 'teams', 'office_channels', {})).channels.filter(channel => channel.kind === 'group')
+      .map(channel => channel.channelId),
+    ['release-log'],
+    'the boss is privy to every channel it manages',
+  )
+
+  // The audience of a post is the channel's own members; the boss may write anywhere.
+  await callBoss(chief, 'teams', 'office_channel_create', { name: 'wakecheck', members: ['mia'] })
+  const before = [lea.sent.length, mia.sent.length]
+  const broadcast = await callBoss(chief, 'teams', 'office_post', { channel: '#wakecheck', text: 'the release notes are ready' })
+  assert.deepEqual(
+    broadcast.deliveries.map(entry => entry.colleague),
+    ['mia'],
+    'a broadcast there wakes exactly the subscribed colleagues',
+  )
+  assert.equal(broadcast.message.channelId, 'wakecheck')
+  assert.ok(mia.sent.length > before[1], 'a member is woken')
+  assert.equal(lea.sent.length, before[0], 'and nobody else is, not even the boss preset\'s other ties')
+  const frame = mia.sent.at(-1).message.content[0].text
+  assert.match(frame, /Post important information to #wakecheck so everyone can learn from it/,
+    'the answering rule names the channel the message arrived on')
+  const read = await call(mia, 'office_read', { office: 'teams', channel: '#wakecheck' })
+  assert.equal(read.messages.at(-1).text, 'the release notes are ready')
+  await assert.rejects(
+    () => call(lea, 'office_read', { office: 'teams', channel: 'wakecheck' }),
+    /not a channel this session is a member of/,
+    'a non-member is refused through any spelling it guesses',
+  )
+  await assert.rejects(
+    () => call(lea, 'office_post', { office: 'teams', channel: 'wakecheck', text: 'sneak post' }),
+    /not a member of that channel/,
+    'and cannot reach the channel through writing either',
+  )
+  const wildcard = await call(lea, 'office_read', { office: 'teams', channel: '*' })
+  assert.ok(!wildcard.messages.some(message => message.messageId.startsWith('wakecheck-')),
+    'the wildcard walks only the channels the caller can read')
+})
+
+await check('office_channel_members edits the roster, the routes mirror the tools, and deletion cleans up', async () => {
+  // Another fresh office of the shared harness keeps the deletion checks off the last one.
+  harness.ctx.fiber.entry.options.id = 'office_cleanup'
+  await apply(harness.ctx, { officeName: 'cleanup' })
+  harness.titles.set('session-cleanup-boss', 'chief')
+  harness.titles.set('session-nia', 'nia')
+  harness.titles.set('session-tim', 'tim')
+  const chief = harness.publish('session-cleanup-boss', { preset: 'office-boss' })
+  const nia = harness.publish('session-nia')
+  const tim = harness.publish('session-tim')
+  await callBoss(chief, 'cleanup', 'office_adopt', { session_id: 'session-nia' })
+  await callBoss(chief, 'cleanup', 'office_adopt', { session_id: 'session-tim' })
+
+  // Membership decides both readability and the wake list, and the tool edits it.
+  await callBoss(chief, 'cleanup', 'office_channel_create', { name: 'shortlived', members: ['nia', 'tim'] })
+  const edited = await callBoss(chief, 'cleanup', 'office_channel_members', { channel: 'shortlived', remove: ['tim'] })
+  assert.deepEqual(edited.members, ['nia'], 'a removal takes the member out of the stored record')
+  await assert.rejects(
+    () => call(tim, 'office_read', { office: 'cleanup', channel: 'shortlived' }),
+    /not a channel this session is a member of/,
+    'a removed member loses the channel, not merely a refusal',
+  )
+  await assert.rejects(
+    () => callBoss(chief, 'cleanup', 'office_channel_members', { channel: 'mailbox', add: ['nia'] }),
+    /not a group channel/,
+  )
+  await assert.rejects(
+    () => callBoss(chief, 'cleanup', 'office_channel_members', { channel: 'shortlived', add: ['user'] }),
+    /cannot be a channel member/,
+    'the user holds no session and is never a member',
+  )
+
+  // A member of the channel that is mid-turn holds the delivery; the channel must not strand it.
+  await harness.setStatus('session-nia', 'running')
+  await callBoss(chief, 'cleanup', 'office_post', { channel: 'shortlived', text: 'held while nia works' })
+  await callBoss(chief, 'cleanup', 'office_channel_delete', { channel: 'shortlived' })
+  assert.equal(
+    [...harness.tables.get('messages').keys()].filter(key => key.startsWith('shortlived#')).length,
+    0,
+    'the messages went with the channel',
+  )
+  assert.equal([...harness.tables.get('pending').keys()].length, 0, 'and nothing is held for a feed that no longer exists')
+  await harness.setStatus('session-nia', 'idle')
+  await assert.rejects(
+    () => call(nia, 'office_read', { office: 'cleanup', channel: 'shortlived' }),
+    /neither "#general", a known colleague, nor a known channel/,
+    'a deleted channel resolves to nothing',
+  )
+
+  // The panel routes are the same operations the tools run, with members named by title.
+  const created = await callRoute(routes, '/dsh-office/offices/channels/create?office=cleanup', {
+    method: 'POST',
+    body: { name: 'routed', topic: 'born from the panel' },
+  })
+  assert.equal(created.status, 200)
+  assert.equal(created.payload.channelId, 'routed')
+  const state = await callRoute(routes, '/dsh-office/offices/state?office=cleanup&channel=routed')
+  assert.equal(state.payload.channel, 'routed', 'the snapshot serves the channel the feed asked for')
+  assert.deepEqual(state.payload.messages, [], 'a channel opens empty')
+  await callRoute(routes, officeRoute('post', 'cleanup'), {
+    method: 'POST',
+    body: { text: 'panel post into a channel', channel: 'routed' },
+  })
+  const history = await callRoute(routes, '/dsh-office/offices/history?office=cleanup&channel=routed&before=99&limit=50')
+  assert.equal(history.payload.total, 1, 'the history pages a group channel by its own sequence')
+
+  const configuration = await callRoute(routes, '/dsh-office/offices/channels/configure?office=cleanup', {
+    method: 'POST',
+    body: { channel: 'routed', topic: 'edited topic', members: { add: ['tim'] } },
+  })
+  assert.equal(configuration.status, 200, `configure refused: ${JSON.stringify(configuration.payload)}`)
+  assert.deepEqual(configuration.payload.members, ['tim'])
+  assert.deepEqual(
+    (await call(tim, 'office_read', { office: 'cleanup', channel: 'routed' })).messages.at(-1).text,
+    'panel post into a channel',
+    'a member added through the panel reads the channel like any member',
+  )
+  const deleted = await callRoute(routes, '/dsh-office/offices/channels/delete?office=cleanup', {
+    method: 'POST',
+    body: { channel: 'routed' },
+  })
+  assert.equal(deleted.status, 200)
+  const afterDelete = await callRoute(routes, '/dsh-office/offices/state?office=cleanup&channel=routed')
+  assert.equal(afterDelete.payload.channel, 'general', 'the state route falls back to the public feed')
 })
 
 for (const label of checks) console.log(`  ok  ${label}`)
