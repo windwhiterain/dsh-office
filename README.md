@@ -365,7 +365,9 @@ remembered like the panel's other controls.
 - **Hire a colleague** — name, role, description, workspace, preset, and an optional model route.
 - **Adopt a session** — an existing session becomes a colleague, named by its title, with the role
   and description rows the hire and edit dialogs share. The picker lists the sessions the office
-  has not adopted, through the same listing `office_roster --include_unadopted` reports.
+  has not adopted, through the same listing `office_roster --include_unadopted` reports, grouped
+  one heading per workspace the way the sidebar shows them; an untitled session reads as
+  `session-<short id>`, the name the office would address it by.
 
 ### Folding a long history
 

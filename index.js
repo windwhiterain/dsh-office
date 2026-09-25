@@ -2377,7 +2377,7 @@ function findMountedOffice(wanted) {
  * @returns the management tool definitions.
  */
 function createManagementTools(agent, host, tool) {
-  const { config, resolveQuery } = host
+  const { config, resolveQuery, resolveRegistry } = host
   const { text } = tool
 
   return [
@@ -2480,6 +2480,15 @@ function createManagementTools(agent, host, tool) {
                   sessionId: { type: 'string' },
                   title: { type: 'string' },
                   updatedAt: { type: 'string' },
+                  workspace: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['id', 'title'],
+                    properties: {
+                      id: { type: 'string' },
+                      title: { type: 'string' },
+                    },
+                  },
                 },
               },
             },
@@ -2498,7 +2507,8 @@ function createManagementTools(agent, host, tool) {
           const extra = value.unadopted === undefined || value.unadopted.length === 0
             ? ''
             : `\n\nAdoptable sessions:\n${value.unadopted
-              .map(s => `- ${s.sessionId}${s.title === undefined ? '' : ` — ${s.title}`}`)
+              .map(s => `- ${s.workspace === undefined ? '' : `${s.workspace.title} / `}${s.sessionId}`
+                + `${s.title === undefined ? ' (no title yet)' : ` — ${s.title}`}`)
               .join('\n')}`
           return tool.text(`Office "${value.office}":\n\nColleagues:\n${roster}\n\nChannels:\n${channelList}${extra}`)
         },
@@ -2520,7 +2530,7 @@ function createManagementTools(agent, host, tool) {
             members: c.members,
           })),
         }
-        if (args?.include_unadopted === true) value.unadopted = await unadoptedSessions(resolveQuery(), office, config.readLimitMax)
+        if (args?.include_unadopted === true) value.unadopted = await unadoptedSessions(resolveQuery(), resolveRegistry(), office, config.readLimitMax)
         return value
       },
     },
@@ -3631,17 +3641,31 @@ function panelMessage(message, names) {
  * List recent sessions that are not colleagues yet.
  *
  * `sessionQuery` is mounted by the Web composition but is not part of the base guarantee, so an
- * absent service reports an empty list: adoption itself needs only a session id. One listing for
- * both the boss tool and the panel snapshot, so the two surfaces cannot offer different
- * adoptable lists.
+ * absent service reports an empty list: adoption itself needs only a session id. The workspace
+ * account is read from `workspaceRegistry`, whose entity carries the id, the title, and the
+ * header-validated session account — a session the registry holds no workspace account for
+ * carries no workspace here. One listing for both the boss tool and the panel snapshot, so the
+ * two surfaces cannot offer different adoptable lists, and one shape so both surfaces group by
+ * the same workspace.
  * @param query - the session listing service, or `undefined` when the deployment mounts none.
+ * @param registry - the workspace registry, or `undefined` when the deployment mounts none.
  * @param office - the office whose roster the listing excludes.
  * @param limit - the ceiling on one listing.
  * @returns the adoptable sessions, newest first.
  */
-async function unadoptedSessions(query, office, limit) {
+async function unadoptedSessions(query, registry, office, limit) {
   if (query === undefined) return []
   const adopted = new Set((await office.listColleagues()).map(colleague => colleague.sessionId))
+  // The workspace account is the registry's own filtered membership, so the workspace a session
+  // reports is exactly the one the Web sidebar already shows it under.
+  const workspaces = new Map()
+  for (const workspace of registry?.list() ?? []) {
+    for (const sessionId of workspace.sessionIds ?? []) {
+      if (!workspaces.has(sessionId)) {
+        workspaces.set(sessionId, { id: String(workspace.id), title: workspace.title })
+      }
+    }
+  }
   const records = await query.listSessions()
   return records
     .filter(record => !adopted.has(record.header.id))
@@ -3650,6 +3674,7 @@ async function unadoptedSessions(query, office, limit) {
       sessionId: record.header.id,
       title: typeof record.title === 'string' ? record.title : undefined,
       updatedAt: new Date(record.header.createdAt).toISOString(),
+      workspace: workspaces.get(record.header.id),
     }))
 }
 
@@ -3685,8 +3710,8 @@ async function officeState(ctx, mounted) {
       permission: mounted.config.rolePermissions[role],
     })),
     // The sessions the panel's adopt dialog offers, through the same unadopted listing the boss
-    // tool reports.
-    unadopted: await unadoptedSessions(ctx.get('sessionQuery'), office, hostConfig().readLimitMax),
+    // tool reports, with the workspace each session belongs to.
+    unadopted: await unadoptedSessions(ctx.get('sessionQuery'), ctx.get('workspaceRegistry'), office, hostConfig().readLimitMax),
     // The name `@` addresses to reach the user's mailbox, and the mailbox itself. A colleague
     // cannot read it through any tool, so this route is the only way it reaches a surface.
     user: { name: mounted.config.userName },
@@ -4201,6 +4226,7 @@ function applyHost(ctx, raw) {
   officeHost = {
     config,
     resolveQuery: () => ctx.get('sessionQuery'),
+    resolveRegistry: () => ctx.get('workspaceRegistry'),
   }
   ctx.effect(() => () => { officeHost = undefined })
 

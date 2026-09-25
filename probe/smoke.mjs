@@ -478,9 +478,18 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       }
       if (name === 'workspaceRegistry') {
         return {
+          // Workspace accounts carry the header-validated sessions the Web sidebar shows under
+          // them. The fake derives the account from the live headers' cwd, which is the same
+          // rule the real registry indexes on.
           list: () => [
-            { id: 'workspace-first', title: 'First' },
-            { id: 'workspace-own', title: 'Own' },
+            { id: 'workspace-first', title: 'First', sessionIds: [] },
+            {
+              id: 'workspace-own',
+              title: 'Own',
+              sessionIds: [...liveAgents.values()]
+                .filter(agent => agent.session.header.cwd === '/work/mine')
+                .map(agent => agent.session.header.id),
+            },
           ],
           resolveByPath: async (path) => (path === '/work/mine' ? { id: 'workspace-own', title: 'Own' } : undefined),
         }
@@ -2701,12 +2710,19 @@ await check('the panel adopts an existing session as a colleague', async () => {
   await apply(harness.ctx, { officeName: 'guiadopt' })
 
   titles.set('session-sam', 'sam')
-  const sam = harness.publish('session-sam')
+  const sam = harness.publish('session-sam', { cwd: '/work/mine' })
 
   const state = await callRoute(routes, officeRoute('state', 'guiadopt'))
+  const adoptable = state.payload.unadopted.find(entry => entry.sessionId === 'session-sam')
+  assert.deepEqual(
+    adoptable?.workspace,
+    { id: 'workspace-own', title: 'Own' },
+    'the picker travels the workspace the session is accounted under',
+  )
+  assert.ok(adoptable !== undefined, 'the snapshot lists the sessions nobody has adopted')
   assert.ok(
-    state.payload.unadopted.some(entry => entry.sessionId === 'session-sam' && entry.title === 'sam'),
-    'the snapshot lists the sessions nobody has adopted, the list office_roster reports',
+    state.payload.unadopted.some(entry => entry.workspace === undefined && entry.sessionId !== 'session-sam'),
+    'a session the registry holds no account for carries no workspace, for the unfiled group',
   )
 
   const refused = await callRoute(routes, officeRoute('adopt', 'guiadopt'), {

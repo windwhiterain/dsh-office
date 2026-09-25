@@ -99,6 +99,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * How an untitled session reads in a picker.
+     *
+     * The office itself names an unnamed sender `session-` plus the id's first eight characters
+     * (see `shortSessionId` in `index.js`), so a picker entry without a title reads the same way
+     * it will read as a colleague.
+     * @param sessionId - raw session id.
+     * @returns the short display form.
+     */
+    function sessionShortId(sessionId) {
+      const prefix = 'session-'
+      const bare = sessionId.startsWith(prefix) ? sessionId.slice(prefix.length) : sessionId
+      return `session-${bare.slice(0, 8)}`
+    }
+
+    /**
      * The role and description fields the hire and edit dialogs share.
      *
      * One declaration for both, so the two surfaces cannot drift: they post to different routes
@@ -1127,6 +1142,18 @@ window.__ModuleLoader__.load({
       const roles = snapshot?.roles ?? FALLBACK_ROLES
       const unadopted = snapshot?.unadopted ?? []
 
+      // The workspace is the level a reader scans first, the session title is the entry it names
+      // there: one group per workspace, in the order the listing reports, and every session the
+      // registry holds no workspace account for groups under one unfiled heading instead of
+      // reading as a bare id.
+      const groups = []
+      for (const entry of unadopted) {
+        const key = entry.workspace === undefined ? '' : entry.workspace.id
+        const group = groups.find(candidate => candidate.key === key)
+        if (group === undefined) groups.push({ key, workspace: entry.workspace, entries: [entry] })
+        else group.entries.push(entry)
+      }
+
       const adopt = async () => {
         if (sessionId === '' || busy) return
         setBusy(true)
@@ -1174,10 +1201,14 @@ window.__ModuleLoader__.load({
         onChange: event => setSessionId(event.target.value),
       },
       h('option', { value: '' }, 'Pick a session'),
-      unadopted.map(entry => h('option', {
+      groups.map(group => h('optgroup', {
+        key: group.key,
+        label: group.workspace === undefined ? 'Unfiled sessions' : group.workspace.title,
+      },
+      group.entries.map(entry => h('option', {
         key: entry.sessionId,
         value: entry.sessionId,
-      }, entry.title === undefined ? entry.sessionId : `${entry.title} (${entry.sessionId})`))),
+      }, entry.title ?? sessionShortId(entry.sessionId)))))),
       colleagueFields({ roles, role, onRole: setRole, description, onDescription: setDescription, onEnter: enter }),
       failure === undefined ? null : h('p', { style: dialogFailure }, failure))
     }
