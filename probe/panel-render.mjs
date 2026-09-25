@@ -181,11 +181,19 @@ const clickOn = (label) => {
   button.click()
   return button
 }
+/** Both side columns draw the same glyph, so their close buttons are found by their own name. */
+const closeButton = (label) => {
+  const button = document.querySelector(`button[aria-label="${label}"]`)
+  assert.ok(button, `a close button named "${label}" must be rendered; body was: ${text()}`)
+  return button
+}
 
 // The body is two collapsible side columns around the channel: roster open, mailbox closed.
+// The office list and the office snapshot arrive from two requests, so wait on the snapshot's own
+// content rather than on the shell that the first of them draws.
 assert.ok(
-  await until(() => document.getElementById('dsh-office-colleagues') !== null),
-  `the panel must draw the office it mounted; body was: ${text()}`,
+  await until(() => text().includes('runs the standup')),
+  `the panel must draw the mounted office and its snapshot; body was: ${text()}`,
 )
 assert.match(text(), /nia/, 'the rail lists the colleague')
 assert.match(text(), /leader · idle · read-only · 2 held/, 'the rail reports role, status, permission, and held mail')
@@ -209,6 +217,14 @@ clickOn('Colleagues')
 await settle()
 assert.match(text(), /runs the standup/, 'and reopens it')
 
+// Each closable column carries the same close control in its own head, beside its name.
+closeButton('Close the roster').click()
+await settle()
+assert.equal(document.getElementById('dsh-office-colleagues'), null, 'the roster close button collapses it')
+clickOn('Colleagues')
+await settle()
+assert.ok(document.getElementById('dsh-office-colleagues'), 'and the header toggle brings it back')
+
 // Opening the mailbox gives it a column of its own rather than another band of the channel.
 clickOn('Mailbox')
 await settle()
@@ -231,8 +247,8 @@ assert.ok(
   'a mention in the mail carries the reference color',
 )
 
-// The sidebar's own close button collapses it again.
-clickOn('✕')
+// The mailbox's own close button collapses it again, the control the roster also carries.
+closeButton('Close the mailbox').click()
 await settle()
 assert.equal(document.getElementById('dsh-office-mailbox'), null, 'the close button collapses the mailbox')
 

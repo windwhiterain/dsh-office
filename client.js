@@ -340,14 +340,17 @@ window.__ModuleLoader__.load({
      */
     const foldedRow = { display: 'flex', justifyContent: 'center' }
     /**
-     * One channel's name, at the top of the column that holds it.
+     * One column's name, at the top of the column that holds it.
      *
-     * The public channel and the mailbox are two columns of the same body and both draw the same
-     * message bubbles, so each is named where it starts: without a name the two feeds are told
-     * apart only by which side of the panel they are on.
+     * Every column of the body draws the same message bubbles, so each is named where it starts:
+     * without a name two feeds are told apart only by which side of the panel they are on. The
+     * head is a row, so a column that can be closed carries its close button at the far end.
      */
-    const channelHead = {
+    const columnHead = {
       flex: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
       padding: '10px 20px',
       borderBottom: '1px solid var(--dsw-alias-border-l1)',
       fontSize: '12px',
@@ -369,8 +372,12 @@ window.__ModuleLoader__.load({
       borderLeft: '1px solid var(--dsw-alias-border-l1)',
       background: 'var(--dsw-alias-bg-layer-1)',
     }
-    const mailboxHead = { ...channelHead, color: 'var(--dsw-alias-label-primary)' }
-    const mailboxTitle = { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+    /**
+     * A closable side column's head: its own name, and the button that closes it. The count is
+     * not repeated here — it is what the column's header toggle carries.
+     */
+    const sideHead = { ...columnHead, color: 'var(--dsw-alias-label-primary)' }
+    const columnTitle = { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
     /** The sidebar's own scrollport, which no other feed shares. */
     const mailboxFeed = {
       flex: 1,
@@ -381,7 +388,7 @@ window.__ModuleLoader__.load({
       flexDirection: 'column',
       gap: '12px',
     }
-    const mailboxClose = {
+    const columnClose = {
       flex: 'none',
       padding: '2px 8px',
       borderRadius: '6px',
@@ -1370,7 +1377,10 @@ window.__ModuleLoader__.load({
      * and the choices are meant to outlive a switch between offices.
      */
     function OfficeView(props) {
-      const { officeName, snapshot, error, refresh, onEdit, railShown, mailboxShown, onToggleMailbox } = props
+      const {
+        officeName, snapshot, error, refresh, onEdit, railShown, mailboxShown,
+        onToggleRail, onToggleMailbox,
+      } = props
       const [postError, setPostError] = useState(undefined)
       const [pendingDismiss, setPendingDismiss] = useState(undefined)
       const feedRef = useRef(null)
@@ -1536,7 +1546,16 @@ window.__ModuleLoader__.load({
         h('div', { style: body },
           railShown
             ? h('div', { id: RAIL_PANEL_ID, style: rail },
-              h('div', { style: channelHead }, 'Colleagues'),
+              h('div', { style: sideHead },
+                h('span', { style: columnTitle }, 'Colleagues'),
+                h('button', {
+                  type: 'button',
+                  style: columnClose,
+                  title: 'Close the roster',
+                  'aria-label': 'Close the roster',
+                  onClick: onToggleRail,
+                }, '✕'),
+              ),
               h('div', { style: railBody },
                 colleagues.length === 0
                   ? h('p', { style: muted }, 'None yet. Use “Hire a colleague” above.')
@@ -1570,7 +1589,7 @@ window.__ModuleLoader__.load({
             )
             : null,
           h('div', { style: channel },
-            h('div', { style: channelHead }, '#general'),
+            h('div', { style: columnHead }, '#general'),
             h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll, 'data-channel': 'general' },
               h(FoldedRow, { folded: general.folded, onUnfold: () => { void general.load() } }),
               messages.length === 0
@@ -1584,13 +1603,14 @@ window.__ModuleLoader__.load({
           ),
           mailboxShown
             ? h('div', { id: MAILBOX_PANEL_ID, style: mailboxSide },
-              h('div', { style: mailboxHead },
-                h('span', { style: mailboxTitle },
+              h('div', { style: sideHead },
+                h('span', { style: columnTitle },
                   userName === undefined ? 'Mailbox' : `Mailbox · @${userName}`),
                 h('button', {
                   type: 'button',
-                  style: mailboxClose,
+                  style: columnClose,
                   title: 'Close the mailbox',
+                  'aria-label': 'Close the mailbox',
                   onClick: onToggleMailbox,
                 }, '✕'),
               ),
@@ -1706,6 +1726,7 @@ window.__ModuleLoader__.load({
             onEdit: setEditing,
             railShown,
             mailboxShown,
+            onToggleRail: () => { setRailShown(false) },
             onToggleMailbox: () => { setMailboxShown(false) },
           }),
         offices.length === 0

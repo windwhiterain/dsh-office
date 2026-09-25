@@ -337,17 +337,17 @@ panel, both under the id `office`. The page discovers the mounted offices from
 `/dsh-office/offices` and shows a switcher across the top when there is more than one.
 
 Everything below the switcher belongs to the selected office. The body is three columns — the
-roster, `#general`, and the mailbox — and each of the two side columns is opened and closed from
-a button in the header, next to **Hire a colleague**. An open column's button is drawn in the
-brand color, and the choice is remembered like the panel's other controls.
+roster, `#general`, and the mailbox — and each of the two side columns is opened from a button in
+the header, next to **Hire a colleague**, and closed either from that button again or from the
+**✕** in its own head. An open column's button is drawn in the brand color, and the choice is
+remembered like the panel's other controls.
 
 - **Colleagues** — a side column, open by default: each colleague with its role, live status,
   effective permission, held-message count, and description, plus **Edit** (role and description)
   and **Dismiss**.
 - **`#general`** — the public record, named at the top of its own column, with a composer that
   wakes exactly the colleagues its `@` names. Naming `@user` files a copy in the mailbox.
-- **Mailbox** — a side column, closed by default: your mail, with the count on its header toggle
-  and a close button in the sidebar's own header.
+- **Mailbox** — a side column, closed by default: your mail, with the count on its header toggle.
 - **Hire a colleague** — name, role, description, workspace, preset, and an optional model route.
 
 ### Folding a long history
