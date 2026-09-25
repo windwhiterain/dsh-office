@@ -467,6 +467,13 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
               ? undefined
               : { title, source: { kind: 'user' }, messageSeqs: [], eventSeq: 0, updatedAt: 0 }
           },
+          // The recent-session listing the unadopted report reads. A session that was never
+          // published or was disposed keeps its record, because a session can be adopted
+          // without being live.
+          listSessions: async () => [...liveAgents.values()].map(agent => ({
+            header: { id: agent.session.header.id, createdAt: 0 },
+            title: titles.get(agent.session.header.id) ?? undefined,
+          })),
         }
       }
       if (name === 'workspaceRegistry') {
@@ -2685,6 +2692,50 @@ await check('the panel snapshot offers the roles, and the configure route edits 
   })
   assert.equal(nothing.status, 400)
   assert.match(nothing.payload.error, /pass role, description, or both/)
+})
+
+await check('the panel adopts an existing session as a colleague', async () => {
+  // A second office mounts into the shared process, so the adopt route, the snapshot listing,
+  // and the tool resync all run on the one context the harness already carries.
+  harness.ctx.fiber.entry.options.id = 'office_guiadopt'
+  await apply(harness.ctx, { officeName: 'guiadopt' })
+
+  titles.set('session-sam', 'sam')
+  const sam = harness.publish('session-sam')
+
+  const state = await callRoute(routes, officeRoute('state', 'guiadopt'))
+  assert.ok(
+    state.payload.unadopted.some(entry => entry.sessionId === 'session-sam' && entry.title === 'sam'),
+    'the snapshot lists the sessions nobody has adopted, the list office_roster reports',
+  )
+
+  const refused = await callRoute(routes, officeRoute('adopt', 'guiadopt'), {
+    method: 'POST',
+    body: {},
+  })
+  assert.equal(refused.status, 400, 'an adopt without a session id is a refusal, not a guess')
+
+  const adopted = await callRoute(routes, officeRoute('adopt', 'guiadopt'), {
+    method: 'POST',
+    body: { session_id: 'session-sam' },
+  })
+  assert.equal(adopted.status, 200, `adopt refused: ${JSON.stringify(adopted.payload)}`)
+  assert.deepEqual(adopted.payload.colleague, {
+    name: 'sam',
+    sessionId: 'session-sam',
+    role: 'member',
+  }, 'the colleague is named by the adopted session title, like every colleague')
+  assert.deepEqual(
+    toolNames(sam),
+    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    'adoption from the panel arms the live session exactly as the tool does',
+  )
+  const after = (await callRoute(routes, officeRoute('state', 'guiadopt'))).payload
+  assert.ok(after.colleagues.some(entry => entry.name === 'sam'), 'and the roster carries the adopted session')
+  assert.ok(
+    !after.unadopted.some(entry => entry.sessionId === 'session-sam'),
+    'an adopted session stops being offered',
+  )
 })
 
 await check('a message addressed to the user lands in the user mailbox', async () => {

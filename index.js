@@ -2380,28 +2380,6 @@ function createManagementTools(agent, host, tool) {
   const { config, resolveQuery } = host
   const { text } = tool
 
-  /**
-   * List recent sessions that are not colleagues yet. `sessionQuery` is mounted by the Web
-   * composition but is not part of the base guarantee, so an absent service reports an
-   * empty list: adoption itself needs only a session id.
-   * @param office - the office whose roster the listing excludes.
-   * @returns the adoptable sessions, newest first.
-   */
-  const findUnadopted = async (office) => {
-    const query = resolveQuery()
-    if (query === undefined) return []
-    const adopted = new Set((await office.listColleagues()).map(colleague => colleague.sessionId))
-    const records = await query.listSessions()
-    return records
-      .filter(record => !adopted.has(record.header.id))
-      .slice(0, config.readLimitMax)
-      .map(record => compact({
-        sessionId: record.header.id,
-        title: typeof record.title === 'string' ? record.title : undefined,
-        updatedAt: new Date(record.header.createdAt).toISOString(),
-      }))
-  }
-
   return [
     {
       name: 'office_list',
@@ -2542,7 +2520,7 @@ function createManagementTools(agent, host, tool) {
             members: c.members,
           })),
         }
-        if (args?.include_unadopted === true) value.unadopted = await findUnadopted(office)
+        if (args?.include_unadopted === true) value.unadopted = await unadoptedSessions(resolveQuery(), office, config.readLimitMax)
         return value
       },
     },
@@ -3650,6 +3628,32 @@ function panelMessage(message, names) {
 }
 
 /**
+ * List recent sessions that are not colleagues yet.
+ *
+ * `sessionQuery` is mounted by the Web composition but is not part of the base guarantee, so an
+ * absent service reports an empty list: adoption itself needs only a session id. One listing for
+ * both the boss tool and the panel snapshot, so the two surfaces cannot offer different
+ * adoptable lists.
+ * @param query - the session listing service, or `undefined` when the deployment mounts none.
+ * @param office - the office whose roster the listing excludes.
+ * @param limit - the ceiling on one listing.
+ * @returns the adoptable sessions, newest first.
+ */
+async function unadoptedSessions(query, office, limit) {
+  if (query === undefined) return []
+  const adopted = new Set((await office.listColleagues()).map(colleague => colleague.sessionId))
+  const records = await query.listSessions()
+  return records
+    .filter(record => !adopted.has(record.header.id))
+    .slice(0, limit)
+    .map(record => compact({
+      sessionId: record.header.id,
+      title: typeof record.title === 'string' ? record.title : undefined,
+      updatedAt: new Date(record.header.createdAt).toISOString(),
+    }))
+}
+
+/**
  * Snapshot one office for the panel.
  *
  * The host registers the route but the office owns the data, so the whole snapshot is derived
@@ -3680,6 +3684,9 @@ async function officeState(ctx, mounted) {
       id: role,
       permission: mounted.config.rolePermissions[role],
     })),
+    // The sessions the panel's adopt dialog offers, through the same unadopted listing the boss
+    // tool reports.
+    unadopted: await unadoptedSessions(ctx.get('sessionQuery'), office, hostConfig().readLimitMax),
     // The name `@` addresses to reach the user's mailbox, and the mailbox itself. A colleague
     // cannot read it through any tool, so this route is the only way it reaches a surface.
     user: { name: mounted.config.userName },
@@ -3909,6 +3916,44 @@ function registerHostRoutes(ctx, config) {
             agentPreset: hired.agentPreset,
             greeting: hired.greeting,
           }))
+        } catch (error) {
+          return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }))
+
+    // The panel's route twin of `office_adopt`: an existing session becomes a colleague, and the
+    // session id comes from the snapshot's unadopted listing — the same list the boss tool
+    // reports. `office.adopt` validates the role and applies the permission preset, so a role
+    // this deployment cannot enforce is refused here exactly as the tool refuses it.
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: `${OFFICES_ROUTE}/adopt`,
+      handler: async (req, res) => {
+        const refused = refusal(req)
+        if (refused !== undefined) return respondJson(res, refused, { error: 'not authorized' })
+        if (req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
+        const mounted = officeOr404(req, res)
+        if (mounted === undefined) return undefined
+        try {
+          const body = await readJson(req)
+          if (typeof body.session_id !== 'string' || body.session_id.length === 0) {
+            return respondJson(res, 400, { error: 'session_id must be a non-empty session id' })
+          }
+          const { record, permission } = await mounted.office.adopt({
+            sessionId: body.session_id,
+            role: body.role,
+            description: body.description,
+          })
+          return respondJson(res, 200, {
+            colleague: compact({
+              name: await mounted.office.nameOf(record.sessionId),
+              sessionId: record.sessionId,
+              role: canonicalRole(record.role),
+              description: record.description,
+              permission,
+            }),
+          })
         } catch (error) {
           return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
         }

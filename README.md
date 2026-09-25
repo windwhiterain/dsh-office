@@ -96,8 +96,8 @@ plugin_manager  install_bundle  target: github:windwhiterain/dsh-office
 That adds three rows: the `office-host` singleton, one office row named `office`, and the
 `office-boss` agent preset. Disable any of them with `plugin_manager set_plugin`.
 
-**2. Hire a colleague** — from the Web panel's **Office** page, or from a session running the
-`office-boss` preset:
+**2. Hire a colleague** — from the Web panel's **Office** page (which can also **adopt** an
+existing session instead), or from a session running the `office-boss` preset:
 
 ```text
 office_hire  { "name": "alice", "role": "leader", "description": "owns the release process" }
@@ -363,6 +363,9 @@ remembered like the panel's other controls.
   wakes exactly the colleagues its `@` names. Naming `@user` files a copy in the mailbox.
 - **Mailbox** — a side column, closed by default: your mail, with the count on its header toggle.
 - **Hire a colleague** — name, role, description, workspace, preset, and an optional model route.
+- **Adopt a session** — an existing session becomes a colleague, named by its title, with the role
+  and description rows the hire and edit dialogs share. The picker lists the sessions the office
+  has not adopted, through the same listing `office_roster --include_unadopted` reports.
 
 ### Folding a long history
 
@@ -433,10 +436,11 @@ including none:
 
 | Route | Purpose |
 |---|---|
-| `GET /dsh-office/offices/state?office=<name>` | Colleagues, channels, the newest public messages and the mailbox with their totals, the roles and their mapped presets, the user name, and the hire options. |
+| `GET /dsh-office/offices/state?office=<name>` | Colleagues, channels, the newest public messages and the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions, and the hire options. |
 | `GET /dsh-office/offices/history?office=<name>&channel=general\|mailbox&before=<seq>&limit=<n>` | One page of messages older than `before`, oldest first, with the channel's `total` and whether anything older remains. This is what a folded row asks for. |
 | `POST /dsh-office/offices/post?office=<name>` | `{ text, mention_all? }`; posts as `userName` and notifies the whole roster unless `mention_all` is `false`, in which case only the names the body carries are notified. `@user` files a mailbox copy. |
 | `POST /dsh-office/offices/hire?office=<name>` | `{ name, role?, description?, workspace_id?, agent_preset?, provider?, model?, reasoning_effort? }`. |
+| `POST /dsh-office/offices/adopt?office=<name>` | `{ session_id, role?, description? }` — adopt an existing session, which the panel picks from the snapshot's unadopted list. |
 | `POST /dsh-office/offices/configure?office=<name>` | `{ name, role?, description? }` — set a colleague's role and description. |
 | `POST /dsh-office/offices/dismiss?office=<name>` | `{ name }` — remove a colleague from the roster. |
 

@@ -78,7 +78,7 @@ window.__ModuleLoader__.load({
      * The office travels as a query parameter rather than as a path segment, because an office
      * name accepts any script and a path segment would have to be percent-encoded twice — once
      * when the Host registers the route and once here. `URLSearchParams` encodes for both.
-     * @param verb - `state`, `history`, `post`, `hire`, `configure`, or `dismiss`.
+     * @param verb - `state`, `history`, `post`, `hire`, `adopt`, `configure`, or `dismiss`.
      * @param officeName - the office to act on.
      * @returns the request path.
      */
@@ -970,7 +970,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One office's snapshot: colleagues, channels, newest public messages, hire options.
+     * One office's snapshot: colleagues, channels, newest public messages, hire and adopt options.
      *
      * The panel owns this, not the view, because the hire dialog needs the same snapshot and
      * two pollers would double every request.
@@ -1105,6 +1105,80 @@ window.__ModuleLoader__.load({
         },
         entry.name,
       ))),
+      failure === undefined ? null : h('p', { style: dialogFailure }, failure))
+    }
+
+    /**
+     * The adopt dialog: one existing session becomes a colleague.
+     *
+     * Hiring creates a session; adopting takes one that already exists, picked from the
+     * snapshot's unadopted listing — the same list the boss tool reports. The picker and the
+     * two roster fields are the whole form, because a workspace, a preset, and a model route
+     * belong to a session that is being created, not to one that already has its own.
+     */
+    function AdoptDialog(props) {
+      const { open, onClose, officeName, snapshot, onAdopted } = props
+      const [sessionId, setSessionId] = useState('')
+      const [role, setRole] = useState(DEFAULT_ROLE)
+      const [description, setDescription] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [failure, setFailure] = useState(undefined)
+
+      const roles = snapshot?.roles ?? FALLBACK_ROLES
+      const unadopted = snapshot?.unadopted ?? []
+
+      const adopt = async () => {
+        if (sessionId === '' || busy) return
+        setBusy(true)
+        try {
+          await submitJson(officeRoute('adopt', officeName), {
+            session_id: sessionId,
+            role,
+            ...(description.trim().length === 0 ? {} : { description: description.trim() }),
+          })
+          setSessionId('')
+          setRole(DEFAULT_ROLE)
+          setDescription('')
+          setFailure(undefined)
+          await onAdopted()
+          onClose()
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const enter = (event) => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        void adopt()
+      }
+
+      return h(Modal, {
+        open,
+        onClose,
+        title: `Adopt a session into ${officeName}`,
+        closeLabel: 'Close',
+        description: 'The session keeps its title, its history, and its workspace; the office adds it to '
+          + 'the roster under that title. Its role decides the office tools it holds and the session '
+          + 'permission it runs under.',
+        footer: h('div', { style: dialogActions },
+          h('button', { type: 'button', style: smallButton, onClick: onClose }, 'Cancel'),
+          h('button', { type: 'button', style: button, disabled: busy, onClick: () => { void adopt() } }, busy ? 'Adopting…' : 'Adopt')),
+      },
+      h('select', {
+        style: field,
+        value: sessionId,
+        'aria-label': 'Session to adopt',
+        onChange: event => setSessionId(event.target.value),
+      },
+      h('option', { value: '' }, 'Pick a session'),
+      unadopted.map(entry => h('option', {
+        key: entry.sessionId,
+        value: entry.sessionId,
+      }, entry.title === undefined ? entry.sessionId : `${entry.title} (${entry.sessionId})`))),
+      colleagueFields({ roles, role, onRole: setRole, description, onDescription: setDescription, onEnter: enter }),
       failure === undefined ? null : h('p', { style: dialogFailure }, failure))
     }
 
@@ -1707,6 +1781,11 @@ window.__ModuleLoader__.load({
                   style: smallButton,
                   onClick: () => { setDialog('hire') },
                 }, 'Hire a colleague'),
+                h('button', {
+                  type: 'button',
+                  style: smallButton,
+                  onClick: () => { setDialog('adopt') },
+                }, 'Adopt a session'),
               ),
             h('button', {
               type: 'button',
@@ -1737,6 +1816,15 @@ window.__ModuleLoader__.load({
             officeName: active,
             snapshot,
             onHired: refresh,
+          }),
+        offices.length === 0
+          ? null
+          : h(AdoptDialog, {
+            open: dialog === 'adopt',
+            onClose: () => { setDialog(undefined) },
+            officeName: active,
+            snapshot,
+            onAdopted: refresh,
           }),
         offices.length === 0
           ? null
