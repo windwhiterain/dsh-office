@@ -101,6 +101,89 @@ window.__ModuleLoader__.load({
       }
     })()
 
+    /** Distance from the feed's floor, in pixels, that still counts as reading the newest message. */
+    const FEED_FOLLOW_THRESHOLD = 24
+    /** How long a reader's scrolling settles before it is sampled into follow intent. */
+    const FEED_SAMPLE_MS = 500
+
+    /**
+     * Bottom-follow intent for one channel feed.
+     *
+     * Adapted from the harness conversation's own scroll controller
+     * (`packages/client/ui-chat/src/client/chat/use-scroll-follow.ts`), which keeps the reader's
+     * intent separate from the offset for two reasons that apply here unchanged: "at the bottom"
+     * is a threshold rather than an exact equality, because a reader who stops a few pixels short
+     * still means to follow the newest message; and a programmatic jump records the position it
+     * landed on, so the scroll event it causes is not mistaken for reader movement.
+     */
+    class FeedFollow {
+      /**
+       * @param following - whether a new message should move the feed to the bottom.
+       * @param threshold - accepted distance from the floor, in pixels.
+       */
+      constructor(following, threshold) {
+        this.following = following
+        this.threshold = threshold
+        this.sampledTop = undefined
+      }
+
+      /**
+       * Read one scrollport without measuring its children.
+       * @param element - the scrolling feed.
+       * @returns its position, viewport height, and maximum top.
+       */
+      metrics(element) {
+        const height = element.clientHeight
+        return { top: element.scrollTop, height, floor: Math.max(0, element.scrollHeight - height) }
+      }
+
+      /**
+       * @param metrics - current geometry.
+       * @returns whether the position is close enough to the floor to count as following.
+       */
+      nearBottom(metrics) {
+        return metrics.floor - metrics.top <= this.threshold
+      }
+
+      /**
+       * Adopt one settled reader position as the current intent.
+       * @param metrics - geometry sampled after the reader stopped moving.
+       * @returns the intent after sampling.
+       */
+      sample(metrics) {
+        const movedByReader = this.sampledTop === undefined || Math.abs(metrics.top - this.sampledTop) > 0.5
+        this.sampledTop = metrics.top
+        if (movedByReader) this.following = this.nearBottom(metrics)
+        return this.following
+      }
+
+      /**
+       * Position the feed without that movement counting as reader intent.
+       * @param element - the scrolling feed.
+       * @param metrics - geometry before positioning.
+       * @param top - requested offset, clamped to the measured range.
+       * @returns the offset the feed landed on.
+       */
+      jump(element, metrics, top) {
+        const target = Math.max(0, Math.min(metrics.floor, top))
+        if (target !== metrics.top) element.scrollTop = target
+        this.sampledTop = element.scrollTop
+        this.following = this.nearBottom({ ...metrics, top: this.sampledTop })
+        return this.sampledTop
+      }
+
+      /**
+       * Land on the newest message and keep following it.
+       * @param element - the scrolling feed.
+       * @param metrics - current geometry.
+       * @returns the offset the feed landed on.
+       */
+      toBottom(element, metrics) {
+        this.following = true
+        return this.jump(element, metrics, metrics.floor)
+      }
+    }
+
     /**
      * `useState` for one panel field that must outlive the panel unmounting and a reload.
      * @param key - the field's name inside {@link PANEL_STATE_KEY}.
@@ -955,8 +1038,19 @@ window.__ModuleLoader__.load({
       const [postError, setPostError] = useState(undefined)
       const [pendingDismiss, setPendingDismiss] = useState(undefined)
       const feedRef = useRef(null)
-      /** Whether this mount has already put the saved scroll position back. */
+      /** This mount's follow intent, which outlives every re-render and every poll. */
+      const followRef = useRef(null)
+      /** The pending reader sample, which also marks reader input as not yet settled. */
+      const sampleTimerRef = useRef(null)
+      /** Whether this mount has already put the saved position, or the tail, back. */
       const restoredRef = useRef(false)
+      const scrollKey = `feed:${officeName}`
+      if (followRef.current === null) {
+        // A feed with no stored position has never been scrolled away from the tail, so it starts
+        // following the newest message — the same default the conversation view uses.
+        const saved = panelState.get(scrollKey, undefined)
+        followRef.current = new FeedFollow(saved === undefined || saved === null, FEED_FOLLOW_THRESHOLD)
+      }
 
       /** Two-step removal: the first click arms the button, the second performs it. */
       const removeColleague = async (name) => {
@@ -977,22 +1071,68 @@ window.__ModuleLoader__.load({
       const colleagues = snapshot?.colleagues ?? []
       const messages = snapshot?.messages ?? []
 
-      // A long channel is read scrolled down, and returning to its top is a reset nobody asked
-      // for. The position is saved when this panel goes away; it is restored on the first render
-      // that has messages, because restoring against the empty feed of a pending poll scrolls
-      // nothing and would silently drop the position.
+      /**
+       * Write what the reader is doing: following the tail, or reading at this offset.
+       *
+       * Following the tail is stored as `null` rather than as an offset, so it keeps meaning "the
+       * newest message" after the channel grows; the conversation view stores it the same way.
+       */
+      const rememberPosition = useCallback((node) => {
+        panelState.set(scrollKey, followRef.current.following ? null : node.scrollTop)
+      }, [scrollKey])
+
+      /**
+       * Read the settled position into follow intent and store it.
+       *
+       * This runs while the reader is still on the page, never when the panel goes away: React
+       * removes the feed from the document before it runs this component's cleanup, and a detached
+       * element reports `scrollTop` 0, so reading it there would store a position meaning "top".
+       */
+      const sampleFeed = useCallback(() => {
+        sampleTimerRef.current = null
+        const node = feedRef.current
+        if (node === null) return
+        followRef.current.sample(followRef.current.metrics(node))
+        rememberPosition(node)
+      }, [rememberPosition])
+
+      // One drag delivers many scroll events, and following the tail mid-drag would fight the
+      // drag. Reader input is therefore sampled once the movement has settled.
+      const onFeedScroll = useCallback(() => {
+        if (sampleTimerRef.current !== null) window.clearTimeout(sampleTimerRef.current)
+        sampleTimerRef.current = window.setTimeout(sampleFeed, FEED_SAMPLE_MS)
+      }, [sampleFeed])
+
       useEffect(() => {
+        // A browser that reports `scrollend` settles the sample immediately; one that does not
+        // falls back to the timer alone.
         const node = feedRef.current
         if (node === null) return undefined
-        return () => { panelState.set(`scroll:${officeName}`, node.scrollTop) }
-      }, [officeName])
+        node.addEventListener('scrollend', sampleFeed)
+        return () => {
+          node.removeEventListener('scrollend', sampleFeed)
+          if (sampleTimerRef.current !== null) window.clearTimeout(sampleTimerRef.current)
+        }
+      }, [sampleFeed])
+
+      // Put the saved position back once the channel has messages to scroll, then keep the newest
+      // message in view whenever the feed changes while the reader is following it.
       useEffect(() => {
         const node = feedRef.current
-        if (restoredRef.current || node === null || messages.length === 0) return
-        restoredRef.current = true
-        const saved = panelState.get(`scroll:${officeName}`, 0)
-        if (saved > 0) node.scrollTop = saved
-      }, [officeName, messages.length])
+        if (node === null || messages.length === 0) return
+        const follow = followRef.current
+        if (!restoredRef.current) {
+          restoredRef.current = true
+          const saved = panelState.get(scrollKey, undefined)
+          if (typeof saved === 'number') follow.jump(node, follow.metrics(node), saved)
+          else follow.toBottom(node, follow.metrics(node))
+          rememberPosition(node)
+          return
+        }
+        // Unsettled reader input owns the feed: a message that arrives mid-scroll must not pull it.
+        if (sampleTimerRef.current !== null) return
+        if (follow.following) follow.toBottom(node, follow.metrics(node))
+      }, [scrollKey, snapshot, messages.length, rememberPosition])
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
         error === undefined ? null : h('p', { style: notice }, `Cannot reach office "${officeName}": ${error}`),
@@ -1015,7 +1155,7 @@ window.__ModuleLoader__.load({
               )),
           ),
           h('div', { style: channel },
-            h('div', { ref: feedRef, style: feed },
+            h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll },
               messages.length === 0
                 ? h('p', { style: muted }, '#general has no messages yet.')
                 : messages.map(message => h('div', {

@@ -441,7 +441,7 @@ in one `localStorage` record under `dsh-office.panel`:
 | `office` | The office the page was showing. A name that no longer exists falls back to the first mounted office. |
 | `draft:<office>` | The composer draft, per office, so a message typed but not sent survives switching offices, leaving the page, and reloading. |
 | `wakeAll` | The **Wake everyone** checkbox, as the operator's standing preference rather than a per-visit default. |
-| `scroll:<office>` | How far down the channel was scrolled. A long channel is read scrolled down, and returning to its top is a reset nobody asked for. |
+| `feed:<office>` | Where the reader is in the channel: `null` while the feed follows the newest message, or the offset it is reading at. |
 
 Reads go through one in-memory record, so a remount inside the same page load restores the
 panel without touching storage; writes go through to storage on every change. None of it is
@@ -451,9 +451,26 @@ storage (the in-memory record still carries the page load), and a malformed entr
 caught where they are read and written. Submitting a post clears the stored draft, so the
 next visit starts empty.
 
-The channel's scroll position is saved when the panel goes away and restored on the first
-render that has messages, because a restore against the empty feed of a pending poll would
-scroll nothing and drop the position silently.
+### Following the tail
+
+A channel is read at its newest message, so the feed tracks the reader's **intent** rather than
+an offset, the way the harness conversation's own scroll controller does
+([`use-scroll-follow.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-chat/src/client/chat/use-scroll-follow.ts)):
+`null` means the feed is following the tail, and a number means the reader scrolled away and is
+reading at that offset.
+
+- New messages move the feed **only while it is following**; a reader who scrolled up to read
+  history stays exactly where they are while messages arrive underneath.
+- "At the bottom" is a threshold (24 px), not an exact equality, so a reader who stops a few
+  pixels short still means to follow the newest message.
+- Reader input settles before it is read. One drag delivers many scroll events, so intent is
+  sampled 500 ms after the last of them, or at `scrollend` where the browser reports it — and a
+  message that arrives mid-scroll never pulls the feed out from under the gesture.
+- The position is sampled **while the reader is still on the page**, never when the panel goes
+  away. React removes the feed from the document before it runs the panel's cleanup, and a
+  detached element reports `scrollTop` 0, so saving there would store "top" on every exit.
+- A feed with no stored position has never been scrolled away from the tail, so it starts by
+  following the newest message.
 
 Dialog contents are deliberately **not** persisted: a half-filled hire form and a
 half-typed office name are transient by nature, and a remembered colleague name would be
