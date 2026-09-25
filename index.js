@@ -2377,7 +2377,7 @@ function findMountedOffice(wanted) {
  * @returns the management tool definitions.
  */
 function createManagementTools(agent, host, tool) {
-  const { config, resolveQuery, resolveRegistry } = host
+  const { config, adoptables } = host
   const { text } = tool
 
   return [
@@ -2530,7 +2530,7 @@ function createManagementTools(agent, host, tool) {
             members: c.members,
           })),
         }
-        if (args?.include_unadopted === true) value.unadopted = await unadoptedSessions(resolveQuery(), resolveRegistry(), office, config.readLimitMax)
+        if (args?.include_unadopted === true) value.unadopted = await adoptables(office, config.readLimitMax)
         return value
       },
     },
@@ -3638,44 +3638,79 @@ function panelMessage(message, names) {
 }
 
 /**
+ * The title one listed session displays, as the Web sidebar's own list rows display it.
+ *
+ * The `title` projection unit is the accepted client-side title state: a live session reads the
+ * live cell, a cold one reads the projection cache's row by header alone — never a log replay,
+ * so a listing stays cheap however long the sessions are. This is the projection pair
+ * `ApiSessionList` reads for the Web session list. A registry without that unit, an unreadable
+ * source, and a session with no title yet are all `undefined`, which the caller renders as the
+ * short-id name the office itself addresses an unnamed sender by.
+ * @param record - one session record as `sessionQuery.listSessions` reports it.
+ * @param agents - the live agent registry, or `undefined` when none is mounted.
+ * @param projections - the projection registry, or `undefined` when none is mounted.
+ * @param cache - the projection cache, or `undefined` when none is mounted.
+ * @returns the displayed title, or `undefined` when none is projected.
+ */
+const listedTitle = (record, agents, projections, cache) => {
+  try {
+    const agent = agents?.get(record.header.id)
+    const title = agent !== undefined
+      ? projections?.stateOf(agent.session, 'title')
+      : cache?.cachedSnapshot(record.header)?.values.title
+    return typeof title === 'string' && title.length > 0 ? title : undefined
+  } catch {
+    // A registry without that unit is a missing column, not a failed listing: the entry renders
+    // as the short-id form instead, and the picker stays open.
+    return undefined
+  }
+}
+
+/**
  * List recent sessions that are not colleagues yet.
  *
  * `sessionQuery` is mounted by the Web composition but is not part of the base guarantee, so an
- * absent service reports an empty list: adoption itself needs only a session id. The workspace
- * account is read from `workspaceRegistry`, whose entity carries the id, the title, and the
- * header-validated session account — a session the registry holds no workspace account for
- * carries no workspace here. One listing for both the boss tool and the panel snapshot, so the
- * two surfaces cannot offer different adoptable lists, and one shape so both surfaces group by
- * the same workspace.
- * @param query - the session listing service, or `undefined` when the deployment mounts none.
- * @param registry - the workspace registry, or `undefined` when the deployment mounts none.
+ * absent service reports an empty list: adoption itself needs only a session id. Two exclusions
+ * keep the list what the user can actually reach: a session already on the office roster, and
+ * one the workspace registry holds in its **archive set** — an archived session is out of every
+ * sidebar, and adoption would put it back in front of the user. The workspace account is read
+ * from `workspaceRegistry`, whose entity carries the id, the title, and the header-validated
+ * session account — a session the registry holds no workspace account for carries no workspace
+ * here. One listing for both the boss tool and the panel snapshot, so the two surfaces cannot
+ * offer different adoptable lists, and one shape so both surfaces group by the same workspace.
+ * @param ctx - the plugin context carrying the optional listing services.
  * @param office - the office whose roster the listing excludes.
  * @param limit - the ceiling on one listing.
  * @returns the adoptable sessions, newest first.
  */
-async function unadoptedSessions(query, registry, office, limit) {
+async function unadoptedSessions(ctx, office, limit) {
+  const query = ctx.get('sessionQuery')
   if (query === undefined) return []
   const adopted = new Set((await office.listColleagues()).map(colleague => colleague.sessionId))
+  const registry = ctx.get('workspaceRegistry')
+  const archived = new Set(registry?.archivedSessionIds ?? [])
   // The workspace account is the registry's own filtered membership, so the workspace a session
   // reports is exactly the one the Web sidebar already shows it under.
   const workspaces = new Map()
   for (const workspace of registry?.list() ?? []) {
     for (const sessionId of workspace.sessionIds ?? []) {
-      if (!workspaces.has(sessionId)) {
+      if (!archived.has(sessionId) && !workspaces.has(sessionId)) {
         workspaces.set(sessionId, { id: String(workspace.id), title: workspace.title })
       }
     }
   }
-  const records = await query.listSessions()
-  return records
-    .filter(record => !adopted.has(record.header.id))
+  const records = (await query.listSessions())
+    .filter(record => !adopted.has(record.header.id) && !archived.has(record.header.id))
     .slice(0, limit)
-    .map(record => compact({
-      sessionId: record.header.id,
-      title: typeof record.title === 'string' ? record.title : undefined,
-      updatedAt: new Date(record.header.createdAt).toISOString(),
-      workspace: workspaces.get(record.header.id),
-    }))
+  const agents = ctx.get('agents')
+  const projections = ctx.get('sessionProjections')
+  const cache = ctx.get('sessionProjectionCache')
+  return records.map(record => compact({
+    sessionId: record.header.id,
+    title: listedTitle(record, agents, projections, cache),
+    updatedAt: new Date(record.header.createdAt).toISOString(),
+    workspace: workspaces.get(record.header.id),
+  }))
 }
 
 /**
@@ -3711,7 +3746,7 @@ async function officeState(ctx, mounted) {
     })),
     // The sessions the panel's adopt dialog offers, through the same unadopted listing the boss
     // tool reports, with the workspace each session belongs to.
-    unadopted: await unadoptedSessions(ctx.get('sessionQuery'), ctx.get('workspaceRegistry'), office, hostConfig().readLimitMax),
+    unadopted: await unadoptedSessions(ctx, office, hostConfig().readLimitMax),
     // The name `@` addresses to reach the user's mailbox, and the mailbox itself. A colleague
     // cannot read it through any tool, so this route is the only way it reaches a surface.
     user: { name: mounted.config.userName },
@@ -4225,8 +4260,7 @@ function applyHost(ctx, raw) {
   }
   officeHost = {
     config,
-    resolveQuery: () => ctx.get('sessionQuery'),
-    resolveRegistry: () => ctx.get('workspaceRegistry'),
+    adoptables: (office, limit) => unadoptedSessions(ctx, office, limit),
   }
   ctx.effect(() => () => { officeHost = undefined })
 

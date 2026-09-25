@@ -191,7 +191,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | Tool | Purpose |
 |---|---|
 | `office_list` | List the offices this session runs, with their names and colleague counts. |
-| `office_roster` | List colleagues and channels; `include_unadopted` also lists sessions available to adopt. |
+| `office_roster` | List colleagues and channels; `include_unadopted` also lists sessions available to adopt, each with its workspace and its sidebar title — sessions in the workspace archive are not offered. |
 | `office_colleagues` | Every colleague with its role, description, live status, effective permission, model route, held-message count, and last activity. A pure query: it wakes nobody. |
 | `office_adopt` | Adopt an existing session, with an optional `name`, `role`, and `description`. |
 | `office_hire` | Create a session, title it, adopt it, and greet it **privately**. Accepts `role`, `description`, `agent_preset`, `provider`+`model`, and `reasoning_effort`. |
@@ -365,9 +365,11 @@ remembered like the panel's other controls.
 - **Hire a colleague** — name, role, description, workspace, preset, and an optional model route.
 - **Adopt a session** — an existing session becomes a colleague, named by its title, with the role
   and description rows the hire and edit dialogs share. The picker lists the sessions the office
-  has not adopted, through the same listing `office_roster --include_unadopted` reports, grouped
-  one heading per workspace the way the sidebar shows them; an untitled session reads as
-  `session-<short id>`, the name the office would address it by.
+  has not adopted (sessions the workspace holds in its archive set are never offered), grouped
+  one heading per workspace the way the sidebar shows them; each entry reads by the title the
+  sidebar's list rows show — the projected `title` for a live session, the projection cache row
+  for a cold one — and an untitled session reads as `session-<short id>`, the name the office
+  would address it by.
 
 ### Folding a long history
 
@@ -438,7 +440,7 @@ including none:
 
 | Route | Purpose |
 |---|---|
-| `GET /dsh-office/offices/state?office=<name>` | Colleagues, channels, the newest public messages and the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions, and the hire options. |
+| `GET /dsh-office/offices/state?office=<name>` | Colleagues, channels, the newest public messages and the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived ones never offered), and the hire options. |
 | `GET /dsh-office/offices/history?office=<name>&channel=general\|mailbox&before=<seq>&limit=<n>` | One page of messages older than `before`, oldest first, with the channel's `total` and whether anything older remains. This is what a folded row asks for. |
 | `POST /dsh-office/offices/post?office=<name>` | `{ text, mention_all? }`; posts as `userName` and notifies the whole roster unless `mention_all` is `false`, in which case only the names the body carries are notified. `@user` files a mailbox copy. |
 | `POST /dsh-office/offices/hire?office=<name>` | `{ name, role?, description?, workspace_id?, agent_preset?, provider?, model?, reasoning_effort? }`. |

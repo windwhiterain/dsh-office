@@ -469,18 +469,23 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
           },
           // The recent-session listing the unadopted report reads. A session that was never
           // published or was disposed keeps its record, because a session can be adopted
-          // without being live.
-          listSessions: async () => [...liveAgents.values()].map(agent => ({
-            header: { id: agent.session.header.id, createdAt: 0 },
-            title: titles.get(agent.session.header.id) ?? undefined,
-          })),
+          // without being live; the features' cold rows model exactly that case.
+          listSessions: async () => [
+            ...[...liveAgents.values()].map(agent => ({
+              header: { id: agent.session.header.id, createdAt: 0 },
+              title: titles.get(agent.session.header.id) ?? undefined,
+            })),
+            ...(features.coldSessions ?? []).map(header => ({ header, live: false, persisted: true })),
+          ],
         }
       }
       if (name === 'workspaceRegistry') {
         return {
           // Workspace accounts carry the header-validated sessions the Web sidebar shows under
           // them. The fake derives the account from the live headers' cwd, which is the same
-          // rule the real registry indexes on.
+          // rule the real registry indexes on. The archive set is the registry's own: sessions
+          // in it are out of every listing.
+          archivedSessionIds: features.archivedSessionIds ?? [],
           list: () => [
             { id: 'workspace-first', title: 'First', sessionIds: [] },
             {
@@ -513,10 +518,22 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       }
       if (name === 'sessionProjections') {
         // Only the harnesses that declare one model selection per session expose the registry, so
-        // the checks below can tell a read of the projection from a read of `agent.options`.
-        if (features.modelSelection === undefined) return undefined
+        // the checks below can tell a read of the projection from a read of `agent.options`. The
+        // `title` unit is what the Web session list displays; a registry without it carries no
+        // title, which is the case `listedTitle` must answer with the short-id form.
+        if (features.modelSelection === undefined && features.titles === undefined) return undefined
         return {
-          stateOf: (session, key) => (key === 'modelSelection' ? features.modelSelection[session.header.id] : undefined),
+          stateOf: (session, key) => {
+            if (key === 'modelSelection') return features.modelSelection?.[session.header.id]
+            if (key === 'title') return features.titles?.[session.header.id] ?? null
+            return undefined
+          },
+        }
+      }
+      if (name === 'sessionProjectionCache') {
+        if (features.coldTitles === undefined) return undefined
+        return {
+          cachedSnapshot: (header) => ({ asOfSeq: 0, values: { title: features.coldTitles[header.id] ?? null } }),
         }
       }
       if (name === 'sessionController') {
@@ -779,7 +796,18 @@ await check('an office alone arms nobody, because the host owns the tool set', a
   assert.deepEqual(toolNames(unhostedBoss), [], 'an office row registers no tool of its own')
 })
 
-const harness = makeHarness(undefined, undefined, { host: true })
+/**
+ * The listing services the unadopted report needs on the shared harness: one live projected
+ * title, one cold title the projection cache serves, and one session the workspace holds in its
+ * archive set, which no form of the listing may offer.
+ */
+const harness = makeHarness(undefined, undefined, {
+  host: true,
+  titles: { 'session-titled': 'Titled session' },
+  coldSessions: [{ id: 'session-cold', createdAt: 0 }, { id: 'session-archived', createdAt: 0 }],
+  coldTitles: { 'session-cold': 'Cold session', 'session-archived': 'Archived session' },
+  archivedSessionIds: ['session-archived'],
+})
 const { routes, liveAgents, titles, resumed, hires, selects, globalTools } = harness
 await harness.ready
 
@@ -787,6 +815,9 @@ const boss = harness.publish('session-boss', { preset: 'office-boss' })
 const outsider = harness.publish('session-outsider')
 const alice = harness.publish('session-alice')
 const bob = harness.publish('session-bob')
+// A live session whose title is projected, for the unadopted report to show.
+const titled = harness.publish('session-titled')
+void titled
 
 await check('no office tool is ever registered globally', () => {
   assert.deepEqual([...globalTools.keys()], [], 'the office contributes nothing to the global tool layer')
@@ -2723,6 +2754,16 @@ await check('the panel adopts an existing session as a colleague', async () => {
   assert.ok(
     state.payload.unadopted.some(entry => entry.workspace === undefined && entry.sessionId !== 'session-sam'),
     'a session the registry holds no account for carries no workspace, for the unfiled group',
+  )
+
+  // The title is the sidebar's own: the live projection for a live session, the projection cache
+  // row for a cold one, and the archive set keeps the archived session out of every listing.
+  const labeled = state.payload.unadopted.filter(entry =>
+    ['session-titled', 'session-cold', 'session-archived'].includes(entry.sessionId))
+  assert.deepEqual(
+    labeled.map(entry => `${entry.title} (${entry.workspace?.title ?? 'unfiled'})`),
+    ['Titled session (unfiled)', 'Cold session (unfiled)'],
+    'a live session shows its projected title, a cold one its cached title, and an archived one is not offered',
   )
 
   const refused = await callRoute(routes, officeRoute('adopt', 'guiadopt'), {
