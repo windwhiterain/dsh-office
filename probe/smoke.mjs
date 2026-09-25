@@ -192,8 +192,42 @@ function jsonSafe(value, path = new Set()) {
   return safe
 }
 
+/**
+ * One session's durable pending input, as the harness projects it.
+ *
+ * The real inbox is a projection over the session's own log, so it outlives the agent that
+ * carried it: a restart reattaches the same pending messages rather than an empty list. The
+ * probe keeps it per session for that reason — a fake that dropped it would hide the wake an
+ * office recovers after a restart.
+ * @returns the fake inbox: pending step input, its insertion, and the office's removal.
+ */
+function makeInbox() {
+  const nextStep = []
+  return {
+    nextStep,
+    /**
+     * Remove one pending message, as `Agent.inbox.remove` does.
+     * @param messageId - the identity of the pending message.
+     * @returns whether it was still pending.
+     */
+    remove(messageId) {
+      const index = nextStep.findIndex(message => message.id === messageId)
+      if (index < 0) return false
+      nextStep.splice(index, 1)
+      return true
+    },
+    /**
+     * Insert one message the way `steer` does: the inbox commits it as pending step input.
+     * @param message - the message being spliced in.
+     */
+    insert(message) {
+      nextStep.push(message)
+    },
+  }
+}
+
 /** One fake Agent carrying its own tool scope, exactly as `agent.ctx.tools` does. */
-function makeAgent(sessionId, status, cwd, preset) {
+function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox()) {
   const tools = new Map()
   const sent = []
   /** Cancellations this agent received, so a check can tell an interrupt from a no-op. */
@@ -215,6 +249,7 @@ function makeAgent(sessionId, status, cwd, preset) {
     sent,
     cancels,
     tools,
+    inbox,
     session: { header: { id: sessionId, cwd, ...(preset === undefined ? {} : { agentPreset: preset }) } },
     status,
     // The route a live colleague runs on. `rosterStatus` reports it, and the real Agent carries
@@ -229,7 +264,14 @@ function makeAgent(sessionId, status, cwd, preset) {
       },
     },
     followup: message => sent.push({ via: 'followup', message: accept(message) }),
-    steer: message => sent.push({ via: 'steer', message: accept(message) }),
+    /**
+     * Splice one message into the running turn's next step boundary, as `Agent.steer` does: the
+     * driver claims it there, which is the moment the office stops holding it.
+     */
+    steer: (message) => {
+      sent.push({ via: 'steer', message: accept(message) })
+      inbox.insert(message)
+    },
     /**
      * Cancel the running turn, as `Agent.cancel` does.
      *
@@ -264,12 +306,19 @@ const disposedListeners = []
  * it listens for is process-wide.
  */
 const statusListeners = []
+/**
+ * `agent/inbox/claimed` listeners, shared for the same reason again: the office stops holding a
+ * step-end wake when the harness takes that message into a step, and the claim is process-wide.
+ */
+const inboxClaimListeners = []
 
 function makeHarness(rawConfig, loggedRoute, features = {}) {
   const tables = new Map()
   const globalTools = new Map()
   const routes = new Map()
   const liveAgents = new Map()
+  /** Pending input per session, which a resumed agent reattaches rather than starting empty. */
+  const inboxes = new Map()
   const titles = new Map()
   const resumed = []
   const hires = []
@@ -302,8 +351,19 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     ? []
     : [{ type: 'request/header', data: { header: { config: loggedRoute } } }]
 
+  /**
+   * The durable pending input of one session, which belongs to the session rather than to the
+   * agent process: resuming a session reattaches what it was carrying.
+   * @param sessionId - the session whose inbox to read.
+   * @returns its fake inbox.
+   */
+  function inboxOf(sessionId) {
+    if (!inboxes.has(sessionId)) inboxes.set(sessionId, makeInbox())
+    return inboxes.get(sessionId)
+  }
+
   function publish(sessionId, options = {}) {
-    const agent = makeAgent(sessionId, options.status ?? 'idle', options.cwd, options.preset)
+    const agent = makeAgent(sessionId, options.status ?? 'idle', options.cwd, options.preset, inboxOf(sessionId))
     liveAgents.set(sessionId, agent)
     for (const listener of createdListeners) listener({ agent })
     return agent
@@ -362,7 +422,8 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       const listeners = event === 'agent/created'
         ? createdListeners
         : event === 'agent/disposed' ? disposedListeners
-          : event === 'agent/status' ? statusListeners : undefined
+          : event === 'agent/status' ? statusListeners
+            : event === 'agent/inbox/claimed' ? inboxClaimListeners : undefined
       if (listeners === undefined) return () => {}
       listeners.push(listener)
       const dispose = () => {
@@ -524,6 +585,34 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       for (const listener of createdListeners) listener({ agent })
       return agent
     },
+    /**
+     * Claim one agent's pending input at a step boundary, exactly as the loop's `preStep` does.
+     *
+     * This is where a step-end wake stops being pending and starts being part of the turn that
+     * is running, which is the moment the office must stop holding it.
+     * @param sessionId - the live agent whose step boundary arrives.
+     * @returns the messages that step claimed.
+     */
+    claim: (sessionId) => {
+      const agent = liveAgents.get(sessionId)
+      assert.ok(agent, `${sessionId} must be live to claim its input`)
+      const claimed = agent.inbox.nextStep.splice(0, agent.inbox.nextStep.length)
+      for (const message of claimed) {
+        for (const listener of inboxClaimListeners) listener({ agent, message, turn: 1 })
+      }
+      return claimed
+    },
+    /**
+     * Drop one agent's pending input without a claim, as a cancellation that does not keep the
+     * inbox does. Nothing the office holds is acknowledged by this, which is the case its
+     * recovery exists for.
+     * @param sessionId - the live agent whose pending input is discarded.
+     */
+    discardInbox: (sessionId) => {
+      const agent = liveAgents.get(sessionId)
+      assert.ok(agent, `${sessionId} must be live to discard its input`)
+      agent.inbox.nextStep.length = 0
+    },
     dispose: (agent) => {
       liveAgents.delete(agent.session.header.id)
       for (const listener of disposedListeners) listener({ agent })
@@ -572,6 +661,22 @@ async function call(agent, name, args) {
  * @returns the validated tool value.
  */
 const callBoss = (agent, officeName, name, args = {}) => call(agent, name, { office: officeName, ...args })
+
+/**
+ * The stored record of one message, found by the identity an office tool reported.
+ * @param harness - the harness whose office domain holds it.
+ * @param messageId - the `messageId` a post result carried.
+ * @returns the stored message record, with its delivery outcomes.
+ */
+function storedMessage(harness, messageId) {
+  for (const [, value] of harness.tables.get('messages').entries()) {
+    if (value.messageId === messageId) return value
+  }
+  throw new Error(`no stored message ${messageId}`)
+}
+
+/** Wait for the office's own asynchronous storage writes to settle. */
+const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 
 /**
  * Build the path of one office route.
@@ -834,6 +939,127 @@ await check('a colleague that is mid-turn is handed one merged turn when it is i
   const read = await call(alice, 'office_read', { channel: 'bob' })
   assert.equal(read.channelId, 'dm-sessionalice+sessionbob')
   assert.equal(read.messages.at(-1).text, 'private note')
+})
+
+await check('office_dm notify:step-end steers into the running turn, and the claim releases the hold', async () => {
+  const steering = makeHarness({ officeName: 'steering' })
+  await steering.ready
+  const chief = steering.publish('session-steering-boss', { preset: 'office-boss' })
+  steering.titles.set('session-steering-boss', 'chief')
+  steering.titles.set('session-nina', 'nina')
+  const nina = steering.publish('session-nina')
+  await callBoss(chief, 'steering', 'office_adopt', { session_id: 'session-nina' })
+
+  nina.status = 'running'
+  const steered = await callBoss(chief, 'steering', 'office_dm', {
+    to: 'nina',
+    text: 'stop: wrong branch',
+    notify: 'step-end',
+  })
+  assert.equal(steered.deliveries[0].status, 'steered', 'a step-end wake reports the splice, not a hold')
+  assert.equal(nina.sent.length, 1)
+  assert.equal(nina.sent[0].via, 'steer', 'the message enters the running turn at its next step boundary')
+  assert.match(nina.sent[0].message.content[0].text, /stop: wrong branch/)
+  assert.equal(nina.inbox.nextStep.length, 1, 'and the inbox carries it until a step claims it')
+
+  // The claim is where the wake stops being pending, so the office stops holding it there.
+  const pendingBefore = await callBoss(chief, 'steering', 'office_colleagues')
+  assert.equal(pendingBefore.colleagues[0].pending, 1, 'the office holds it while the turn has not taken it')
+  steering.claim('session-nina')
+  await settle()
+  const pendingAfter = await callBoss(chief, 'steering', 'office_colleagues')
+  assert.equal(pendingAfter.colleagues[0].pending, 0, 'a claimed wake is no longer held')
+  assert.equal(storedMessage(steering, steered.message.messageId).deliveries['session-nina'].status, 'steered')
+
+  await steering.setStatus('session-nina', 'idle')
+  assert.equal(nina.sent.length, 1, 'a wake the running turn took is not handed over a second time')
+
+  // An idle colleague has no turn to steer, so the timing has nothing to choose between.
+  const idleDm = await callBoss(chief, 'steering', 'office_dm', {
+    to: 'nina',
+    text: 'no turn to steer',
+    notify: 'step-end',
+  })
+  assert.equal(idleDm.deliveries[0].status, 'delivered')
+  assert.equal(nina.sent.at(-1).via, 'followup', 'an idle colleague is handed the message now either way')
+
+  await assert.rejects(
+    () => callBoss(chief, 'steering', 'office_dm', { to: 'nina', text: 'x', notify: 'turn' }),
+    /notify must be one of turn-end, step-end/,
+  )
+})
+
+await check('a step-end wake the running turn never took is recovered as the office\'s own turn', async () => {
+  const recovering = makeHarness({ officeName: 'recovering' })
+  await recovering.ready
+  const chief = recovering.publish('session-recovering-boss', { preset: 'office-boss' })
+  recovering.titles.set('session-recovering-boss', 'chief')
+  recovering.titles.set('session-otto', 'otto')
+  const otto = recovering.publish('session-otto')
+  await callBoss(chief, 'recovering', 'office_adopt', { session_id: 'session-otto' })
+
+  // The turn ends before it reaches another step, so the message is still pending input.
+  otto.status = 'running'
+  const stranded = await callBoss(chief, 'recovering', 'office_dm', {
+    to: 'otto',
+    text: 'this one waited',
+    notify: 'step-end',
+  })
+  assert.equal(stranded.deliveries[0].status, 'steered')
+  await recovering.setStatus('session-otto', 'idle')
+  const recovered = otto.sent.at(-1)
+  assert.equal(recovered.via, 'followup', 'the office hands the stranded wake over as its own turn')
+  assert.equal(recovered.message.source.messageId, stranded.message.messageId)
+  assert.equal(otto.inbox.nextStep.length, 0, 'and takes the inbox copy back, so no step delivers it twice')
+  const record = storedMessage(recovering, stranded.message.messageId).deliveries['session-otto']
+  assert.equal(record.status, 'delivered', 'the outcome is what the colleague actually got')
+  assert.match(record.detail, /the running turn ended before it took this step-end wake/)
+
+  // A cancellation that does not keep the inbox throws the pending copy away with no claim, so
+  // the message is nowhere but in the office's hold — which is what that hold is for.
+  otto.status = 'running'
+  const discarded = await callBoss(chief, 'recovering', 'office_dm', {
+    to: 'otto',
+    text: 'cancelled away',
+    notify: 'step-end',
+  })
+  assert.equal(discarded.deliveries[0].status, 'steered')
+  recovering.discardInbox('session-otto')
+  await recovering.setStatus('session-otto', 'idle')
+  assert.equal(otto.sent.at(-1).via, 'followup')
+  assert.match(otto.sent.at(-1).message.content[0].text, /cancelled away/, 'a discarded wake is not lost')
+})
+
+await check('a step-end wake held when the process stops is recovered after it restarts', async () => {
+  const stopping = makeHarness({ officeName: 'stepping' }, undefined, { rowId: 'office_stepping' })
+  await stopping.ready
+  const chief = stopping.publish('session-stepping-boss', { preset: 'office-boss' })
+  stopping.titles.set('session-stepping-boss', 'chief')
+  stopping.titles.set('session-otto', 'otto')
+  const otto = stopping.publish('session-otto')
+  await callBoss(chief, 'stepping', 'office_adopt', { session_id: 'session-otto' })
+
+  otto.status = 'running'
+  const steered = await callBoss(chief, 'stepping', 'office_dm', {
+    to: 'otto',
+    text: 'before you go',
+    notify: 'step-end',
+  })
+  assert.equal(steered.deliveries[0].status, 'steered')
+
+  // The process stops with the message unclaimed in the colleague's inbox, which the restart
+  // reattaches: the wake is the office's again and must arrive exactly once.
+  stopping.dispose(otto)
+  await stopping.close()
+  stopping.ctx.fiber.entry.options.id = 'office_stepping'
+  await apply(stopping.ctx, { officeName: 'stepping' })
+  await settle()
+
+  const restarted = stopping.liveAgents.get('session-otto')
+  assert.equal(restarted.sent.length, 1, 'the unclaimed step-end wake is delivered by the restarted office')
+  assert.equal(restarted.sent[0].via, 'followup')
+  assert.match(restarted.sent[0].message.content[0].text, /before you go/)
+  assert.equal(restarted.inbox.nextStep.length, 0, 'and the inbox copy it carried does not arrive twice')
 })
 
 await check('a wake held when the process stops is delivered after it restarts', async () => {

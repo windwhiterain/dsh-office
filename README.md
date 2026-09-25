@@ -60,9 +60,20 @@ each of them spends a turn on it.)
 
 A colleague that is mid-turn is **not interrupted**. Everything that arrives while it works is
 held and handed over as **one** turn when it stops — nine messages cost one turn and one answer
-— and the hold is durable, so a message a colleague is waiting for survives a host restart. The
-one exception is deliberate: a **leader** holds `office_interrupt`, which cancels a running turn
-and lets the office hand over everything held for that colleague at once.
+— and the hold is durable, so a message a colleague is waiting for survives a host restart. Two
+exceptions are deliberate. A **leader** holds `office_interrupt`, which cancels a running turn and
+lets the office hand over everything held for that colleague at once. And `office_dm` may ask for
+the running turn with `notify: "step-end"`, which splices its message into that turn to be read at
+the next step boundary — the way to change what a colleague is doing rather than answer it
+afterwards:
+
+```text
+office_dm  { "to": "alice", "text": "stop: that is the wrong branch", "notify": "step-end" }
+
+[office] Posted dm-….4 to dm-sessionalice+sessionyou.
+Delivery:
+- alice: steered (the colleague is mid-turn; it receives this at the end of the step that is running)
+```
 
 Address the user and the message lands in the user's mailbox instead of waking anybody:
 
@@ -103,6 +114,7 @@ rather than of arrivals. `role` is one of `member` (the default), `leader`, or `
 ```text
 office_post  { "text": "morning" }                      # wakes the whole office
 office_dm    { "to": "alice", "text": "look at this" }  # wakes one colleague
+office_dm    { "to": "alice", "notify": "step-end", "text": "stop: wrong branch" }  # steers its running turn
 office_dm    { "to": "user", "text": "blocked on ci" }  # mail for you, wakes nobody
 office_read  { "channel": "#general", "from": 1 }       # a query; never a wake
 office_colleagues  { "office": "office" }               # who is busy, and what is held for whom
@@ -188,7 +200,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_rename` | Rename one office. Storage, colleagues, channels, and messages stay where they are. |
 | `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. |
 | `office_post` | Post to `#general`. Wakes the whole roster by default; `mentions` narrows that, `mention_all: false` writes without waking anyone, and naming the user files a copy in the mailbox. |
-| `office_dm` | Private message to one colleague, or mail to the user, whose name writes to the mailbox. |
+| `office_dm` | Private message to one colleague, or mail to the user, whose name writes to the mailbox. `notify` picks when a colleague that is mid-turn receives it: `turn-end` (default) after its turn, `step-end` at the next step boundary of the turn it is running. |
 | `office_read` | Read channel history by sequence range and filters. |
 | `office_compact` | Replace a sequence range with a summary the boss wrote, so a long channel stays bounded. |
 
@@ -467,10 +479,10 @@ unauthenticated.
 ## Documentation
 
 - [docs/design.md](docs/design.md) — why the plugin is shaped this way: row kinds, the host/office
-  split, the boss preset's mask, and the role model.
+  split, the boss preset's mask, the role model, and why a wake can be timed.
 - [docs/data-model.md](docs/data-model.md) — storage domains, tables, and identity.
-- [docs/delivery.md](docs/delivery.md) — waking, merged turns, durable holds, frames, reading, and
-  compaction.
+- [docs/delivery.md](docs/delivery.md) — waking, merged turns, step-end steering, durable holds,
+  frames, reading, and compaction.
 - [docs/hot-reload.md](docs/hot-reload.md) — what applies live, and how to iterate against a
   running host.
 - [docs/testing.md](docs/testing.md) — the offline probe and the panel render check.

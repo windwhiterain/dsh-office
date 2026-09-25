@@ -129,10 +129,14 @@ select a colleague's holds by key prefix.
 | `sessionId` | The colleague that is waiting. |
 | `channelId`, `seq` | Which message is held; the pair reconstructs its key in `messages`. |
 | `at` | When the hold was taken, for diagnostics. |
+| `notify` | On a **step-end** hold only, the value `step-end`. Absent is a turn-end hold, which is what every record written before this field existed carries. |
 
 The table is what makes a wake durable across a restart, and it is also where a dismissed
-colleague's holds are dropped: nothing would ever deliver them. See
-[delivery.md](delivery.md) for the batch a hold is released as.
+colleague's holds are dropped: nothing would ever deliver them. A step-end hold is deleted when the
+harness claims its message into a step rather than when a turn is queued, so what the table holds
+for one colleague is exactly what the harness has not taken. See
+[delivery.md](delivery.md) for the batch a hold is released as, and for how a step-end wake nothing
+claimed is recovered.
 
 ## Identity
 

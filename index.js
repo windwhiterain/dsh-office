@@ -88,6 +88,28 @@ const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
 const DESCRIPTION_MAX_CHARS = 2000
 
 /**
+ * When a wake reaches a colleague that is mid-turn.
+ *
+ * `turn-end` is the office's own contract: a colleague is never interrupted by a delivery, and
+ * everything that arrives while it works is held and handed over as one turn when it stops.
+ * `office_dm` may ask for `step-end` instead, which splices its message into the running turn at
+ * that turn's next step boundary — the choice between answering after the work and steering the
+ * work.
+ */
+const NOTIFY_TURN_END = 'turn-end'
+const NOTIFY_STEP_END = 'step-end'
+
+/** Every notification timing a caller may ask for, default first. */
+const NOTIFY_TIMINGS = [NOTIFY_TURN_END, NOTIFY_STEP_END]
+
+/** The identity prefix of the turn one office message becomes. */
+const WAKE_ID_PREFIX = 'office-'
+
+/** Why a step-end wake the running turn never took arrives as the office's own turn. */
+const STEP_END_RECOVERY_DETAIL = 'the running turn ended before it took this step-end wake; '
+  + 'the office handed it over as its own turn'
+
+/**
  * Role → session permission preset, per office row.
  *
  * A role's office capabilities decide which office tools its session holds; this map decides
@@ -142,6 +164,27 @@ function normalizeDescription(value, where) {
     )
   }
   return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
+ * Validate the notification timing a caller asked for.
+ *
+ * An absent timing is the office's own contract rather than an omission: it is what every caller
+ * that predates the argument meant, and what the office already does for a colleague that is
+ * mid-turn.
+ * @param value - the requested timing.
+ * @param tool - the registered tool name refusing it.
+ * @returns a timing of {@link NOTIFY_TIMINGS}.
+ * @throws {TypeError} when the value is neither absent nor a known timing.
+ */
+function requireNotify(value, tool) {
+  if (value === undefined) return NOTIFY_TURN_END
+  if (typeof value !== 'string' || !NOTIFY_TIMINGS.includes(value)) {
+    throw new TypeError(
+      `${tool}: notify must be one of ${NOTIFY_TIMINGS.join(', ')}, got ${JSON.stringify(value)}`,
+    )
+  }
+  return value
 }
 
 /**
@@ -657,6 +700,19 @@ function messageKey(channelId, seq) {
 }
 
 /**
+ * The identity one office message carries as a turn in the colleague's session.
+ *
+ * The office needs it without building a payload: it is the key that links a message the
+ * harness claimed out of an inbox, or already wrote into a session log, back to the office
+ * message it carries.
+ * @param message - the stored office message.
+ * @returns the payload id of the turn it becomes.
+ */
+function wakeIdOf(message) {
+  return `${WAKE_ID_PREFIX}${message.messageId}`
+}
+
+/**
  * Reject a stored record that no longer satisfies its contract, so a hand-edited
  * medium fails loud instead of surfacing as a downstream property access.
  * @param kind - the record kind, for the diagnostic.
@@ -1053,17 +1109,22 @@ function createOffice(ctx, domain, config, hooks) {
    * conversation moved on; a merged turn costs one, and it answers once.
    *
    * The hold is durable because a wake is a promise the office keeps: a restart with wakes
-   * still held delivers them instead of dropping them.
+   * still held delivers them instead of dropping them. A step-end wake is held for that same
+   * reason even though its message is handed to the harness immediately — the hold is what
+   * survives a process that stops before the running turn reaches its next step.
    * @param sessionId - the colleague that is mid-turn.
    * @param message - the stored message it has not been handed yet.
+   * @param notify - when the caller asked the wake to arrive; only `step-end` is recorded,
+   *   because a turn-end hold is what an absent field already means.
    */
-  const holdWake = async (sessionId, message) => {
-    await pendingWakes.put(pendingKey(sessionId, message.messageId), {
+  const holdWake = async (sessionId, message, notify = NOTIFY_TURN_END) => {
+    await pendingWakes.put(pendingKey(sessionId, message.messageId), compact({
       sessionId,
       channelId: message.channelId,
       seq: message.seq,
       at: Date.now(),
-    })
+      notify: notify === NOTIFY_STEP_END ? NOTIFY_STEP_END : undefined,
+    }))
   }
 
   /**
@@ -1072,7 +1133,8 @@ function createOffice(ctx, domain, config, hooks) {
    * A message compacted away while it was held is dropped from the batch on purpose: its
    * summary is what replaced it, and the summary is what a reader meets.
    * @param sessionId - the colleague whose held wakes to collect.
-   * @returns the held messages with the record key and the message key each is stored under.
+   * @returns the held messages with the record key, the message key, and the timing each is
+   *   held under.
    */
   const heldWakes = (sessionId) => {
     const prefix = `${sessionId}#`
@@ -1085,7 +1147,12 @@ function createOffice(ctx, domain, config, hooks) {
       if (message === undefined) {
         continue
       }
-      held.push({ pendingKey: key, messageKey: keyOfMessage, message: validateMessage(message) })
+      held.push({
+        pendingKey: key,
+        messageKey: keyOfMessage,
+        message: validateMessage(message),
+        stepEnd: record.notify === NOTIFY_STEP_END,
+      })
     }
     held.sort((left, right) => left.message.createdAt - right.message.createdAt
       || left.message.channelId.localeCompare(right.message.channelId)
@@ -1106,7 +1173,7 @@ function createOffice(ctx, domain, config, hooks) {
   const batchPayload = (batch, newestSeq, role) => {
     const newest = batch.at(-1)
     return {
-      id: `office-${newest.messageId}`,
+      id: wakeIdOf(newest),
       role: 'user',
       content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, role) }],
       // Every field here reaches the session log, which is JSON, and the harness rejects a
@@ -1125,19 +1192,88 @@ function createOffice(ctx, domain, config, hooks) {
     }
   }
 
+  /**
+   * Record one held wake as delivered in the turn it travelled in.
+   *
+   * The hold goes first, because a wake that is no longer held is a wake the office has handed
+   * over; a message compacted away while it was held has no record left to update. A step-end
+   * wake that arrives this way is one the running turn never took, and the outcome says so
+   * rather than reading as the splice the sender asked for.
+   * @param entry - one hold, as {@link heldWakes} reports it.
+   * @param sessionId - the colleague it was held for.
+   * @param batchSize - how many messages the turn that carried it held.
+   */
+  const recordReleased = async (entry, sessionId, batchSize) => {
+    await pendingWakes.delete(entry.pendingKey)
+    if (messages.get(entry.messageKey) === undefined) return
+    await recordDelivery(entry.messageKey, sessionId, compact({
+      status: 'delivered',
+      at: Date.now(),
+      batch: batchSize,
+      detail: entry.stepEnd ? STEP_END_RECOVERY_DETAIL : undefined,
+    }))
+  }
+
   /** Release one colleague's held wakes: the records go only after their turn is queued. */
   const releaseWakes = async (sessionId, held, agent) => {
     const colleague = colleagueBySession(sessionId)
     agent.followup(batchPayload(held.map(entry => entry.message), undefined, canonicalRole(colleague?.role)))
+    for (const entry of held) await recordReleased(entry, sessionId, held.length)
+  }
+
+  /**
+   * Whether one colleague's session log already carries the turn an office message became.
+   *
+   * A message the harness claims out of an inbox is appended to its session as a `user/message`
+   * before the request that reads it, so the session's own log — not the office's bookkeeping —
+   * is the durable answer to "did this colleague receive this?". A deployment that mounts no
+   * `sessionQuery` cannot answer it and reports the message as not received, which costs a
+   * duplicate turn rather than a lost wake.
+   * @param sessionId - the colleague to read.
+   * @param message - the office message whose turn to look for.
+   * @returns whether the session log holds it.
+   */
+  const receivedWake = async (sessionId, message) => {
+    const query = ctx.get('sessionQuery')
+    if (query === undefined) return false
+    const wanted = wakeIdOf(message)
+    const snapshot = await query.readSession(sessionId)
+    return snapshot.events.some(event => event.type === 'user/message' && event.data?.id === wanted)
+  }
+
+  /**
+   * Take back the step-end wakes the running turn never carried.
+   *
+   * A step-end wake is steered into the running turn, and its hold is deleted the moment the
+   * harness claims it, so a hold still here while the colleague is idle means that turn stopped
+   * first: the process died mid-turn, or the turn was cancelled before reaching its next step.
+   * The message is the office's again, and it must not be delivered twice — the inbox copy is
+   * removed before the office queues its own turn, and a message the session log shows as
+   * already received drops the hold instead of being handed over again.
+   *
+   * A turn-end hold is never touched here: it is exactly what the office is waiting to deliver.
+   * @param sessionId - the colleague going idle.
+   * @param held - its holds, oldest first.
+   * @param agent - its live agent, already known to be idle.
+   * @returns the holds to deliver as one turn, in order.
+   */
+  const recoverStepEndWakes = async (sessionId, held, agent) => {
+    const batch = []
     for (const entry of held) {
-      await pendingWakes.delete(entry.pendingKey)
-      if (messages.get(entry.messageKey) === undefined) continue
-      await recordDelivery(entry.messageKey, sessionId, {
-        status: 'delivered',
-        at: Date.now(),
-        batch: held.length,
-      })
+      if (!entry.stepEnd) {
+        batch.push(entry)
+        continue
+      }
+      const wakeId = wakeIdOf(entry.message)
+      const pending = agent.inbox.nextStep.some(message => message.id === wakeId)
+      if (!pending && await receivedWake(sessionId, entry.message)) {
+        await pendingWakes.delete(entry.pendingKey)
+        continue
+      }
+      if (pending) agent.inbox.remove(wakeId)
+      batch.push(entry)
     }
+    return batch
   }
 
   /**
@@ -1160,8 +1296,26 @@ function createOffice(ctx, domain, config, hooks) {
     }
     const agent = await ensureAgent(sessionId)
     if (agent.status !== 'idle') return 0
-    await releaseWakes(sessionId, held, agent)
-    return held.length
+    const batch = await recoverStepEndWakes(sessionId, held, agent)
+    if (batch.length === 0) return 0
+    await releaseWakes(sessionId, batch, agent)
+    return batch.length
+  }
+
+  /**
+   * Record that the harness took a step-end wake into a step.
+   *
+   * The hold is deleted here, which is what makes a step-end wake a promise the office keeps
+   * rather than a message thrown at a running turn: what is left in the pending table is
+   * exactly what the harness has not claimed.
+   * @param sessionId - the colleague whose inbox claimed the message.
+   * @param wakeId - the claimed payload's identity.
+   */
+  const acknowledgeClaim = async (sessionId, wakeId) => {
+    if (typeof wakeId !== 'string' || !wakeId.startsWith(WAKE_ID_PREFIX)) return
+    const key = pendingKey(sessionId, wakeId.slice(WAKE_ID_PREFIX.length))
+    if (pendingWakes.get(key)?.notify !== NOTIFY_STEP_END) return
+    await pendingWakes.delete(key)
   }
 
   /**
@@ -1183,16 +1337,31 @@ function createOffice(ctx, domain, config, hooks) {
    * everything else that arrived meanwhile.
    *
    * A colleague that is idle is handed the message now — together with anything it was already
-   * waiting for, because those wakes were held for exactly this moment. One that is mid-turn is
-   * not interrupted: nothing is spliced into the turn it is running, and it is not queued a row
-   * of stale single-message turns either.
+   * waiting for, because those wakes were held for exactly this moment, and because a colleague
+   * with no turn to steer has no timing to choose between. One that is mid-turn is not
+   * interrupted, and it is not queued a row of stale single-message turns either: the message
+   * is held and goes into the one turn that hands over everything that arrived meanwhile.
+   * A caller that asked for `step-end` is the one exception — its message is steered into the
+   * turn that is running, to be read at that turn's next step boundary — and its hold stays
+   * until the harness claims it, so the promise survives a process that stops first.
    * @param message - the stored message.
    * @param key - the message's key in the messages table, where the outcome is recorded.
    * @param colleague - the recipient's roster record.
-   * @returns `delivered` or `queued`.
+   * @param notify - when the caller asked the wake to arrive.
+   * @returns `delivered`, `queued`, or `steered`.
    */
-  const deliver = async (message, key, colleague) => {
+  const deliver = async (message, key, colleague, notify = NOTIFY_TURN_END) => {
     const agent = await ensureAgent(colleague.sessionId)
+    if (agent.status !== 'idle' && notify === NOTIFY_STEP_END) {
+      await holdWake(colleague.sessionId, message, NOTIFY_STEP_END)
+      agent.steer(batchPayload([message], undefined, canonicalRole(colleague.role)))
+      await recordDelivery(key, colleague.sessionId, {
+        status: 'steered',
+        at: Date.now(),
+        detail: 'the colleague is mid-turn; it receives this at the end of the step that is running',
+      })
+      return 'steered'
+    }
     if (agent.status !== 'idle') {
       await holdWake(colleague.sessionId, message)
       await recordDelivery(key, colleague.sessionId, {
@@ -1202,19 +1371,11 @@ function createOffice(ctx, domain, config, hooks) {
       })
       return 'queued'
     }
-    const held = heldWakes(colleague.sessionId)
+    const held = await recoverStepEndWakes(colleague.sessionId, heldWakes(colleague.sessionId), agent)
     const batch = [...held.map(entry => entry.message), message]
     const newest = readMessages(message.channelId, 1).at(-1)
     agent.followup(batchPayload(batch, newest?.seq, canonicalRole(colleague.role)))
-    for (const entry of held) {
-      await pendingWakes.delete(entry.pendingKey)
-      if (messages.get(entry.messageKey) === undefined) continue
-      await recordDelivery(entry.messageKey, colleague.sessionId, {
-        status: 'delivered',
-        at: Date.now(),
-        batch: batch.length,
-      })
-    }
+    for (const entry of held) await recordReleased(entry, colleague.sessionId, batch.length)
     await recordDelivery(key, colleague.sessionId, {
       status: 'delivered',
       at: Date.now(),
@@ -1327,10 +1488,12 @@ function createOffice(ctx, domain, config, hooks) {
    * A message that also addresses the user is copied into the user mailbox. The public record is
    * written first and the copy second, so the office's own history never depends on the mailbox
    * being writable, and a failure to copy is reported instead of losing the message.
-   * @param request - the destination, the sender identity, the body, and the named recipients.
+   * @param request - the destination, the sender identity, the body, the named recipients, and
+   *   when those recipients should receive it if they are mid-turn. `notify` is ignored for a
+   *   message that only addresses the user: the user has no session to steer.
    * @returns the stored message and one delivery outcome per recipient.
    */
-  const post = async ({ channel, sender, text, recipients, kind, mentionAll, toUser = false }) => {
+  const post = async ({ channel, sender, text, recipients, kind, mentionAll, toUser = false, notify }) => {
     if (text.length > config.maxMessageChars) {
       throw new Error(`dsh-office: message is ${text.length} characters; the limit is ${config.maxMessageChars}`)
     }
@@ -1399,7 +1562,7 @@ function createOffice(ctx, domain, config, hooks) {
     }
     for (const colleague of audience) {
       try {
-        const status = await deliver(message, key, colleague)
+        const status = await deliver(message, key, colleague, notify)
         deliveries.push({ colleague: colleague.name, status })
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
@@ -1896,6 +2059,7 @@ function createOffice(ctx, domain, config, hooks) {
     hire,
     post,
     compactRange,
+    acknowledgeClaim,
     flushWakes,
     restoreWakes,
     senderOf,
@@ -3231,13 +3395,23 @@ function createCommunicationTools(agent, tool) {
       description:
         'Send a private message to one colleague, which is how to answer one person without waking the '
         + "rest of the office. The message is stored in the office and delivered into that colleague's "
-        + 'session as a user turn, waking it if it is inactive. Every delivery outcome is reported: '
-        + 'a wake that could not happen is reported rather than silently dropped. Addressing the user '
-        + 'writes to the user mailbox instead: the user has no session, so nothing is woken and the '
-        + 'message waits there.',
+        + 'session as a user turn, waking it if it is inactive. A colleague that is mid-turn is not '
+        + 'interrupted by default: the message is held and handed over as one turn when that turn ends. '
+        + 'Pass notify:"step-end" to steer instead, so the colleague reads it at the end of the step it '
+        + 'is running — that is how to change what a colleague is doing, where the default answers it '
+        + 'afterwards. Every delivery outcome is reported: a wake that could not happen is reported '
+        + 'rather than silently dropped. Addressing the user writes to the user mailbox instead: the '
+        + 'user has no session, so nothing is woken and the message waits there.',
       parameters: tool.parameters(['to', 'text'], {
         to: { type: 'string', description: "The colleague's session title, or the user's name for the user mailbox." },
         text: { type: 'string', description: 'The message body.' },
+        notify: {
+          type: 'string',
+          enum: NOTIFY_TIMINGS,
+          description: 'When a colleague that is mid-turn receives this: "turn-end" (default) holds it and '
+            + 'hands it over as one turn when that turn ends; "step-end" splices it into the running turn at '
+            + 'its next step boundary. An idle colleague receives it now either way.',
+        },
       }),
       output: {
         schema: officePostSchema(),
@@ -3248,6 +3422,7 @@ function createCommunicationTools(agent, tool) {
         const { office, name: officeName } = resolved
         tool.require(resolved, 'dm', 'office_dm')
         const body = requireText(args, 'office_dm')
+        const notify = requireNotify(args?.notify, 'office_dm')
         if (typeof args?.to !== 'string' || args.to.length === 0) {
           throw new TypeError('office_dm: to must be a non-empty colleague name or the user name')
         }
@@ -3259,6 +3434,7 @@ function createCommunicationTools(agent, tool) {
           recipients: audience.colleagues,
           kind: 'dm',
           toUser: audience.toUser,
+          notify,
         }), officeName)
       },
     })
@@ -4095,6 +4271,18 @@ async function applyOffice(ctx, raw, rowId) {
       // The held wakes stay where they are, so the next idle transition delivers them; the
       // failure is reported here because nothing else would show it.
       ctx.logger?.warn?.(`dsh-office: delivering held wakes failed: ${String(error)}`)
+    })
+  })
+
+  // A step-end wake reaches its colleague's turn as pending input, and the office's hold for it
+  // is deleted the moment the harness claims it — what stays held is exactly what the harness
+  // has not taken. `agent/inbox/claimed` is a process-wide agent event, so an office is told
+  // about every claim and acknowledges only the payloads it holds a step-end wake for.
+  ctx.on('agent/inbox/claimed', ({ agent, message }) => {
+    void office.acknowledgeClaim(agent.session.header.id, message.id).catch((error) => {
+      // The hold stays where it is, so the idle transition that follows finds it and recovers
+      // it; the failure is reported here because nothing else would show it.
+      ctx.logger?.warn?.(`dsh-office: acknowledging a claimed wake failed: ${String(error)}`)
     })
   })
 

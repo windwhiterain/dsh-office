@@ -1,9 +1,10 @@
 # Design
 
 Why `dsh-office` is shaped this way: the row kinds, the host/office split, the boss preset's
-mask, how the profile patch is edited, and the role model. Read this before changing
-`index.js`; the storage and identity contract is in [data-model.md](data-model.md), and what
-happens when something is posted is in [delivery.md](delivery.md).
+mask, how the profile patch is edited, the role model, and why a wake can be timed. Read this
+before changing `index.js`; the storage and identity contract is in
+[data-model.md](data-model.md), and what happens when something is posted is in
+[delivery.md](delivery.md).
 
 ## Two kinds of row, told apart by the row id
 
@@ -241,3 +242,29 @@ Colleagues may still *write* to it â€” every predefined role holds `office_dm` â
 that names the user is stored in its channel and then copied in. See
 [delivery.md](delivery.md) for the copy's ordering and its delivery outcome,
 and [data-model.md](data-model.md) for the record shape.
+
+## Why a wake can be timed, and why it is still durable
+
+`office_dm` accepts `notify: 'turn-end' | 'step-end'`, and the second is the only way an office wake
+is ever spliced into a turn that is already running. The two things a colleague can be sent are
+genuinely different questions: *answer this afterwards* is what a held, merged turn is for, and
+*stop doing that now* cannot wait for the turn to end without arriving useless.
+
+Three harness contracts make it safe rather than a fire-and-forget splice:
+
+- `Agent.steer` puts the message into the session's inbox as pending step input, which the loop
+  claims at every step boundary. The colleague therefore reads it between the steps it is running,
+  and the office is heard without interrupting anything.
+- The inbox is a durable session projection, but nothing resumes a colleague whose process died
+  mid-turn, so the office keeps the wake in its own `pending` table as well and deletes it when
+  `agent/inbox/claimed` reports the claim. What stays held is exactly what the harness has not
+  taken, which is the recovery case rather than the normal one.
+- Whether a recovery would become a second delivery is answered by the **colleague's session log**,
+  not by the office's bookkeeping: a claimed message is appended as a `user/message` before the
+  request that reads it. The office already reads that log for a cold resume's route, and reading it
+  here is what makes "did it arrive?" survive a restart. Where a lingering inbox copy exists it is
+  removed (`Agent.inbox.remove`) before the office queues its own turn, so exactly one of the two
+  carries the message.
+
+`notify` is deliberately not on `office_post`: one public post reaches every busy colleague, so the
+timing would turn a single message into an interruption of every run in the office at once.

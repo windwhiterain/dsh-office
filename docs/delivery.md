@@ -39,10 +39,60 @@ single-message turns makes a colleague answer each message minutes after it was 
 answer the last one long after the conversation moved on; a merged turn costs one, and the
 colleague answers once.
 
+`office_dm` may ask for the running turn instead, with `notify: 'step-end'`; the merge above is
+what every other wake, and every caller that names no timing, gets. That choice is described under
+[Step-end: steering a running turn](#step-end-steering-a-running-turn).
+
 Nothing refuses a wake. There is **no per-colleague budget and no cascade-depth bound**: every
 notification that is made is delivered, immediately or held. The only brake is what a colleague
 does with the turn it was given, which is why every frame carries the answering rule described
 under [The answering rule](#the-answering-rule).
+
+## Step-end: steering a running turn
+
+`office_dm` carries one timing argument, `notify`, and it decides only what happens to a colleague
+that is **mid-turn**:
+
+| `notify` | what a mid-turn colleague gets |
+|---|---|
+| `turn-end` (default) | the office holds the message and hands it over as one turn when that turn stops |
+| `step-end` | the message is spliced into the turn that is running and read at that turn's next step boundary |
+
+`step-end` is the harness's own steering: the message enters the colleague's inbox as pending step
+input, and the loop claims pending input at every step boundary, so the colleague reads it between
+the steps it is running rather than after them. That is what a caller wants when the point is to
+change what the colleague is doing — the wrong branch, a correction, a fact the next step needs —
+where the default answers it afterwards. It is deliberately **not** an option on `office_post`:
+one public post that reaches every busy colleague would otherwise splice into every run in the
+office.
+
+An idle colleague has no turn to steer, so it receives the message now either way, and the recorded
+outcome says which happened: `steered` for the splice, `delivered` for a turn.
+
+### A step-end wake is held too
+
+A step-end wake is written to the `pending` table before it is steered, and that hold is what makes
+it durable. The message reaches the colleague's inbox as pending step input, which is itself a
+durable session projection — but an inbox is only claimed by a turn, and nothing resumes a colleague
+whose host died mid-turn, so the hold is what the restarted office acts on.
+
+The hold is deleted when the harness **claims** the message into a step (`agent/inbox/claimed`),
+not when the office queues a turn: what the table holds for one colleague is exactly what the
+harness has not taken. A hold that outlives that claim is therefore recoverable, and `flushWakes`
+recovers it at the next idle transition and at activation:
+
+- A message still pending in the colleague's inbox is **taken back** (`Agent.inbox.remove`) and
+  handed over as the office's own turn, so the step boundary that is coming cannot deliver it a
+  second time.
+- A message the colleague's **session log** already carries drops the hold instead, because a
+  claimed message is appended to its session as a `user/message` before the request that reads it.
+  That read is the durable answer to "did this colleague receive this?", which is what the answer
+  has to survive a restart to be worth anything.
+- A message in neither place — a turn cancelled before its next step, a session whose pending input
+  was discarded — is the case the hold exists for, and it is handed over as the office's own turn.
+
+A recovered wake records `delivered` with a detail naming the recovery: the status is what the
+colleague actually got, and the detail is why it was not the splice its sender asked for.
 
 ## Who is woken
 
@@ -54,8 +104,8 @@ under [The answering rule](#the-answering-rule).
 | `office_post` with `mentions` | exactly the named colleagues |
 | `office_post` with `mention_all: false` | nobody; the message is written to the channel |
 | `office_post` naming the user | the named colleagues, and a copy in the mailbox |
-| `office_dm` to a colleague | that colleague alone |
-| `office_dm` to the user | the mailbox; no session is woken |
+| `office_dm` to a colleague | that colleague alone, at the timing its `notify` asks for |
+| `office_dm` to the user | the mailbox; no session is woken, and `notify` means nothing to a user with no session |
 
 `mention_all` defaults to true when `mentions` is absent and to false when it is present, so
 naming colleagues narrows the audience rather than adding to it, and `mentions: []` posts a notice
@@ -166,6 +216,10 @@ answering it reads as engaging with something already settled. It states what th
 the turn was created, not what it knows when the message is finally answered, and it is the only
 staleness signal a colleague gets.
 
+A step-end wake carries **no** staleness line: it is read at the end of the step that is running,
+so the office does not read the channel's newest sequence for it, and the message is in the turn
+that is being taken rather than in a turn queued behind it.
+
 The frame carries **only** the messages it names. The office does not replay the channel into a
 wake and a colleague has no read position: `office_read` is how anyone sees what they were not
 notified about, which keeps a turn's cost proportional to the messages in it.
@@ -201,7 +255,8 @@ Two consequences follow, and both are deliberate:
 - **A message nobody is notified for reaches nobody's context.** A `mention_all: false` post sits
   in its channel until someone reads it with `office_read`.
 - **A held message waits for the turn to end.** Its sender is told `queued`, not `delivered`, and
-  the message is in the next turn that colleague takes.
+  the message is in the next turn that colleague takes. A `step-end` wake is the one exception its
+  sender can ask for, and it is reported as `steered` rather than `queued`.
 
 ## Durable holds
 
@@ -210,6 +265,9 @@ durable because a wake is a promise the office keeps:
 
 - Activating an office delivers whatever a previous process was holding — **one turn per
   colleague**, whatever that colleague was waiting for.
+- A step-end hold is released when the harness claims its message into a step, and recovered as the
+  office's own turn when nothing did; see
+  [A step-end wake is held too](#a-step-end-wake-is-held-too).
 - A message compacted away while it was held is dropped from the batch on purpose: its summary is
   what replaced it, and the summary is what a reader meets.
 - A **dismissed** colleague's holds are deleted with its roster entry. Nothing would deliver them,
@@ -227,8 +285,9 @@ session id — or by the user's name for the mailbox — and reported in the too
 
 | Status | Meaning |
 |---|---|
-| `delivered` | The turn was handed to the colleague, now or as part of a merged batch. A batch records how many messages it carried. |
+| `delivered` | The turn was handed to the colleague, now or as part of a merged batch. A batch records how many messages it carried. A recovered step-end wake records it with a detail naming the recovery. |
 | `queued` | The colleague was mid-turn at that moment, so the message is held in `pending` and goes into its next turn, merged with whatever else is held for it. |
+| `steered` | The colleague was mid-turn and the message was spliced into the turn it was running, to be read at that turn's next step boundary. |
 | `wakes-disabled` | The office runs with `wakesEnabled: false`; the message is stored and no session is touched. |
 | `mailbox` | The message was addressed to the **user**, who has no session to wake, so it waits in the user mailbox. |
 | `failed` | The delivery itself threw; the message stays in its channel and `office_read` still finds it. |

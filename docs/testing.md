@@ -27,7 +27,9 @@ What it covers, by area:
   role that is no longer predefined.
 - **Delivery** — merging a burst into one turn, a durable hold surviving a simulated restart,
   cold resume on the route the session last logged, delivery statuses, and the frames, including
-  the role-aware answering rule.
+  the role-aware answering rule. A `step-end` wake is covered too: the steer into a running turn,
+  the hold released when the harness claims the message, the recovery of a wake nothing claimed
+  (still pending, discarded, or carried across a restart), and the refusal of an unknown timing.
 - **The user mailbox** — `@user` in a public post filing a copy with its `origin`, `office_dm` to
   the user waking nobody, and every spelling of the mailbox being refused to `office_read` and
   `office_compact` while `channel: "*"` never reaches it.
