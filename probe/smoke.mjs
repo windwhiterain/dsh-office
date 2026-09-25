@@ -491,9 +491,14 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
             {
               id: 'workspace-own',
               title: 'Own',
-              sessionIds: [...liveAgents.values()]
-                .filter(agent => agent.session.header.cwd === '/work/mine')
-                .map(agent => agent.session.header.id),
+              sessionIds: [
+                ...[...liveAgents.values()]
+                  .filter(agent => agent.session.header.cwd === '/work/mine')
+                  .map(agent => agent.session.header.id),
+                // The features' accounted cold rows, which the real registry accounts the same
+                // way it accounts any persisted header.
+                ...(features.accountedIds ?? []),
+              ],
             },
           ],
           resolveByPath: async (path) => (path === '/work/mine' ? { id: 'workspace-own', title: 'Own' } : undefined),
@@ -519,13 +524,14 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       if (name === 'sessionProjections') {
         // Only the harnesses that declare one model selection per session expose the registry, so
         // the checks below can tell a read of the projection from a read of `agent.options`. The
-        // `title` unit is what the Web session list displays; a registry without it carries no
-        // title, which is the case `listedTitle` must answer with the short-id form.
+        // `title` unit is what the Web session list displays: the latest title event a session's
+        // log carries, which the `titles` rename store is the fake of, before any feature-provided
+        // static titles. A registry without the unit carries no title at all.
         if (features.modelSelection === undefined && features.titles === undefined) return undefined
         return {
           stateOf: (session, key) => {
             if (key === 'modelSelection') return features.modelSelection?.[session.header.id]
-            if (key === 'title') return features.titles?.[session.header.id] ?? null
+            if (key === 'title') return titles.get(session.header.id) ?? features.titles?.[session.header.id] ?? null
             return undefined
           },
         }
@@ -806,6 +812,7 @@ const harness = makeHarness(undefined, undefined, {
   titles: { 'session-titled': 'Titled session' },
   coldSessions: [{ id: 'session-cold', createdAt: 0 }, { id: 'session-archived', createdAt: 0 }],
   coldTitles: { 'session-cold': 'Cold session', 'session-archived': 'Archived session' },
+  accountedIds: ['session-cold'],
   archivedSessionIds: ['session-archived'],
 })
 const { routes, liveAgents, titles, resumed, hires, selects, globalTools } = harness
@@ -816,7 +823,7 @@ const outsider = harness.publish('session-outsider')
 const alice = harness.publish('session-alice')
 const bob = harness.publish('session-bob')
 // A live session whose title is projected, for the unadopted report to show.
-const titled = harness.publish('session-titled')
+const titled = harness.publish('session-titled', { cwd: '/work/mine' })
 void titled
 
 await check('no office tool is ever registered globally', () => {
@@ -2752,17 +2759,17 @@ await check('the panel adopts an existing session as a colleague', async () => {
   )
   assert.ok(adoptable !== undefined, 'the snapshot lists the sessions nobody has adopted')
   assert.ok(
-    state.payload.unadopted.some(entry => entry.workspace === undefined && entry.sessionId !== 'session-sam'),
-    'a session the registry holds no account for carries no workspace, for the unfiled group',
+    state.payload.unadopted.every(entry => entry.workspace !== undefined),
+    'a session the registry accounts to no workspace is never offered: the picker shows the accounted ones only',
   )
 
   // The title is the sidebar's own: the live projection for a live session, the projection cache
   // row for a cold one, and the archive set keeps the archived session out of every listing.
   const labeled = state.payload.unadopted.filter(entry =>
-    ['session-titled', 'session-cold', 'session-archived'].includes(entry.sessionId))
+    ['session-sam', 'session-titled', 'session-cold', 'session-archived'].includes(entry.sessionId))
   assert.deepEqual(
-    labeled.map(entry => `${entry.title} (${entry.workspace?.title ?? 'unfiled'})`),
-    ['Titled session (unfiled)', 'Cold session (unfiled)'],
+    labeled.map(entry => `${entry.title} (${entry.workspace.title})`),
+    ['Titled session (Own)', 'sam (Own)', 'Cold session (Own)'],
     'a live session shows its projected title, a cold one its cached title, and an archived one is not offered',
   )
 

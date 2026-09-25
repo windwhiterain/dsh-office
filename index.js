@@ -3670,13 +3670,14 @@ const listedTitle = (record, agents, projections, cache) => {
  * List recent sessions that are not colleagues yet.
  *
  * `sessionQuery` is mounted by the Web composition but is not part of the base guarantee, so an
- * absent service reports an empty list: adoption itself needs only a session id. Two exclusions
- * keep the list what the user can actually reach: a session already on the office roster, and
- * one the workspace registry holds in its **archive set** — an archived session is out of every
- * sidebar, and adoption would put it back in front of the user. The workspace account is read
- * from `workspaceRegistry`, whose entity carries the id, the title, and the header-validated
- * session account — a session the registry holds no workspace account for carries no workspace
- * here. One listing for both the boss tool and the panel snapshot, so the two surfaces cannot
+ * absent service reports an empty list: adoption itself needs only a session id. Three exclusions
+ * keep the list what the user can actually reach: a session already on the office roster; one the
+ * workspace registry holds in its **archive set** — an archived session is out of every sidebar,
+ * and adoption would put it back in front of the user; and one the registry accounts to no
+ * workspace, because the picker's levels are workspace first and a session outside every
+ * workspace list has no level to read under. The workspace account is read from
+ * `workspaceRegistry`, whose entity carries the id, the title, and the header-validated session
+ * account. One listing for both the boss tool and the panel snapshot, so the two surfaces cannot
  * offer different adoptable lists, and one shape so both surfaces group by the same workspace.
  * @param ctx - the plugin context carrying the optional listing services.
  * @param office - the office whose roster the listing excludes.
@@ -3700,7 +3701,8 @@ async function unadoptedSessions(ctx, office, limit) {
     }
   }
   const records = (await query.listSessions())
-    .filter(record => !adopted.has(record.header.id) && !archived.has(record.header.id))
+    .filter(record => !adopted.has(record.header.id) && !archived.has(record.header.id)
+      && workspaces.has(record.header.id))
     .slice(0, limit)
   const agents = ctx.get('agents')
   const projections = ctx.get('sessionProjections')

@@ -1143,12 +1143,13 @@ window.__ModuleLoader__.load({
       const unadopted = snapshot?.unadopted ?? []
 
       // The workspace is the level a reader scans first, the session title is the entry it names
-      // there: one group per workspace, in the order the listing reports, and every session the
-      // registry holds no workspace account for groups under one unfiled heading instead of
-      // reading as a bare id.
+      // there. The listing only offers sessions the registry accounts to a workspace, so the
+      // workspace always carries the entry; a defensive skip drops an unaccounted entry rather
+      // than reading it as a bare id under a heading that does not exist.
       const groups = []
       for (const entry of unadopted) {
-        const key = entry.workspace === undefined ? '' : entry.workspace.id
+        if (entry.workspace === undefined) continue
+        const key = entry.workspace.id
         const group = groups.find(candidate => candidate.key === key)
         if (group === undefined) groups.push({ key, workspace: entry.workspace, entries: [entry] })
         else group.entries.push(entry)
@@ -1203,7 +1204,7 @@ window.__ModuleLoader__.load({
       h('option', { value: '' }, 'Pick a session'),
       groups.map(group => h('optgroup', {
         key: group.key,
-        label: group.workspace === undefined ? 'Unfiled sessions' : group.workspace.title,
+        label: group.workspace.title,
       },
       group.entries.map(entry => h('option', {
         key: entry.sessionId,
