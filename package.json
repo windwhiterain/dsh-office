@@ -1,0 +1,57 @@
+{
+  "name": "dsh-office",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A persistent office of colleague agents for DeepSeek Harness: a roster of ordinary sessions with channels, direct messages, and delivery that wakes a colleague when something is addressed to it.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "agent",
+    "multi-agent",
+    "office",
+    "colleague",
+    "cordis",
+    "plugin",
+    "bundle"
+  ],
+  "license": "MIT",
+  "author": "windwhiterain",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/windwhiterain/dsh-office.git"
+  },
+  "homepage": "https://github.com/windwhiterain/dsh-office#readme",
+  "bugs": {
+    "url": "https://github.com/windwhiterain/dsh-office/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./presets/boss-restrict.mjs": "./presets/boss-restrict.mjs",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "presets/*.mjs",
+    "cordis.patch.yml",
+    "locale/*.json"
+  ],
+  "dependencies": {
+    "yaml": "^2.4.5"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

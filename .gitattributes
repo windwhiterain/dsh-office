@@ -1,0 +1,3 @@
+# Keep the repository in LF: the package ships plain JavaScript and YAML, and a
+# working tree rewritten to CRLF by a Windows checkout makes every diff noisy.
+* text=auto eol=lf

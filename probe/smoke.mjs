@@ -1,0 +1,2018 @@
+/**
+ * Offline probe for dsh-office.
+ *
+ * Drives `apply()` against in-memory fakes so the office logic, the per-agent tool
+ * scoping, and every declared tool output can be checked without a running Harness. A
+ * host plugin's JavaScript generation cannot be reloaded inside a live process, so this
+ * probe is how a code change is verified before the profile is restarted.
+ *
+ * Run: node probe/smoke.mjs
+ */
+
+import assert from 'node:assert/strict'
+import { readFile, rm, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+import { parse } from 'yaml'
+import { apply } from '../index.js'
+
+/** Scratch profile patch this probe edits; kept inside the package, removed at the end. */
+const PATCH_PATH = join(fileURLToPath(new URL('.', import.meta.url)), 'patch-scratch.yml')
+
+/** Seed patch carrying an operator comment that every edit must preserve. */
+const PATCH_SEED = `# operator comment that must survive every edit
+- id: office
+  name: 'dsh-office'
+  disabled: false
+  config:
+    officeName: office
+`
+
+/**
+ * Office rows of a profile patch the Loader would mount.
+ *
+ * The Loader appends a patch entry's `insert` list to the tree and reads an entry
+ * without one as an id-targeted override, which is skipped with a warning when no row
+ * carries that id. Checking a row's presence in the file's text cannot tell those apart,
+ * which is how a created office once reached the profile without ever mounting.
+ * @param text - the profile patch file's contents.
+ * @returns the inserted rows whose module is this package.
+ */
+function mountedOfficeRows(text) {
+  return parse(text)
+    .flatMap(entry => entry?.insert ?? [])
+    .filter(row => row?.name === 'dsh-office')
+}
+
+/** Office rows written as a top-level entry, which the Loader only reads as an override. */
+function overrideOfficeRows(text) {
+  return parse(text).filter(entry => entry?.name === 'dsh-office')
+}
+
+/** Minimal JSON Schema check over the subset the tools declare. */
+function validate(value, schema, path = 'value') {  const errors = []
+  if (schema.type === 'object') {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return [`${path} must be an object`]
+    }
+    for (const key of schema.required ?? []) {
+      if (!(key in value)) errors.push(`${path}.${key} is required`)
+    }
+    if (schema.additionalProperties === false) {
+      const declared = Object.keys(schema.properties ?? {})
+      for (const key of Object.keys(value)) {
+        if (!declared.includes(key)) errors.push(`${path}.${key} is not a declared property`)
+      }
+    }
+    for (const [key, sub] of Object.entries(schema.properties ?? {})) {
+      if (key in value) errors.push(...validate(value[key], sub, `${path}.${key}`))
+    }
+    return errors
+  }
+  if (schema.type === 'array') {
+    if (!Array.isArray(value)) return [`${path} must be an array`]
+    return value.flatMap((item, index) => validate(item, schema.items ?? {}, `${path}[${index}]`))
+  }
+  if (schema.type === 'string' && typeof value !== 'string') errors.push(`${path} must be a string`)
+  if (schema.type === 'integer' && !Number.isSafeInteger(value)) errors.push(`${path} must be an integer`)
+  if (schema.type === 'boolean' && typeof value !== 'boolean') errors.push(`${path} must be a boolean`)
+  if (schema.enum !== undefined && !schema.enum.includes(value)) {
+    errors.push(`${path} must be one of ${schema.enum.join('|')}`)
+  }
+  return errors
+}
+
+/**
+ * Check one tool's parameter schema against the rules the providers enforce.
+ *
+ * A `required` array with a repeated element is rejected at the API boundary before any
+ * call is made, and the rejection names one tool while invalidating the whole batch. The
+ * declaration helper adds the role's `office` argument itself, so a tool that lists
+ * `office` a second time duplicates it here.
+ * @param schema - the `parameters` schema of one registered tool.
+ * @param path - the diagnostic prefix.
+ * @returns the violations, empty when the schema is well formed.
+ */
+function parameterSchemaErrors(schema, path = 'parameters') {
+  const errors = []
+  if (schema?.type !== 'object') errors.push(`${path}.type must be "object"`)
+  const required = schema?.required ?? []
+  if (new Set(required).size !== required.length) {
+    errors.push(`${path}.required has non-unique elements: ${JSON.stringify(required)}`)
+  }
+  const declared = Object.keys(schema?.properties ?? {})
+  for (const key of required) {
+    if (!declared.includes(key)) errors.push(`${path}.required names "${key}", which the properties do not declare`)
+  }
+  return errors
+}
+
+/** One in-memory `KvTable` with the domain facility's read and write contract. */
+function makeTable() {
+  const records = new Map()
+  return {
+    get: key => records.get(key),
+    entries: () => records.entries(),
+    keys: () => records.keys(),
+    get size() { return records.size },
+    put: async (key, value) => { records.set(key, value) },
+    delete: async key => records.delete(key),
+    update: async (key, transform) => {
+      if (!records.has(key)) throw new Error(`missing-key: ${key}`)
+      const next = transform(records.get(key))
+      records.set(key, next)
+      return next
+    },
+  }
+}
+
+/** Execute one registered route against a minimal request and response. */
+function callRoute(routes, path, options = {}) {
+  const [pathname] = path.split('?')
+  const route = routes.get(pathname)
+  assert.ok(route, `route ${pathname} must be registered`)
+  const { method = 'GET', headers = {}, body } = options
+  return new Promise((resolve, reject) => {
+    const listeners = new Map()
+    const req = {
+      method,
+      headers,
+      // The Web server matches on `new URL(req.url).pathname` and reads the query from the
+      // same URL, so a fake request carries the whole path.
+      url: path,
+      on(event, listener) {
+        if (!listeners.has(event)) listeners.set(event, [])
+        listeners.get(event).push(listener)
+        return req
+      },
+      destroy() {},
+    }
+    const res = {
+      status: undefined,
+      payload: undefined,
+      writeHead(status) { this.status = status },
+      end(text) {
+        this.payload = text === undefined ? undefined : JSON.parse(text)
+        resolve(this)
+      },
+    }
+    Promise.resolve(route.handler(req, res)).catch(reject)
+    if (method === 'POST') {
+      queueMicrotask(() => {
+        for (const listener of listeners.get('data') ?? []) listener(Buffer.from(JSON.stringify(body ?? {})))
+        for (const listener of listeners.get('end') ?? []) listener()
+      })
+    }
+  })
+}
+
+/**
+ * Whether one value survives a JSON round trip, which is what `Session.append` requires.
+ *
+ * The session log is JSON, so the harness rejects a value JSON would change: `undefined`, a
+ * function, a symbol, a BigInt, a non-finite or negative-zero number, a sparse array, and any
+ * object whose prototype is not `Object.prototype` — a `Map`, a `Set`, a `Date`, a class
+ * instance. A delivered message is appended to the target's log inside an
+ * `agent/inbox/spliced` event, so this is the check a fake agent must apply to it.
+ * @param value - the value to test.
+ * @param path - prototypes already visited on this path, to detect a cycle.
+ * @returns whether JSON preserves the value exactly.
+ */
+function jsonSafe(value, path = new Set()) {
+  if (value === null) return true
+  const type = typeof value
+  if (type === 'string' || type === 'boolean') return true
+  if (type === 'number') return Number.isFinite(value) && !Object.is(value, -0)
+  if (type !== 'object') return false
+  if (path.has(value)) return false
+  path.add(value)
+  const safe = Array.isArray(value)
+    ? value.every((item, index) => index in value && jsonSafe(item, path))
+    : (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+      && Object.values(value).every(item => jsonSafe(item, path))
+  path.delete(value)
+  return safe
+}
+
+/** One fake Agent carrying its own tool scope, exactly as `agent.ctx.tools` does. */
+function makeAgent(sessionId, status, cwd, preset) {
+  const tools = new Map()
+  const sent = []
+  /**
+   * Accept one injected message the way the real loop does: the inbox commits an
+   * `agent/inbox/spliced` event carrying it, and the session log rejects data it cannot
+   * store. A fake that accepts anything hides a delivery that never reaches a colleague.
+   * @param message - the message the office injected.
+   */
+  const accept = (message) => {
+    assert.ok(
+      jsonSafe(message),
+      `a delivered message must be losslessly JSON-serializable, got ${JSON.stringify(message)}`,
+    )
+    return message
+  }
+  return {
+    sent,
+    tools,
+    session: { header: { id: sessionId, cwd, ...(preset === undefined ? {} : { agentPreset: preset }) } },
+    status,
+    ctx: {
+      tools: {
+        register: (definition) => {
+          tools.set(definition.name, definition)
+          return () => tools.delete(definition.name)
+        },
+      },
+    },
+    followup: message => sent.push({ via: 'followup', message: accept(message) }),
+    steer: message => sent.push({ via: 'steer', message: accept(message) }),
+  }
+}
+
+/**
+ * Collect the fake session world.
+ *
+ * `globalTools` must stay empty: office tools are installed per agent scope, never on
+ * `ctx.tools`. `titles` is the fake `session/title` store, and `publish` is the only way
+ * an agent enters the live registry, so `agent/created` fires exactly as it does live.
+ */
+/**
+ * `agent/created` and `agent/disposed` listeners, shared by every harness.
+ *
+ * These are Cordis ROOT events: a listener registered through any context sees every
+ * agent the process publishes, whichever context published it. Keeping them per harness
+ * would hide an agent from the one host that arms it.
+ */
+const createdListeners = []
+const disposedListeners = []
+/**
+ * `agent/status` listeners, shared by every harness for the same reason as the two above: the
+ * office delivers what it held for a colleague when that colleague's turn ends, and the event
+ * it listens for is process-wide.
+ */
+const statusListeners = []
+
+function makeHarness(rawConfig, loggedRoute, features = {}) {
+  const tables = new Map()
+  const globalTools = new Map()
+  const routes = new Map()
+  const liveAgents = new Map()
+  const titles = new Map()
+  const resumed = []
+  const hires = []
+  const selects = []
+  /** One-shot failures the harness was asked to inject, so a check can fail an operation once. */
+  const failures = {}
+  /**
+   * Storage units this harness has opened, keyed by unit name.
+   *
+   * A real backend keeps one medium per unit name, so reopening a unit returns what was
+   * stored in it — including the global slot that records which office owns it.
+   */
+  const units = new Map()
+  /**
+   * Cleanups the fake context owes its fiber: effect callbacks and `on` listeners. Cordis
+   * runs them when the fiber is disposed, so the probe must too — the office keeps both
+   * module-level registry state and process-wide tool installation.
+   */
+  const effects = []
+  const loggedEvents = loggedRoute === undefined
+    ? []
+    : [{ type: 'request/header', data: { header: { config: loggedRoute } } }]
+
+  function publish(sessionId, options = {}) {
+    const agent = makeAgent(sessionId, options.status ?? 'idle', options.cwd, options.preset)
+    liveAgents.set(sessionId, agent)
+    for (const listener of createdListeners) listener({ agent })
+    return agent
+  }
+
+  const ctx = {
+    storageDomain: {
+      open: async (spec) => {
+        if (!units.has(spec.name)) units.set(spec.name, { value: spec.global?.initial })
+        const slot = units.get(spec.name)
+        return {
+          name: spec.name,
+          global: {
+            get: () => slot.value,
+            set: async (next) => { slot.value = next },
+          },
+          table: (name) => {
+            if (!tables.has(name)) tables.set(name, makeTable())
+            return tables.get(name)
+          },
+          close: async () => {},
+        }
+      },
+    },
+    tools: {
+      register: (definition) => {
+        globalTools.set(definition.name, definition)
+        return () => globalTools.delete(definition.name)
+      },
+    },
+    agents: {
+      get: sessionId => liveAgents.get(sessionId),
+      list: () => [...liveAgents.values()],
+      resume: async (options) => {
+        if (options?.agentOptions === undefined) {
+          throw new Error('resume must carry agentOptions: the provider/model prompt variables read agent.options')
+        }
+        // A single failed resume models the transient failure a real deployment hits (a
+        // session that cannot be brought up right now). The message stays stored and unseen,
+        // which is the case a later wake has to carry.
+        if (features.failResumeOnce === true && !failures.resume) {
+          failures.resume = options.resumeSessionId
+          throw new Error(`resume failed for ${options.resumeSessionId}`)
+        }
+        resumed.push({ sessionId: options.resumeSessionId, agentOptions: options.agentOptions })
+        if (features.slowResumeMs !== undefined) {
+          // A cold start that takes a moment, which is when the channel can move on between the
+          // message being stored and the colleague being handed it.
+          await new Promise(resolve => setTimeout(resolve, features.slowResumeMs))
+        }
+        const agent = publish(options.resumeSessionId)
+        return { agent, dispose: async () => {} }
+      },
+    },
+    on: (event, listener) => {
+      const listeners = event === 'agent/created'
+        ? createdListeners
+        : event === 'agent/disposed' ? disposedListeners
+          : event === 'agent/status' ? statusListeners : undefined
+      if (listeners === undefined) return () => {}
+      listeners.push(listener)
+      const dispose = () => {
+        const index = listeners.indexOf(listener)
+        if (index >= 0) listeners.splice(index, 1)
+      }
+      // Cordis scopes a listener to the fiber that registered it, so a disposed office
+      // stops observing agents. The fake must do the same or a closed harness keeps
+      // arming agents for offices that are no longer mounted.
+      effects.push(dispose)
+      return dispose
+    },
+    webServer: {
+      register: (route) => {
+        routes.set(route.path, route)
+        return () => routes.delete(route.path)
+      },
+    },
+    connection: {
+      requestRejection: (request) => (request.headers['x-test-refuse'] === 'yes' ? 403 : undefined),
+    },
+    effect: (callback) => {
+      const disposer = callback()
+      const dispose = () => { if (typeof disposer === 'function') disposer() }
+      effects.push(dispose)
+      return dispose
+    },
+    // Cordis runs the callback once every named service is available; the fakes are
+    // plain properties, so availability is immediate here.
+    inject: (deps, callback) => callback(ctx),
+    get: (name) => {
+      if (name === 'agentDefaultModel') {
+        return { currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }) }
+      }
+      if (name === 'sessionQuery') {
+        return {
+          readSession: async () => ({ events: loggedEvents }),
+          readTitle: async (sessionId) => {
+            const title = titles.get(sessionId)
+            return title === undefined
+              ? undefined
+              : { title, source: { kind: 'user' }, messageSeqs: [], eventSeq: 0, updatedAt: 0 }
+          },
+        }
+      }
+      if (name === 'workspaceRegistry') {
+        return {
+          list: () => [
+            { id: 'workspace-first', title: 'First' },
+            { id: 'workspace-own', title: 'Own' },
+          ],
+          resolveByPath: async (path) => (path === '/work/mine' ? { id: 'workspace-own', title: 'Own' } : undefined),
+        }
+      }
+      if (name === 'profileContext') {
+        return features.profileContext === false ? undefined : { patchPath: PATCH_PATH }
+      }
+      if (name === 'agentPresets') {
+        return { list: async () => [{ id: 'standard', name: 'Standard' }, { id: 'broken', broken: 'nope' }] }
+      }
+      if (name === 'sessionController') {
+        return {
+          create: async (request) => {
+            hires.push({ workspaceId: request.workspaceId, agentPreset: request.agentPreset })
+            const sessionId = `session-hired-${hires.length}`
+            publish(sessionId)
+            return {
+              sessionId,
+              workspaceId: request.workspaceId,
+              ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
+            }
+          },
+          rename: async ({ sessionId, title }) => {
+            titles.set(sessionId, title)
+            return { title, seq: 0 }
+          },
+          selectModel: async (request) => {
+            selects.push(request)
+            return { selection: { provider: request.provider, model: request.model } }
+          },
+          modelCatalog: async () => ({
+            default: { provider: 'default-provider', model: 'default-model' },
+            routableProviders: ['probe'],
+            groups: [{ id: 'probe', name: 'Probe', models: [{ id: 'probe-model', name: 'Probe Model' }] }],
+            failures: [],
+          }),
+        }
+      }
+      // Cordis reads a service either as `ctx.<name>` or through `ctx.get(name)`; the
+      // remaining fakes are plain properties, so fall back to them.
+      return ctx[name]
+    },
+    // One row per apply call, so this harness rewrites the id before mounting each row.
+    // The kind of a row is its id, exactly as it is for a Loader entry.
+    fiber: { entry: { options: { id: '' } } },
+    logger: { error: (message) => { throw new Error(message) } },
+  }
+  /**
+   * Disposing a fiber runs its effects' cleanups, and the office keeps module-level state:
+   * which offices are mounted and which agents hold the shared tool set. A check that
+   * leaves a harness mounted would leak both into every later check.
+   */
+  const close = async () => {
+    for (const dispose of effects.reverse()) dispose()
+    effects.length = 0
+  }
+  openedHarnesses.push(close)
+  return {
+    ctx,
+    globalTools,
+    routes,
+    liveAgents,
+    titles,
+    resumed,
+    hires,
+    selects,
+    publish,
+    close,
+    /**
+     * End or start one live agent's turn, firing `agent/status` exactly as the loop's phase
+     * change does, and let the office finish what that releases.
+     *
+     * The delivery a status change triggers is asynchronous, so this waits for a task boundary
+     * rather than a microtask: the office awaits storage writes, which are promises of their own.
+     * @param sessionId - the live agent whose status changes.
+     * @param status - the status it enters.
+     */
+    setStatus: async (sessionId, status) => {
+      const agent = liveAgents.get(sessionId)
+      assert.ok(agent, `${sessionId} must be live to change its status`)
+      agent.status = status
+      for (const listener of statusListeners) listener({ agent, status })
+      await new Promise(resolve => setTimeout(resolve, 0))
+    },
+    /** Enter one already-built agent into this harness, firing `agent/created`. */
+    adoptAgent: (agent) => {
+      liveAgents.set(agent.session.header.id, agent)
+      for (const listener of createdListeners) listener({ agent })
+      return agent
+    },
+    dispose: (agent) => {
+      liveAgents.delete(agent.session.header.id)
+      for (const listener of disposedListeners) listener({ agent })
+    },
+    /**
+     * Mount this harness's rows. An office row is the normal case; the host is a process
+     * singleton, so only the harness that owns it passes `features.host`, and every other
+     * harness mounts offices into that one host's registry.
+     *
+     * The row id is the office's default storage key, so each harness takes the id its office
+     * name would produce: two harnesses sharing an id would share one registry entry. The
+     * shipped office keeps the bare `office` id its own patch uses.
+     */
+    ready: (async () => {
+      if (features.host === true) {
+        ctx.fiber.entry.options.id = 'office-host'
+        await apply(ctx, features.hostConfig ?? {})
+      }
+      if (features.office !== false) {
+        const officeName = rawConfig?.officeName ?? 'office'
+        ctx.fiber.entry.options.id = features.rowId ?? (officeName === 'office' ? 'office' : `office_${officeName}`)
+        await apply(ctx, { officeName: 'office', ...(rawConfig ?? {}) })
+      }
+    })(),
+  }
+}
+
+/** Execute one agent-scoped tool and assert its value matches the declared schema. */
+async function call(agent, name, args) {
+  const tool = agent.tools.get(name)
+  assert.ok(tool, `tool ${name} must be installed for ${agent.session.header.id}`)
+  const value = await tool.execute(args, { agent })
+  const errors = validate(value, tool.output.schema)
+  assert.deepEqual(errors, [], `${name} output violates its declared schema`)
+  assert.ok(Array.isArray(tool.output.render(args, value)), `${name} render must return content blocks`)
+  return value
+}
+
+/**
+ * Call one boss tool. A boss names the office it acts on, so every boss call carries it;
+ * `call` stays the raw form for the checks that exercise the office argument itself.
+ * @param agent - the boss agent.
+ * @param officeName - the office the call acts on.
+ * @param name - the registered tool name.
+ * @param args - the remaining tool arguments.
+ * @returns the validated tool value.
+ */
+const callBoss = (agent, officeName, name, args = {}) => call(agent, name, { office: officeName, ...args })
+
+/**
+ * Build the path of one office route.
+ *
+ * An office travels as a query parameter rather than as a path segment, because an office
+ * name accepts any script and every office shares one route table.
+ * @param verb - `state`, `post`, `hire`, or `dismiss`.
+ * @param officeName - the office to act on.
+ * @returns the request path.
+ */
+const officeRoute = (verb, officeName) => `/dsh-office/offices/${verb}?office=${encodeURIComponent(officeName)}`
+
+const toolNames = (agent) => {
+  assert.ok(agent, 'the agent must be live')
+  return [...agent.tools.keys()].sort()
+}
+
+const checks = []
+/**
+ * Harnesses opened since the running check began. The probe's first harness is created
+ * outside any check and stays mounted for the whole run; every harness a check opens is
+ * closed when that check ends, so one check's offices never resolve another's roles.
+ */
+let openedHarnesses = []
+const check = async (label, run) => {
+  openedHarnesses = []
+  try {
+    await run()
+  } finally {
+    for (const close of openedHarnesses.reverse()) await close()
+    openedHarnesses = []
+  }
+  checks.push(label)
+}
+
+// The host is a process singleton, so the checks that need a host of their own run before
+// the shared one exists: each harness owns the singleton for its check, and the per-check
+// disposal hands it back.
+await check('office management refuses when the deployment exposes no patch', async () => {
+  const bare = makeHarness(undefined, undefined, { host: true, profileContext: false })
+  await bare.ready
+  const refused = await callRoute(bare.routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'annex' },
+  })
+  assert.equal(refused.status, 503, 'no patch source means refuse, never guess')
+  const refusedDelete = await callRoute(bare.routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'office' },
+  })
+  assert.equal(refusedDelete.status, 503)
+})
+
+await check('the panel answers while no office is mounted', async () => {
+  const hostOnly = makeHarness(undefined, undefined, { host: true, office: false })
+  await hostOnly.ready
+  const discovered = await callRoute(hostOnly.routes, '/dsh-office/offices')
+  assert.equal(discovered.status, 200, 'the registry route belongs to the host, not to an office')
+  assert.deepEqual(discovered.payload.offices, [], 'and reports an empty registry rather than failing')
+
+  await writeFile(PATCH_PATH, PATCH_SEED)
+  const created = await callRoute(hostOnly.routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'first' },
+  })
+  assert.equal(created.status, 202, 'the first office can be created while none is mounted')
+
+  // The row this package's own patch ships is identified by its bare id even when it carries
+  // nothing but a disablement — the shape an operator writes to turn the office off. Without
+  // that, creating `office` again would mount a second storage unit for the same name.
+  await writeFile(PATCH_PATH, '- id: office\n  disabled: true\n')
+  const declared = await callRoute(hostOnly.routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'office' },
+  })
+  assert.equal(declared.status, 409, 'a nameless row still declares the office it names')
+  await rm(PATCH_PATH, { force: true })
+})
+
+await check('an office alone arms nobody, because the host owns the tool set', async () => {
+  const unhosted = makeHarness({ officeName: 'unhosted' })
+  await unhosted.ready
+  const unhostedBoss = unhosted.publish('session-unhosted-boss', { preset: 'office-boss' })
+  assert.deepEqual(toolNames(unhostedBoss), [], 'an office row registers no tool of its own')
+})
+
+const harness = makeHarness(undefined, undefined, { host: true })
+const { routes, liveAgents, titles, resumed, hires, selects, globalTools } = harness
+await harness.ready
+
+const boss = harness.publish('session-boss', { preset: 'office-boss' })
+const outsider = harness.publish('session-outsider')
+const alice = harness.publish('session-alice')
+const bob = harness.publish('session-bob')
+
+await check('no office tool is ever registered globally', () => {
+  assert.deepEqual([...globalTools.keys()], [], 'the office contributes nothing to the global tool layer')
+})
+
+await check('the boss holds the office complete tool set, the colleague only its channels', () => {
+  assert.deepEqual(toolNames(boss), [
+    'office_adopt',
+    'office_compact',
+    'office_dismiss',
+    'office_dm',
+    'office_hire',
+    'office_list',
+    'office_post',
+    'office_read',
+    'office_rename',
+    'office_roster',
+  ])
+  assert.deepEqual(toolNames(outsider), [], 'a session with no role holds nothing')
+})
+
+await check('a session with no office role gets no office tool', () => {
+  assert.deepEqual(toolNames(outsider), [])
+  assert.deepEqual(toolNames(alice), [], 'a colleague holds nothing until it is adopted')
+})
+
+await check('activation seeds #general and an empty roster', async () => {
+  const roster = await callBoss(boss, 'office', 'office_roster', {})
+  assert.deepEqual(roster.colleagues, [])
+  assert.deepEqual(roster.channels.map(entry => entry.channelId), ['general'])
+})
+
+await check('adopting a live session installs the channel tools into it', async () => {
+  titles.set('session-alice', 'Alice Smith')
+  titles.set('session-bob', 'bob')
+  await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-alice', role: 'reviewer' })
+  await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-bob' })
+  assert.deepEqual(toolNames(alice), ['office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(bob), ['office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(outsider), [], 'adoption does not spread to other sessions')
+  const roster = await callBoss(boss, 'office', 'office_roster', {})
+  assert.deepEqual(roster.colleagues.map(entry => entry.name).sort(), ['Alice Smith', 'bob'])
+})
+
+await check('every installed tool declares schemas the providers accept', () => {
+  for (const agent of [boss, alice, bob]) {
+    for (const [name, tool] of agent.tools) {
+      assert.deepEqual(parameterSchemaErrors(tool.parameters), [], `${name} parameter schema`)
+      // The same malformation invalidates an output schema: it is the same JSON Schema
+      // dialect, and the result is validated against it after every call.
+      assert.deepEqual(
+        parameterSchemaErrors(tool.output.schema, 'output.schema'),
+        [],
+        `${name} output schema`,
+      )
+    }
+  }
+})
+
+await check('office is a required parameter for a boss and optional for a colleague', () => {
+  const declaresOffice = (agent, name) => Object.keys(agent.tools.get(name).parameters.properties ?? {}).includes('office')
+  const requiresOffice = (agent, name) => (agent.tools.get(name).parameters.required ?? []).includes('office')
+  for (const name of toolNames(boss)) {
+    if (!declaresOffice(boss, name)) continue
+    assert.ok(requiresOffice(boss, name), `${name} must require office for a boss`)
+  }
+  for (const name of toolNames(alice)) {
+    assert.ok(!requiresOffice(alice, name), `${name} must leave office optional for a colleague`)
+  }
+})
+
+await check('renaming a session renames the colleague, with no office-side rename', async () => {
+  titles.set('session-bob', 'Robert')
+  const roster = await callBoss(boss, 'office', 'office_roster', {})
+  assert.ok(roster.colleagues.some(entry => entry.name === 'Robert' && entry.sessionId === 'session-bob'))
+  const addressed = await call(alice, 'office_dm', { to: 'Robert', text: 'addressed by the new title' })
+  assert.equal(addressed.message.channelId, 'dm-sessionalice+sessionbob')
+  assert.deepEqual(addressed.deliveries, [{ colleague: 'Robert', status: 'delivered' }])
+  titles.set('session-bob', 'bob')
+})
+
+await check('an ambiguous session title fails loud instead of addressing one colleague', async () => {
+  titles.set('session-alice', 'same')
+  titles.set('session-bob', 'same')
+  await assert.rejects(
+    () => call(alice, 'office_post', { text: 'who?', mentions: ['same'] }),
+    /matches 2 colleagues/,
+  )
+  titles.set('session-alice', 'Alice Smith')
+  titles.set('session-bob', 'bob')
+})
+
+await check('office_post notifies the whole office by default and can be narrowed', async () => {
+  const before = resumed.length
+  const posted = await call(alice, 'office_post', { text: 'standup in 10' })
+  assert.deepEqual(
+    posted.deliveries,
+    [{ colleague: 'bob', status: 'delivered' }],
+    'a public post notifies the office without being asked to',
+  )
+  assert.equal(posted.message.channelId, 'general')
+  assert.equal(resumed.length, before, 'a colleague that is already live is not resumed to be notified')
+  const read = await call(alice, 'office_read', { channel: '#general' })
+  assert.equal(read.messages.at(-1).text, 'standup in 10')
+  assert.equal(read.messages.at(-1).senderName, 'Alice Smith', 'the sender is named by its session title')
+
+  const quiet = await call(alice, 'office_post', { text: 'quiet notice', mention_all: false })
+  assert.deepEqual(quiet.deliveries, [], 'mention_all:false posts without waking anyone')
+  const unnamed = await call(alice, 'office_post', { text: 'also quiet', mentions: [] })
+  assert.deepEqual(unnamed.deliveries, [], 'an explicit empty mentions list also wakes nobody')
+  await assert.rejects(
+    () => call(alice, 'office_post', { text: 'x', mention_all: 'yes' }),
+    /mention_all must be a boolean/,
+  )
+})
+
+await check('office_post with a mention cold-resumes the colleague and delivers a user turn', async () => {
+  const before = bob.sent.length
+  const posted = await call(alice, 'office_post', { text: 'please review the diff', mentions: ['bob'] })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'bob', status: 'delivered' }])
+  assert.equal(bob.sent.length, before + 1)
+  const { via, message } = bob.sent.at(-1)
+  assert.equal(via, 'followup', 'an idle colleague is woken with a followup turn')
+  assert.equal(message.role, 'user')
+  assert.equal(message.source.kind, 'office-message')
+  assert.equal(message.source.messageId, posted.message.messageId)
+  assert.match(message.content[0].text, /^\[office #general from Alice Smith/)
+})
+
+await check('a mention that matches no session title fails loud', async () => {
+  await assert.rejects(
+    () => call(alice, 'office_post', { text: 'hello', mentions: ['nobody'] }),
+    /does not match any colleague's session title/,
+  )
+})
+
+await check('a colleague that is mid-turn is handed one merged turn when it is idle again', async () => {
+  const before = bob.sent.length
+  bob.status = 'running'
+  const dm = await call(alice, 'office_dm', { to: 'bob', text: 'private note' })
+  assert.equal(dm.message.channelId, 'dm-sessionalice+sessionbob')
+  assert.deepEqual(dm.deliveries, [{ colleague: 'bob', status: 'queued' }], 'a busy colleague is not interrupted')
+  assert.equal(bob.sent.length, before, 'and nothing is spliced into the turn it is running')
+
+  const second = await call(alice, 'office_post', { text: 'public note, same burst', mentions: ['bob'] })
+  assert.deepEqual(second.deliveries, [{ colleague: 'bob', status: 'queued' }])
+
+  await harness.setStatus('session-bob', 'idle')
+  assert.equal(bob.sent.length, before + 1, 'everything held is delivered as one turn, not one turn per message')
+  const { via, message } = bob.sent.at(-1)
+  assert.equal(via, 'followup')
+  assert.equal(message.source.batch, 2)
+  const text = message.content[0].text
+  assert.match(text, /^\[office office \| 2 messages arrived while you were working\]/)
+  const frames = text.split('\n').filter(line => line.startsWith('[office ') && line.includes(' from '))
+  assert.equal(frames.length, 2, 'each held message keeps its own header inside the one turn')
+  assert.match(frames[0], /^\[office DM from Alice Smith \| dm-sessionalice\+sessionbob-\d+\]$/)
+  assert.match(frames[1], /^\[office #general from Alice Smith \| general-\d+\]$/)
+  assert.match(text, /private note/)
+  assert.match(text, /public note, same burst/)
+  assert.match(text, /These arrived while your previous turn was running\./)
+
+  const read = await call(alice, 'office_read', { channel: 'bob' })
+  assert.equal(read.channelId, 'dm-sessionalice+sessionbob')
+  assert.equal(read.messages.at(-1).text, 'private note')
+})
+
+await check('a wake held when the process stops is delivered after it restarts', async () => {
+  const stopping = makeHarness({ officeName: 'stopping' }, undefined, { rowId: 'office_stopping' })
+  await stopping.ready
+  const chief = stopping.publish('session-stopping-boss', { preset: 'office-boss' })
+  stopping.titles.set('session-stopping-boss', 'chief')
+  stopping.titles.set('session-ivy', 'ivy')
+  const ivy = stopping.publish('session-ivy')
+  await callBoss(chief, 'stopping', 'office_adopt', { session_id: 'session-ivy' })
+
+  ivy.status = 'running'
+  const posted = await callBoss(chief, 'stopping', 'office_post', { text: 'ivy, please take this', mentions: ['ivy'] })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'ivy', status: 'queued' }])
+  assert.equal(ivy.sent.length, 0)
+
+  // The process stops with the wake held: no agent is live any more, and a wake that was
+  // promised must not evaporate because the office happened to be restarting.
+  stopping.dispose(ivy)
+  await stopping.close()
+  stopping.ctx.fiber.entry.options.id = 'office_stopping'
+  await apply(stopping.ctx, { officeName: 'stopping' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+
+  const restarted = stopping.liveAgents.get('session-ivy')
+  assert.equal(restarted.sent.length, 1, 'the held wake is delivered by the restarted office')
+  assert.match(restarted.sent[0].message.content[0].text, /ivy, please take this/)
+})
+
+await check('a dismissed colleague does not leave the office holding its wake', async () => {
+  const leaving = makeHarness({ officeName: 'leaving' }, undefined, { rowId: 'office_leaving' })
+  await leaving.ready
+  const chief = leaving.publish('session-leaving-boss', { preset: 'office-boss' })
+  leaving.titles.set('session-leaving-boss', 'chief')
+  leaving.titles.set('session-dana', 'dana')
+  const dana = leaving.publish('session-dana')
+  await callBoss(chief, 'leaving', 'office_adopt', { session_id: 'session-dana' })
+
+  dana.status = 'running'
+  const posted = await callBoss(chief, 'leaving', 'office_post', { text: 'dana, before you go', mentions: ['dana'] })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'dana', status: 'queued' }])
+  await callBoss(chief, 'leaving', 'office_dismiss', { name: 'dana' })
+
+  await leaving.setStatus('session-dana', 'idle')
+  assert.equal(dana.sent.length, 0, 'a dismissed colleague is not woken for what was held for it')
+
+  // And nothing is left behind for a later process to deliver either.
+  await leaving.close()
+  leaving.ctx.fiber.entry.options.id = 'office_leaving'
+  await apply(leaving.ctx, { officeName: 'leaving' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(dana.sent.length, 0, 'the held wake went with the roster entry')
+})
+
+await check('a cold resume runs on the route the session itself last logged', async () => {
+  const withLog = makeHarness({ officeName: 'resume' }, { provider: 'logged-provider', model: 'logged-model', reasoningEffort: 'high' })
+  await withLog.ready
+  const withBoss = withLog.publish('session-boss', { preset: 'office-boss' })
+  withLog.titles.set('session-gina', 'gina')
+  await callBoss(withBoss, 'resume', 'office_adopt', { session_id: 'session-gina' })
+  const poster = withLog.publish('session-poster')
+  withLog.titles.set('session-poster', 'poster')
+  await callBoss(withBoss, 'resume', 'office_adopt', { session_id: 'session-poster' })
+  const posted = await call(poster, 'office_dm', { to: 'gina', text: 'resume on your own route' })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'gina', status: 'delivered' }])
+  assert.deepEqual(withLog.resumed[0].agentOptions, {
+    provider: 'logged-provider',
+    model: 'logged-model',
+    reasoningEffort: 'high',
+  })
+})
+
+await check('no burst is ever refused: every message that names a colleague wakes it', async () => {
+  const burst = makeHarness({ officeName: 'burst' })
+  await burst.ready
+  const burstBoss = burst.publish('session-boss', { preset: 'office-boss' })
+  burst.titles.set('session-poster', 'poster')
+  burst.titles.set('session-dave', 'dave')
+  const poster = burst.publish('session-poster')
+  const dave = burst.publish('session-dave')
+  await callBoss(burstBoss, 'burst', 'office_adopt', { session_id: 'session-poster' })
+  await callBoss(burstBoss, 'burst', 'office_adopt', { session_id: 'session-dave' })
+  const statuses = []
+  for (let round = 0; round < 6; round++) {
+    const posted = await call(poster, 'office_post', { text: `ping ${round}`, mentions: ['dave'] })
+    statuses.push(posted.deliveries[0].status)
+  }
+  assert.deepEqual(statuses, Array.from({ length: 6 }, () => 'delivered'), 'a burst is delivered, not throttled')
+  assert.equal(dave.sent.length, 6, 'each wake is its own queued turn')
+})
+
+await check('a colleague cascade is not truncated', async () => {
+  const chained = makeHarness({ officeName: 'chained' })
+  await chained.ready
+  const chainedBoss = chained.publish('session-boss', { preset: 'office-boss' })
+  chained.titles.set('session-operator', 'operator')
+  chained.titles.set('session-eve', 'eve')
+  chained.titles.set('session-frank', 'frank')
+  const operator = chained.publish('session-operator')
+  for (const sessionId of ['session-operator', 'session-eve', 'session-frank']) {
+    await callBoss(chainedBoss, 'chained', 'office_adopt', { session_id: sessionId })
+  }
+  const first = await call(operator, 'office_post', { text: 'kick off', mentions: ['eve'] })
+  assert.deepEqual(first.deliveries, [{ colleague: 'eve', status: 'delivered' }])
+  const eve = chained.liveAgents.get('session-eve')
+  const second = await call(eve, 'office_post', { text: 'your turn', mentions: ['frank'] })
+  assert.deepEqual(second.deliveries, [{ colleague: 'frank', status: 'delivered' }])
+  const frank = chained.liveAgents.get('session-frank')
+  const third = await call(frank, 'office_post', { text: 'back to you', mentions: ['eve'] })
+  assert.deepEqual(
+    third.deliveries,
+    [{ colleague: 'eve', status: 'delivered' }],
+    'a colleague-to-colleague hand-off keeps working however long the exchange runs',
+  )
+  assert.equal(eve.sent.length, 2, 'and every hand-off reached its recipient')
+})
+
+await check('wakesEnabled:false records the message without any delivery', async () => {
+  const muted = makeHarness({ officeName: 'muted', wakesEnabled: false })
+  await muted.ready
+  const mutedBoss = muted.publish('session-boss', { preset: 'office-boss' })
+  muted.titles.set('session-poster', 'poster')
+  muted.titles.set('session-carol', 'carol')
+  const poster = muted.publish('session-poster')
+  await callBoss(mutedBoss, 'muted', 'office_adopt', { session_id: 'session-poster' })
+  await callBoss(mutedBoss, 'muted', 'office_adopt', { session_id: 'session-carol' })
+  const posted = await call(poster, 'office_post', { text: 'quiet', mentions: ['carol'] })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'carol', status: 'wakes-disabled' }])
+  assert.equal(muted.resumed.length, 0)
+})
+
+await check('office_hire creates a session, titles it, adopts it, and arms it', async () => {
+  const hired = await callBoss(boss, 'office', 'office_hire', { name: 'New Hire', role: 'engineer' })
+  assert.deepEqual(hired.colleague, { name: 'New Hire', sessionId: 'session-hired-1', role: 'engineer' })
+  assert.equal(hired.workspaceId, 'workspace-first', 'a caller without a cwd falls back to the first workspace')
+  assert.equal(titles.get('session-hired-1'), 'New Hire', 'the colleague name IS the session title')
+  assert.deepEqual(
+    toolNames(liveAgents.get('session-hired-1')),
+    ['office_dm', 'office_post', 'office_read'],
+    'the new colleague is armed in the same activation',
+  )
+})
+
+await check('hiring greets the new colleague privately, and that greeting makes it visible', async () => {
+  // The Web workspace tree hides a session that has taken no turn, so a hire that only
+  // created a session would leave the colleague invisible in the workspace until someone
+  // happened to message it. The greeting is the turn that clears that state, and it is a
+  // private turn: the office's public history stays a record of work, not of arrivals.
+  const hired = await callBoss(boss, 'office', 'office_hire', { name: 'Greeted', role: 'writer' })
+  assert.equal(hired.greeting, 'delivered', 'the hire reports the greeting outcome rather than hiding it')
+  const greeted = liveAgents.get(hired.colleague.sessionId)
+  assert.equal(greeted.sent.length, 1, 'the greeting is the new colleague first turn')
+  const text = greeted.sent[0].message.content[0].text
+  assert.match(text, /^\[office office \| you were hired\]/, 'it is framed as an onboarding note, not as a channel post')
+  assert.match(text, /You are "Greeted", a colleague of the office "office"/, 'the greeting states who it is')
+  assert.match(text, /Your role: writer\./)
+  assert.match(text, /office_post says something in #general/, 'and what it can do')
+  assert.match(text, /nothing here was posted to a channel/)
+  assert.equal(greeted.sent[0].message.source.channelId, 'office-onboarding')
+  const feed = await callBoss(boss, 'office', 'office_read', { channel: '#general' })
+  assert.ok(
+    !feed.messages.some(entry => entry.text.includes('You are "Greeted"')),
+    'the greeting never reaches the public channel',
+  )
+
+  const muted = makeHarness({ officeName: 'mutedhire', wakesEnabled: false })
+  await muted.ready
+  const mutedBoss = muted.publish('session-muted-boss', { preset: 'office-boss' })
+  const quiet = await callBoss(mutedBoss, 'mutedhire', 'office_hire', { name: 'Unwoken' })
+  assert.equal(quiet.greeting, 'wakes-disabled', 'with wakes off the greeting is not delivered, and the report says why')
+})
+
+await check('a colleague whose title has no ASCII form is still addressable by name', async () => {
+  const named = makeHarness({ officeName: 'namedcn' }, undefined, { rowId: 'office_namedcn' })
+  await named.ready
+  const namedBoss = named.publish('session-named-cn-boss', { preset: 'office-boss' })
+  named.titles.set('session-zhang', '张三')
+  const member = named.publish('session-zhang')
+  await callBoss(namedBoss, 'namedcn', 'office_adopt', { session_id: 'session-zhang' })
+  assert.equal(
+    (await call(member, 'office_dm', { to: '张三', text: '到' })).deliveries[0].colleague,
+    '张三',
+    'a title that is entirely non-ASCII still resolves, which a slug normalization would erase',
+  )
+  const mentioned = await callBoss(namedBoss, 'namedcn', 'office_post', { text: '@张三 请报到', mentions: ['张三'] })
+  assert.deepEqual(mentioned.deliveries, [{ colleague: '张三', status: 'delivered' }])
+  await assert.rejects(
+    () => callBoss(namedBoss, 'namedcn', 'office_post', { text: 'x', mentions: ['张'] }),
+    /"张" does not match any colleague/,
+  )
+})
+
+await check('office_hire prefers the caller workspace over the registry order', async () => {
+  const roaming = harness.publish('session-roaming-boss', { preset: 'office-boss', cwd: '/work/mine' })
+  const hired = await callBoss(roaming, 'office', 'office_hire', { name: 'Second Hire' })
+  assert.equal(hired.workspaceId, 'workspace-own', "the caller's own workspace wins")
+  const pinned = await callBoss(roaming, 'office', 'office_hire', { name: 'Third Hire', workspace_id: 'workspace-first' })
+  assert.equal(pinned.workspaceId, 'workspace-first', 'an explicit workspace_id still wins')
+  assert.deepEqual(
+    hires.slice(-3).map(entry => entry.workspaceId),
+    ['workspace-first', 'workspace-own', 'workspace-first'],
+  )
+})
+
+await check('office_hire passes the agent preset and model route through', async () => {
+  const fresh = makeHarness({ officeName: 'fresh' })
+  await fresh.ready
+  const freshBoss = fresh.publish('session-boss', { preset: 'office-boss' })
+  const hired = await callBoss(freshBoss, 'fresh', 'office_hire', {
+    name: 'Specialist',
+    agent_preset: 'standard',
+    provider: 'probe',
+    model: 'probe-model',
+    reasoning_effort: 'high',
+  })
+  assert.equal(hired.agentPreset, 'standard')
+  assert.deepEqual(fresh.hires, [{ workspaceId: 'workspace-first', agentPreset: 'standard' }])
+  assert.deepEqual(fresh.selects, [{
+    sessionId: 'session-hired-1',
+    provider: 'probe',
+    model: 'probe-model',
+    reasoningEffort: 'high',
+  }])
+  await assert.rejects(
+    () => callBoss(freshBoss, 'fresh', 'office_hire', { name: 'Incomplete', provider: 'probe' }),
+    /needs both provider and model/,
+  )
+  // Hiring creates the session before it titles it, so a name that cannot be a title has to be
+  // refused before that: otherwise the call fails leaving a session nobody asked for.
+  const before = fresh.hires.length
+  await assert.rejects(
+    () => callBoss(freshBoss, 'fresh', 'office_hire', {}),
+    /office_hire: name must be a non-empty session title/,
+  )
+  assert.equal(fresh.hires.length, before, 'and no session was created on the way to that failure')
+})
+
+await check('a broadcast wakes every colleague except the sender', async () => {
+  const roster = (await callBoss(boss, 'office', 'office_roster', {})).colleagues
+  const all = await call(alice, 'office_post', { text: 'all hands', mention_all: true })
+  assert.deepEqual(
+    all.deliveries.map(entry => entry.colleague).sort(),
+    roster.map(entry => entry.name).filter(name => name !== 'Alice Smith').sort(),
+    'every colleague except the sender is addressed',
+  )
+  assert.ok(all.deliveries.every(entry => entry.status === 'delivered'))
+})
+
+await check('the delivery frame states where a reply does and does not surface', async () => {
+  await call(alice, 'office_dm', { to: 'bob', text: 'private note' })
+  const dmText = bob.sent.at(-1).message.content[0].text
+  assert.match(dmText, /Your reply stays in this session and reaches nobody/)
+  assert.match(dmText, /Most messages need no answer, and silence is a normal one/)
+  assert.ok(!dmText.includes('a public post wakes every colleague'), 'a private message must not invite a public reply')
+  await call(alice, 'office_post', { text: 'public note', mentions: ['bob'] })
+  const publicText = bob.sent.at(-1).message.content[0].text
+  assert.match(publicText, /use office_post with mentions naming who should read it/)
+  assert.match(
+    publicText,
+    /Do not post to acknowledge a message, to agree with it, or to say that you are working on it/,
+    'a wake states the rule that keeps one post from waking the office again',
+  )
+})
+
+await check('the panel routes read state and post to the public channel', async () => {
+  const state = await callRoute(routes, officeRoute('state', 'office'))
+  assert.equal(state.status, 200)
+  assert.ok(state.payload.colleagues.some(entry => entry.name === 'New Hire'))
+  assert.deepEqual(state.payload.workspaces, [
+    { id: 'workspace-first', title: 'First' },
+    { id: 'workspace-own', title: 'Own' },
+  ])
+  assert.deepEqual(state.payload.presets, [{ id: 'standard', name: 'Standard' }], 'a broken preset is not offered')
+  assert.deepEqual(state.payload.models, [{ provider: 'probe', model: 'probe-model', name: 'Probe / Probe Model' }])
+
+  const posted = await callRoute(routes, officeRoute('post', 'office'), {
+    method: 'POST',
+    body: { text: 'from the panel' },
+  })
+  assert.equal(posted.status, 200)
+  assert.ok(posted.payload.deliveries.length > 0, 'a panel post notifies the office by default')
+  assert.deepEqual(
+    posted.payload.deliveries.filter(entry => entry.status !== 'delivered'),
+    [],
+    'and every notified colleague received it',
+  )
+  const after = await callRoute(routes, officeRoute('state', 'office'))
+  assert.equal(after.payload.messages.at(-1).senderName, 'operator')
+})
+
+await check('the panel can hire, and can post without waking anyone', async () => {
+  const hired = await callRoute(routes, officeRoute('hire', 'office'), {
+    method: 'POST',
+    body: { name: 'Panel Hire', agent_preset: 'standard' },
+  })
+  assert.equal(hired.status, 200)
+  assert.equal(hired.payload.colleague.name, 'Panel Hire')
+  assert.equal(hires.at(-1).agentPreset, 'standard')
+  assert.deepEqual(toolNames(liveAgents.get(hired.payload.colleague.sessionId)), ['office_dm', 'office_post', 'office_read'])
+
+  const quiet = await callRoute(routes, officeRoute('post', 'office'), {
+    method: 'POST',
+    body: { text: 'all hands from the panel', mention_all: false },
+  })
+  assert.equal(quiet.status, 200)
+  assert.deepEqual(
+    quiet.payload.deliveries,
+    [],
+    'unchecking Wake everyone notifies only the colleagues the text names, and this text names none',
+  )
+})
+
+await check('a panel post with Wake everyone unchecked notifies exactly the colleagues its text names', async () => {
+  const hall = makeHarness({ officeName: 'hall' }, undefined, { rowId: 'office_hall' })
+  await hall.ready
+  const hallBoss = hall.publish('session-hall-boss', { preset: 'office-boss' })
+  hall.titles.set('session-long', 'Alice Smith')
+  hall.titles.set('session-short', 'Alice')
+  hall.publish('session-long')
+  hall.publish('session-short')
+  await callBoss(hallBoss, 'hall', 'office_adopt', { session_id: 'session-long' })
+  await callBoss(hallBoss, 'hall', 'office_adopt', { session_id: 'session-short' })
+
+  const post = (text, extra = {}) => callRoute(routes, officeRoute('post', 'hall'), {
+    method: 'POST',
+    body: { text, mention_all: false, ...extra },
+  })
+  assert.deepEqual(
+    (await post('@Alice Smith 请报到')).payload.deliveries,
+    [{ colleague: 'Alice Smith', status: 'delivered' }],
+    'the longest name wins, so a title containing a space matches whole',
+  )
+  assert.deepEqual((await post('@Alice 你好')).payload.deliveries, [{ colleague: 'Alice', status: 'delivered' }])
+  assert.deepEqual((await post('no name here')).payload.deliveries, [], 'a post that names nobody wakes nobody')
+  assert.deepEqual(
+    (await post('mail me at x@Alice later')).payload.deliveries,
+    [],
+    'a trigger that is not at a word start is an address, not a mention',
+  )
+  assert.deepEqual((await post('@Alicex hello')).payload.deliveries, [], 'a longer word is prose, not a mention')
+  assert.deepEqual(
+    (await post('@Alice Smith and @Alice')).payload.deliveries.map(entry => entry.colleague).sort(),
+    ['Alice', 'Alice Smith'],
+    'both mentions wake, once each',
+  )
+  assert.deepEqual(
+    (await callRoute(routes, officeRoute('post', 'hall'), { method: 'POST', body: { text: 'everyone?' } }))
+      .payload.deliveries.map(entry => entry.colleague).sort(),
+    ['Alice', 'Alice Smith'],
+    'a request that omits mention_all notifies the whole roster, which is what the panel sends by default',
+  )
+
+  // The panel colors what the server resolved rather than its own guess, so the feed cannot
+  // show a mention that woke nobody.
+  const state = await callRoute(routes, officeRoute('state', 'hall'))
+  assert.deepEqual(
+    state.payload.messages.find(message => message.text === '@Alice Smith 请报到').mentions,
+    ['Alice Smith'],
+  )
+  assert.deepEqual(state.payload.messages.find(message => message.text === 'no name here').mentions, [])
+})
+
+await check('the panel routes refuse an untrusted request before doing any work', async () => {
+  const refused = await callRoute(routes, officeRoute('state', 'office'), { headers: { 'x-test-refuse': 'yes' } })
+  assert.equal(refused.status, 403)
+  const refusedPost = await callRoute(routes, officeRoute('post', 'office'), {
+    method: 'POST',
+    headers: { 'x-test-refuse': 'yes' },
+    body: { text: 'should not land' },
+  })
+  assert.equal(refusedPost.status, 403)
+  const state = await callRoute(routes, officeRoute('state', 'office'))
+  assert.ok(!state.payload.messages.some(message => message.text === 'should not land'))
+})
+
+await check('a panel route naming an unmounted office is a clean 404', async () => {
+  const missing = await callRoute(routes, officeRoute('state', 'nowhere'))
+  assert.equal(missing.status, 404)
+  assert.match(missing.payload.error, /no office "nowhere" is mounted/)
+  const noParameter = await callRoute(routes, '/dsh-office/offices/state')
+  assert.equal(noParameter.status, 404, 'a request that names no office resolves to none')
+})
+
+await check('a disposed agent loses its office tools', async () => {
+  const temp = harness.publish('session-temp')
+  harness.titles.set('session-temp', 'temp')
+  await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
+  assert.equal(temp.tools.size, 3)
+  harness.dispose(temp)
+  assert.equal(temp.tools.size, 0, 'the scoped registrations unwind with the agent')
+})
+
+await check('office_dismiss removes a colleague and withdraws its channel tools', async () => {
+  const temp = harness.publish('session-temp')
+  harness.titles.set('session-temp', 'temp')
+  await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
+  assert.equal(temp.tools.size, 3, 'adoption arms the session')
+  const dismissed = await callBoss(boss, 'office', 'office_dismiss', { name: 'temp' })
+  assert.deepEqual(dismissed.colleague, { name: 'temp', sessionId: 'session-temp' })
+  assert.equal(temp.tools.size, 0, 'the channel tools withdraw from the live session')
+  const roster = await callBoss(boss, 'office', 'office_roster', {})
+  assert.ok(!roster.colleagues.some(entry => entry.sessionId === 'session-temp'))
+  await assert.rejects(() => callBoss(boss, 'office', 'office_dismiss', { name: 'temp' }), /does not match any colleague/)
+})
+
+await check('a dismissed session is no longer an addressable colleague', async () => {
+  await assert.rejects(
+    () => call(alice, 'office_dm', { to: 'temp', text: 'still there?' }),
+    /does not match any colleague's session title/,
+  )
+})
+
+await check('officeName makes a fully independent office behind one shared tool set', async () => {
+  const studio = makeHarness({ officeName: 'studio' })
+  await studio.ready
+  const studioBoss = studio.publish('session-studio-boss', { preset: 'office-boss' })
+  assert.deepEqual(
+    toolNames(studioBoss),
+    toolNames(boss),
+    'the tool names are office-independent: the office is an argument, not part of the name',
+  )
+  const studioState = await callRoute(routes, officeRoute('state', 'studio'))
+  assert.equal(studioState.status, 200, 'one route table serves every office')
+  assert.equal(studioState.payload.office, 'studio')
+  assert.equal(studioState.payload.officeId, 'office_studio', 'the storage key is the office row id')
+  studio.titles.set('session-member', 'member')
+  const member = studio.publish('session-member')
+  await callBoss(studioBoss, 'studio', 'office_adopt', { session_id: 'session-member' })
+  assert.deepEqual(toolNames(member), ['office_dm', 'office_post', 'office_read'])
+  const roster = await callBoss(studioBoss, 'studio', 'office_roster', {})
+  assert.deepEqual(roster.channels.map(entry => entry.channelId), ['general'])
+  assert.deepEqual(roster.colleagues.map(entry => entry.name), ['member'])
+
+  const discovered = await callRoute(routes, '/dsh-office/offices')
+  assert.equal(discovered.status, 200)
+  const names = discovered.payload.offices.map(office => office.name).sort()
+  assert.deepEqual(names, ['office', 'studio'], 'both mounted offices appear in one list')
+  const refused = await callRoute(routes, '/dsh-office/offices', { headers: { 'x-test-refuse': 'yes' } })
+  assert.equal(refused.status, 403, 'discovery is behind the same connection policy')
+})
+
+await check('one shared boss preset gives a boss every office it supervises', async () => {
+  const alpha = makeHarness({ officeName: 'alpha' })
+  const beta = makeHarness({ officeName: 'beta' })
+  await alpha.ready
+  await beta.ready
+  const commander = makeAgent('session-commander', 'idle', undefined, 'office-boss')
+  alpha.adoptAgent(commander)
+  beta.adoptAgent(commander)
+  assert.deepEqual(
+    toolNames(commander),
+    toolNames(boss),
+    'a boss running two offices holds one constant set, not one per office',
+  )
+  const listed = await call(commander, 'office_list', {})
+  const listedNames = listed.offices.map(entry => entry.office)
+  assert.ok(
+    listedNames.includes('alpha') && listedNames.includes('beta'),
+    'office_list reports every office the boss runs, including the ones mounted by another instance',
+  )
+
+  await callBoss(commander, 'alpha', 'office_post', { text: 'in alpha' })
+  await callBoss(commander, 'beta', 'office_post', { text: 'in beta' })
+  const alphaFeed = await callBoss(commander, 'alpha', 'office_read', { channel: '#general' })
+  const betaFeed = await callBoss(commander, 'beta', 'office_read', { channel: '#general' })
+  assert.equal(alphaFeed.messages.at(-1).text, 'in alpha')
+  assert.equal(betaFeed.messages.at(-1).text, 'in beta')
+  assert.ok(!alphaFeed.messages.some(entry => entry.text === 'in beta'), 'the offices never share a channel')
+  assert.match(alphaFeed.office, /^alpha$/, 'each result names the office it came from')
+
+  alpha.titles.set('session-a', 'a')
+  await callBoss(commander, 'alpha', 'office_adopt', { session_id: 'session-a' })
+  assert.ok((await callBoss(commander, 'alpha', 'office_roster', {})).colleagues.some(entry => entry.name === 'a'))
+  assert.ok(!(await callBoss(commander, 'beta', 'office_roster', {})).colleagues.some(entry => entry.name === 'a'))
+})
+
+await check('a boss must name an office it runs', async () => {
+  const alpha = makeHarness({ officeName: 'alpha' })
+  const beta = makeHarness({ officeName: 'beta' })
+  await alpha.ready
+  await beta.ready
+  const commander = makeAgent('session-commander', 'idle', undefined, 'office-boss')
+  alpha.adoptAgent(commander)
+  beta.adoptAgent(commander)
+
+  await assert.rejects(
+    () => call(commander, 'office_roster', {}),
+    /office is required; this session runs/,
+    'a boss that omits the office is refused, because it may run several',
+  )
+  await assert.rejects(
+    () => call(commander, 'office_roster', { office: 'gamma' }),
+    /"gamma" is not an office this session acts on/,
+    'a boss may not name an office it does not run',
+  )
+  assert.equal((await call(commander, 'office_roster', { office: 'alpha' })).office, 'alpha')
+  assert.equal((await call(commander, 'office_roster', { office: 'beta' })).office, 'beta')
+})
+
+await check('a colleague is routed to the office that adopted it', async () => {
+  const alpha = makeHarness({ officeName: 'alpha' })
+  const beta = makeHarness({ officeName: 'beta' })
+  await alpha.ready
+  await beta.ready
+  const alphaBoss = alpha.publish('session-alpha-boss', { preset: 'office-boss' })
+  alpha.titles.set('session-member', 'member')
+  const member = alpha.publish('session-member')
+  await callBoss(alphaBoss, 'alpha', 'office_adopt', { session_id: 'session-member' })
+
+  const posted = await call(member, 'office_post', { text: 'hello from the member' })
+  assert.equal(posted.office, 'alpha', 'the colleague is routed without naming an office')
+  const feed = await callBoss(alphaBoss, 'alpha', 'office_read', { channel: '#general' })
+  assert.ok(feed.messages.some(entry => entry.text === 'hello from the member'))
+
+  const explicit = await call(member, 'office_post', { office: 'alpha', text: 'names its own office' })
+  assert.equal(explicit.office, 'alpha', 'naming its own office is accepted')
+  await assert.rejects(
+    () => call(member, 'office_post', { office: 'beta', text: 'leak' }),
+    /"beta" is not an office this session acts on/,
+    'a colleague may not address an office it does not belong to',
+  )
+  const betaFeed = await callBoss(alphaBoss, 'beta', 'office_read', { channel: '#general' })
+  assert.deepEqual(betaFeed.messages, [], 'nothing the member posted reached beta')
+})
+
+await check('a colleague held by two offices chooses with the office argument', async () => {
+  const alpha = makeHarness({ officeName: 'alpha' })
+  const beta = makeHarness({ officeName: 'beta' })
+  await alpha.ready
+  await beta.ready
+  const alphaBoss = alpha.publish('session-alpha-boss', { preset: 'office-boss' })
+  const betaBoss = beta.publish('session-beta-boss', { preset: 'office-boss' })
+  alpha.titles.set('session-dual', 'dual')
+  beta.titles.set('session-dual', 'dual')
+  const dual = alpha.publish('session-dual')
+  beta.adoptAgent(dual)
+  await callBoss(alphaBoss, 'alpha', 'office_adopt', { session_id: 'session-dual' })
+  await callBoss(betaBoss, 'beta', 'office_adopt', { session_id: 'session-dual' })
+
+  await assert.rejects(
+    () => call(dual, 'office_post', { text: 'ambiguous' }),
+    /belongs to 2 offices — pass office to choose one of/,
+    'an ambiguous colleague is refused rather than routed to an arbitrary office',
+  )
+  assert.equal((await call(dual, 'office_post', { office: 'beta', text: 'to beta' })).office, 'beta')
+  const betaFeed = await callBoss(betaBoss, 'beta', 'office_read', { channel: '#general' })
+  assert.ok(betaFeed.messages.some(entry => entry.text === 'to beta'))
+  const alphaFeed = await callBoss(alphaBoss, 'alpha', 'office_read', { channel: '#general' })
+  assert.ok(!alphaFeed.messages.some(entry => entry.text === 'to beta'), 'the chosen office is the only one written to')
+})
+
+await check('unmounting one office leaves the other office tools intact', async () => {
+  const alpha = makeHarness({ officeName: 'alpha' })
+  const beta = makeHarness({ officeName: 'beta' })
+  await alpha.ready
+  await beta.ready
+  const commander = makeAgent('session-commander', 'idle', undefined, 'office-boss')
+  alpha.adoptAgent(commander)
+  beta.adoptAgent(commander)
+  assert.ok(commander.tools.has('office_post'))
+
+  await alpha.close()
+  assert.deepEqual(
+    toolNames(commander),
+    toolNames(boss),
+    'the set is released only when the last office unmounts, not when any one does',
+  )
+  assert.equal(
+    (await call(commander, 'office_post', { office: 'beta', text: 'still here' })).office,
+    'beta',
+    'the surviving office is still reachable',
+  )
+})
+
+await check('renaming an office renames what every surface addresses', async () => {
+  // A dedicated office name: the module-level registry keeps one entry per storage key, so
+  // reusing another harness's row id would overwrite that entry.
+  const solo = makeHarness({ officeName: 'solo' })
+  await solo.ready
+  const soloBoss = solo.publish('session-solo-boss', { preset: 'office-boss' })
+  const before = await callBoss(soloBoss, 'solo', 'office_roster', {})
+  assert.equal(before.office, 'solo')
+  const renamed = await callBoss(soloBoss, 'solo', 'office_rename', { name: 'HeadOffice' })
+  assert.deepEqual(renamed, { office: 'solo', renamedTo: 'HeadOffice' })
+
+  const state = await callRoute(routes, officeRoute('state', 'HeadOffice'))
+  assert.equal(state.status, 200, 'the panel addresses the office by its new name')
+  assert.equal(state.payload.office, 'HeadOffice')
+  assert.equal(state.payload.officeId, 'office_solo', 'the storage key behind the name is unchanged')
+
+  const discovered = await callRoute(routes, '/dsh-office/offices')
+  const entry = discovered.payload.offices.find(office => office.id === 'office_solo')
+  assert.equal(entry.name, 'HeadOffice', 'the switcher lists the new name')
+
+  const after = await callBoss(soloBoss, 'HeadOffice', 'office_roster', {})
+  assert.deepEqual(after.colleagues, before.colleagues, 'the roster survives the rename')
+  assert.deepEqual(after.channels, before.channels, 'the channels survive the rename')
+  await assert.rejects(
+    () => callBoss(soloBoss, 'solo', 'office_roster', {}),
+    /is not an office this session acts on/,
+    'the old name stops resolving, exactly as renaming a session retitles its colleague',
+  )
+  await assert.rejects(() => callBoss(soloBoss, 'HeadOffice', 'office_rename', { name: '   ' }), /an office name must be letters/)
+  await assert.rejects(() => callBoss(soloBoss, 'HeadOffice', 'office_rename', { name: 'no spaces' }), /an office name must be letters/)
+})
+
+await check('every tool result names the office it acted on', async () => {
+  const named = makeHarness({ officeName: 'named' })
+  await named.ready
+  const namedBoss = named.publish('session-named-boss', { preset: 'office-boss' })
+  await callBoss(namedBoss, 'named', 'office_rename', { name: '总部' })
+  const roster = await callBoss(namedBoss, '总部', 'office_roster', {})
+  assert.equal(roster.office, '总部', 'a result carries the office name, in whatever script it is written')
+  assert.match(namedBoss.tools.get('office_roster').output.render({}, roster)[0].text, /^Office "总部"/)
+
+  const posted = await callBoss(namedBoss, '总部', 'office_post', { text: 'hello' })
+  assert.match(posted.message.text, /hello/)
+
+  // A presenter is a pure function of the result it is handed, so it can be rendered
+  // without the call's arguments and still name the office.
+  assert.match(namedBoss.tools.get('office_post').output.render({}, {
+    office: '总部',
+    message: { messageId: 'named-1', channelId: 'general', text: 'hello' },
+    deliveries: [],
+  })[0].text, /^\[总部\]/)
+  assert.match(
+    namedBoss.tools.get('office_read').output.render({}, { office: '总部', channelId: 'general', messages: [] })[0].text,
+    /^\[总部\]/,
+  )
+
+  assert.match(
+    namedBoss.tools.get('office_post').output.render({}, {
+      office: 'gone',
+      message: { messageId: 'named-2', channelId: 'general', text: 'bye' },
+      deliveries: [],
+    })[0].text,
+    /^\[gone\]/,
+    'a result still names the office after that office unmounts',
+  )
+})
+
+await check('the panel creates and deletes office rows without disturbing comments', async () => {
+  await writeFile(PATCH_PATH, PATCH_SEED)
+
+  const created = await callRoute(routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'studio' },
+  })
+  assert.equal(created.status, 202)
+  let text = await readFile(PATCH_PATH, 'utf8')
+  assert.ok(text.includes('operator comment that must survive every edit'), 'the comment survives the edit')
+  assert.ok(
+    mountedOfficeRows(text).some(row => row.config?.officeName === 'studio'),
+    'the new row sits inside an insert list, the only form the Loader mounts',
+  )
+  assert.ok(
+    !overrideOfficeRows(text).some(row => row.config?.officeName === 'studio'),
+    'the new row is not a top-level entry, which the Loader skips as an unmatched override',
+  )
+  assert.ok(text.includes('bossPreset: office-boss'), "the new office inherits the creator's boss preset")
+
+  const duplicate = await callRoute(routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'studio' },
+  })
+  assert.equal(duplicate.status, 409, 'an office already in the profile is refused')
+  const invalid = await callRoute(routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'Not Valid' },
+  })
+  assert.equal(invalid.status, 400, 'an invalid office name is refused')
+
+  const removed = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'studio' },
+  })
+  assert.equal(removed.status, 200)
+  text = await readFile(PATCH_PATH, 'utf8')
+  assert.ok(!text.includes('officeName: studio'), 'the row is gone')
+  assert.ok(text.includes('operator comment that must survive every edit'), 'the comment still survives')
+  assert.ok(text.includes('- id: office\n'), 'the original row is untouched')
+  assert.deepEqual(parse(text), parse(PATCH_SEED), 'create then delete restores the document exactly')
+
+  const missing = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'nope' },
+  })
+  assert.equal(missing.status, 404)
+})
+
+await check('a nameless override row still identifies its office', async () => {
+  // The operator's own profile patch overrides the package's `office` row with an entry
+  // that carries only an id, `disabled`, and `config` — no `name`. Matching on `name`
+  // alone reported "the profile declares no office" for the office it was looking at.
+  await writeFile(PATCH_PATH, `# operator comment that must survive every edit
+- id: office
+  disabled: false
+  config:
+    bossPreset: standard
+
+- id: browser
+  disabled: true
+`)
+
+  const duplicate = await callRoute(routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'office' },
+  })
+  assert.equal(duplicate.status, 409, 'an override carrying only an id still names its office')
+
+  const unrelated = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'browser' },
+  })
+  assert.equal(unrelated.status, 404, 'an unrelated override is never mistaken for an office row')
+  const text = await readFile(PATCH_PATH, 'utf8')
+  assert.ok(text.includes('- id: browser\n'), 'and it is left untouched')
+  assert.ok(text.includes('disabled: true'), 'including its own disablement')
+  await rm(PATCH_PATH, { force: true })
+})
+
+await check('deleting an office an earlier layer declares disables its override', async () => {
+  await writeFile(PATCH_PATH, `# operator comment that must survive every edit
+- id: office-tenant
+  config:
+    officeName: tenant
+`)
+  const tenant = makeHarness({ officeName: 'tenant' })
+  await tenant.ready
+  const tenantBoss = tenant.publish('session-tenant-boss', { preset: 'office-boss' })
+  tenant.titles.set('session-t', 't')
+  await callBoss(tenantBoss, 'tenant', 'office_adopt', { session_id: 'session-t' })
+
+  const deleted = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'tenant' },
+  })
+  assert.equal(deleted.status, 200)
+  assert.equal(deleted.payload.disabledRow, true, 'a top-level override is disabled, not removed')
+  const text = await readFile(PATCH_PATH, 'utf8')
+  assert.ok(text.includes('officeName: tenant'), 'the row survives so the operator can re-enable it')
+  assert.match(text, /disabled: true/, 'and it carries the disablement')
+  assert.equal(
+    (await callBoss(tenantBoss, 'tenant', 'office_roster', {})).colleagues.length,
+    0,
+    'the data is erased before the row is disabled',
+  )
+  await rm(PATCH_PATH, { force: true })
+})
+
+await check('a top-level office row another tool left is still found, refused, and removable', async () => {
+  await writeFile(PATCH_PATH, `${PATCH_SEED}- id: office-legacy
+  name: 'dsh-office'
+  config:
+    officeName: legacy
+`)
+
+  const duplicate = await callRoute(routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'legacy' },
+  })
+  assert.equal(duplicate.status, 409, 'a row the Loader ignores still declares the office it names')
+
+  const removed = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'legacy' },
+  })
+  assert.equal(removed.status, 200, 'a row outside an insert list is still removable')
+  const text = await readFile(PATCH_PATH, 'utf8')
+  assert.ok(!text.includes('officeName: legacy'), 'the dead row is gone')
+  assert.ok(text.includes('- id: office\n'), 'the live row is untouched')
+  await rm(PATCH_PATH, { force: true })
+})
+
+await check('a delete naming an undeclared office never erases that office data', async () => {
+  await writeFile(PATCH_PATH, PATCH_SEED)
+  const live = makeHarness({ officeName: 'orphan' })
+  await live.ready
+  const orphanBoss = live.publish('session-orphan-boss', { preset: 'office-boss' })
+  live.titles.set('session-o', 'o')
+  await callBoss(orphanBoss, 'orphan', 'office_adopt', { session_id: 'session-o' })
+  assert.equal((await callBoss(orphanBoss, 'orphan', 'office_roster', {})).colleagues.length, 1)
+
+  const missing = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'orphan' },
+  })
+  assert.equal(missing.status, 404, 'the profile declares no row for this office')
+  assert.equal(
+    (await callBoss(orphanBoss, 'orphan', 'office_roster', {})).colleagues.length,
+    1,
+    'a refused delete leaves the running office untouched',
+  )
+  await rm(PATCH_PATH, { force: true })
+})
+
+await check('deleting a mounted office erases its data before dropping its row', async () => {
+  await writeFile(PATCH_PATH, PATCH_SEED)
+  // The row comes first, because a create is refused for a name an office already answers to:
+  // two offices of one name would be unaddressable, since the name is how both are reached.
+  assert.equal(
+    (await callRoute(routes, '/dsh-office/offices/create', { method: 'POST', body: { name: 'tenant' } })).status,
+    202,
+  )
+  const tenant = makeHarness({ officeName: 'tenant' })
+  await tenant.ready
+  const tenantBoss = tenant.publish('session-tenant-boss', { preset: 'office-boss' })
+  tenant.titles.set('session-t', 't')
+  await callBoss(tenantBoss, 'tenant', 'office_adopt', { session_id: 'session-t' })
+  assert.equal((await callBoss(tenantBoss, 'tenant', 'office_roster', {})).colleagues.length, 1)
+
+  const deleted = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: 'tenant' },
+  })
+  assert.equal(deleted.status, 200)
+  assert.deepEqual((await callBoss(tenantBoss, 'tenant', 'office_roster', {})).colleagues, [], 'the live office is erased')
+  assert.ok(!(await readFile(PATCH_PATH, 'utf8')).includes('officeName: tenant'))
+  await rm(PATCH_PATH, { force: true })
+})
+
+await check('the launcher profile context supplies the patch path when config omits it', async () => {
+  await writeFile(PATCH_PATH, PATCH_SEED)
+  const created = await callRoute(routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: 'annex' },
+  })
+  assert.equal(created.status, 202, 'the launcher patch path is used, not the process environment')
+  assert.ok((await readFile(PATCH_PATH, 'utf8')).includes('officeName: annex'))
+  await rm(PATCH_PATH, { force: true })
+})
+
+
+await check('an override that drops the office name reports the real reason', async () => {
+  // A patch override REPLACES the whole config, so an operator tweaking one value on the
+  // office row drops its officeName. The row must still be read as an office — its id is
+  // the patch's match key, so no override can remove it — and the failure must name the
+  // missing field rather than reporting a second host.
+  await assert.rejects(
+    () => makeHarness({ officeName: undefined }).ready,
+    /config\.officeName must be a name of letters.*must restate its officeName/s,
+  )
+})
+
+await check('a bad deployment value fails activation loudly', async () => {
+  await assert.rejects(
+    () => makeHarness(undefined, undefined, { host: true, hostConfig: { readLimit: 500, readLimitMax: 100 } }).ready,
+    /must not exceed/,
+  )
+  await assert.rejects(() => makeHarness({ maxMessageChars: 0 }).ready, /positive safe integer/)
+  await assert.rejects(() => makeHarness({ wakesEnabled: 'yes' }).ready, /must be a boolean/)
+  await assert.rejects(() => makeHarness({ operatorName: '  ' }).ready, /operatorName/)
+  await assert.rejects(() => makeHarness({ bossPreset: '  ' }).ready, /bossPreset/)
+  await assert.rejects(() => makeHarness({ officeName: 'Not Valid' }).ready, /officeName/)
+})
+
+await check('each row kind refuses the other kind\'s fields', async () => {
+  await assert.rejects(
+    () => makeHarness({ readLimit: 20 }).ready,
+    /config\.readLimit has no meaning on an office row/,
+    "an office row cannot take the host's tool bounds",
+  )
+  await assert.rejects(
+    () => makeHarness(undefined, undefined, { host: true, hostConfig: { maxMessageChars: 10 } }).ready,
+    /config\.maxMessageChars has no meaning on an office host row/,
+    'the host cannot take an office delivery limit',
+  )
+  await assert.rejects(
+    () => makeHarness({ readLimitMax: 100, officeName: 'office' }).ready,
+    /config\.readLimitMax has no meaning on an office row/,
+    'a row that names an office is an office row, so a host field on it is refused there',
+  )
+})
+
+await check('an office name in any script mounts, is addressed by name, and stores under an ASCII key', async () => {
+  const cn = makeHarness({ officeName: '产品部' }, undefined, { rowId: 'office_cn' })
+  await cn.ready
+  const cnBoss = cn.publish('session-cn-boss', { preset: 'office-boss' })
+
+  const state = await callRoute(routes, officeRoute('state', '产品部'))
+  assert.equal(state.status, 200, 'the panel addresses the office by a name in another script')
+  assert.equal(state.payload.office, '产品部')
+  assert.equal(state.payload.officeId, 'office_cn', 'the storage key stays ASCII, because it names a storage unit')
+
+  cn.titles.set('session-zhang', '张三')
+  await callBoss(cnBoss, '产品部', 'office_adopt', { session_id: 'session-zhang' })
+  const roster = await callBoss(cnBoss, '产品部', 'office_roster', {})
+  assert.deepEqual(roster.colleagues.map(entry => entry.name), ['张三'])
+  assert.ok(
+    (await call(cnBoss, 'office_list', {})).offices.some(entry => entry.office === '产品部'),
+    'office_list reports the name the caller addresses',
+  )
+  assert.equal((await callBoss(cnBoss, '  产品部  ', 'office_roster', {})).office, '产品部', 'a padded name still resolves')
+})
+
+await check('an office name is canonical: case and Unicode spelling do not split one office', async () => {
+  const canon = makeHarness({ officeName: 'Café' }, undefined, { rowId: 'office_cafe' })
+  await canon.ready
+  const canonBoss = canon.publish('session-canon-boss', { preset: 'office-boss' })
+  assert.equal((await callBoss(canonBoss, 'café', 'office_roster', {})).office, 'Café', 'the stored spelling is what results carry')
+  assert.equal(
+    (await callBoss(canonBoss, 'Cafe\u0301', 'office_roster', {})).office,
+    'Café',
+    'a decomposed spelling resolves to the same office, because names are NFC-canonical',
+  )
+  assert.equal((await callRoute(routes, officeRoute('state', 'CAFÉ'))).status, 200, 'the panel resolves the same forms')
+})
+
+await check('a row id that cannot name a storage unit is refused unless officeId is set', async () => {
+  await assert.rejects(
+    () => makeHarness({ officeName: '工作室' }, undefined, { rowId: 'office-工作室' }).ready,
+    /config\.officeId must match .*must set it/s,
+  )
+  const explicit = makeHarness({ officeName: '工作室', officeId: 'office_workshop' }, undefined, { rowId: 'office-工作室' })
+  await explicit.ready
+  assert.equal(
+    (await callRoute(routes, officeRoute('state', '工作室'))).payload.officeId,
+    'office_workshop',
+    'an explicit officeId carries a row whose own id cannot name a storage unit',
+  )
+})
+
+await check('two rows cannot mount one office name', async () => {
+  const first = makeHarness({ officeName: 'twin' }, undefined, { rowId: 'office_twin_a' })
+  await first.ready
+  await assert.rejects(
+    () => makeHarness({ officeName: 'twin' }, undefined, { rowId: 'office_twin_b' }).ready,
+    /an office named "twin" is already mounted/,
+    'the name is how the panel and the tools reach one office, so it must not be ambiguous',
+  )
+})
+
+await check('a storage unit refuses to open for an office it does not belong to', async () => {
+  const clash = makeHarness(undefined, undefined, { office: false })
+  await clash.ready
+  const unit = await clash.ctx.storageDomain.open({
+    name: 'office_taken',
+    global: { initial: { officeId: 'office_owner', name: 'Owner' } },
+  })
+  await unit.global.set({ officeId: 'office_owner', name: 'Owner' })
+  clash.ctx.fiber.entry.options.id = 'office_taken'
+  await assert.rejects(
+    () => apply(clash.ctx, { officeName: 'Thief' }),
+    /storage unit "office_taken" belongs to office "office_owner"/,
+    'a row pointed at another office storage fails loud instead of adopting its data',
+  )
+})
+
+await check('a renamed office keeps its stored name across a remount', async () => {
+  const keeper = makeHarness({ officeName: 'keeper' }, undefined, { rowId: 'office_keeper' })
+  await keeper.ready
+  const keeperBoss = keeper.publish('session-keeper-boss', { preset: 'office-boss' })
+  await callBoss(keeperBoss, 'keeper', 'office_rename', { name: '总务处' })
+  await keeper.close()
+
+  // The row still seeds `keeper`; the unit records the renamed office, so a restart must
+  // keep the new name rather than restoring what the patch says.
+  keeper.ctx.fiber.entry.options.id = 'office_keeper'
+  await apply(keeper.ctx, { officeName: 'keeper' })
+  const state = await callRoute(routes, officeRoute('state', '总务处'))
+  assert.equal(state.status, 200, 'the stored name outlives the process that renamed it')
+  assert.equal(state.payload.office, '总务处')
+  assert.equal((await callRoute(routes, officeRoute('state', 'keeper'))).status, 404, 'the configured seed is not consulted again')
+})
+
+await check('the panel creates an office whose name is in another script', async () => {
+  await writeFile(PATCH_PATH, PATCH_SEED)
+  const created = await callRoute(routes, '/dsh-office/offices/create', {
+    method: 'POST',
+    body: { name: '研发部' },
+  })
+  assert.equal(created.status, 202)
+  const text = await readFile(PATCH_PATH, 'utf8')
+  const row = mountedOfficeRows(text).find(entry => entry.config?.officeName === '研发部')
+  assert.ok(row, 'the name is stored as written, inside the insert list the Loader mounts')
+  assert.match(row.id, /^office_[0-9a-f]{12}$/, 'a name with no ASCII part still yields a usable row id')
+  assert.equal(row.config.officeId, row.id, 'the storage key is written down rather than left to the row id default')
+
+  const removed = await callRoute(routes, '/dsh-office/offices/delete', {
+    method: 'POST',
+    body: { office: '研发部' },
+  })
+  assert.equal(removed.status, 200, 'the created office is addressed by its name alone')
+  assert.ok(!(await readFile(PATCH_PATH, 'utf8')).includes('研发部'))
+  await rm(PATCH_PATH, { force: true })
+})
+
+await check('the operator name accepts any script', async () => {
+  const front = makeHarness({ officeName: 'front', operatorName: '前台' }, undefined, { rowId: 'office_front' })
+  await front.ready
+  const posted = await callRoute(routes, officeRoute('post', 'front'), { method: 'POST', body: { text: '公告' } })
+  assert.equal(posted.status, 200)
+  const state = await callRoute(routes, officeRoute('state', 'front'))
+  assert.equal(state.payload.messages.at(-1).senderName, '前台', 'a sender name in another script reaches the panel')
+})
+
+await check('a wake that cannot be delivered is reported on the message', async () => {
+  const failing = makeHarness({ officeName: 'failing' }, undefined, { rowId: 'office_failing', failResumeOnce: true })
+  await failing.ready
+  const chief = failing.publish('session-failing-boss', { preset: 'office-boss' })
+  failing.titles.set('session-failing-boss', 'chief')
+  failing.titles.set('session-gil', 'gil')
+  await callBoss(chief, 'failing', 'office_adopt', { session_id: 'session-gil' })
+
+  const first = await callBoss(chief, 'failing', 'office_post', { text: 'gil, are you there?', mentions: ['gil'] })
+  assert.equal(first.deliveries[0].status, 'failed', 'a wake that could not happen is reported, not hidden')
+  assert.match(first.deliveries[0].detail, /resume failed for session-gil/)
+  const again = await callBoss(chief, 'failing', 'office_post', { text: 'gil, again', mentions: ['gil'] })
+  assert.deepEqual(again.deliveries, [{ colleague: 'gil', status: 'delivered' }], 'the next wake is unaffected')
+  assert.equal(failing.liveAgents.get('session-gil').sent.length, 1, 'only the delivered wake became a turn')
+})
+
+await check('a hired colleague is greeted without the office history being replayed', async () => {
+  const joining = makeHarness({ officeName: 'joining' }, undefined, { rowId: 'office_joining' })
+  await joining.ready
+  const chief = joining.publish('session-joining-boss', { preset: 'office-boss' })
+  joining.titles.set('session-joining-boss', 'chief')
+  await callBoss(chief, 'joining', 'office_post', { text: 'old decision one', mention_all: false })
+  const hired = await callBoss(chief, 'joining', 'office_hire', { name: 'Newcomer' })
+  assert.equal(hired.greeting, 'delivered')
+  const newcomer = joining.liveAgents.get(hired.colleague.sessionId)
+  assert.equal(newcomer.sent.length, 1, 'the greeting is the new colleague only turn')
+  const body = newcomer.sent[0].message.content[0].text
+  assert.match(body, /You are "Newcomer", a colleague of the office "joining"/)
+  assert.match(body, /nothing replays it/, 'and it is told the history is read on demand')
+  assert.ok(!body.includes('old decision one'), 'nothing posted before it joined is pushed into its context')
+  const archive = await callBoss(chief, 'joining', 'office_read', { channel: '#general' })
+  assert.ok(archive.messages.some(message => message.text === 'old decision one'), 'the history is still in the channel')
+})
+await check('a wake says how far the channel had moved when the turn was queued', async () => {
+  const lagging = makeHarness({ officeName: 'lagging' }, undefined, { rowId: 'office_lagging', slowResumeMs: 25 })
+  await lagging.ready
+  const chief = lagging.publish('session-lagging-boss', { preset: 'office-boss' })
+  lagging.titles.set('session-lagging-boss', 'chief')
+  lagging.titles.set('session-zed', 'zed')
+  await callBoss(chief, 'lagging', 'office_adopt', { session_id: 'session-zed' })
+
+  // zed is cold and its resume takes a moment, so the office posts again while that is in
+  // flight: the message zed is finally woken for is no longer the newest one in the channel.
+  const first = callBoss(chief, 'lagging', 'office_post', { text: 'zed, first', mentions: ['zed'] })
+  await new Promise(resolve => setTimeout(resolve, 5))
+  await callBoss(chief, 'lagging', 'office_post', { text: 'a second message', mentions: [] })
+  const posted = await first
+  assert.deepEqual(posted.deliveries, [{ colleague: 'zed', status: 'delivered' }])
+
+  const body = lagging.liveAgents.get('session-zed').sent.at(-1).message.content[0].text
+  assert.match(body, /^\[office #general from chief \| general-1\]/)
+  assert.match(body, /#general had already reached general-2 when this turn was queued/)
+  assert.match(body, /Newer messages are not part of it; office_read reads them\./)
+
+  // A wake that was never overtaken carries no such line: a live message and a stale one must
+  // not look the same in the opposite direction either.
+  const live = await callBoss(chief, 'lagging', 'office_post', { text: 'zed, live', mentions: ['zed'] })
+  assert.equal(live.deliveries[0].status, 'delivered')
+  assert.ok(
+    !lagging.liveAgents.get('session-zed').sent.at(-1).message.content[0].text.includes('when this turn was queued'),
+    'the newest message needs no freshness line',
+  )
+})
+
+await check('office_read answers a sequence range and every filter', async () => {
+  const library = makeHarness(
+    { officeName: 'library' },
+    undefined,
+    { rowId: 'office_library' },
+  )
+  await library.ready
+  const chief = library.publish('session-library-boss', { preset: 'office-boss' })
+  library.titles.set('session-library-boss', 'chief')
+  library.titles.set('session-ann', 'ann')
+  library.titles.set('session-ben', 'ben')
+  const ann = library.publish('session-ann')
+  const ben = library.publish('session-ben')
+  await callBoss(chief, 'library', 'office_adopt', { session_id: 'session-ann' })
+  await callBoss(chief, 'library', 'office_adopt', { session_id: 'session-ben' })
+  await callBoss(chief, 'library', 'office_post', { text: 'kickoff at nine', mentions: [] })
+  await call(ann, 'office_post', { text: 'I am on the DOCS' })
+  await callBoss(chief, 'library', 'office_post', { text: '@ann please review', mentions: ['ann'] })
+  await call(ben, 'office_post', { text: 'unrelated' })
+  const fromPanel = await callRoute(routes, officeRoute('post', 'library'), {
+    method: 'POST',
+    body: { text: 'from the panel' },
+  })
+  assert.equal(fromPanel.status, 200)
+
+  const all = await call(ben, 'office_read', { channel: '#general' })
+  assert.deepEqual(all.messages.map(message => message.seq), [1, 2, 3, 4, 5], 'the read reports the sequences it ranges over')
+  assert.equal(all.messages[0].kind, 'public')
+  assert.equal(all.total, 5, 'a complete read reports how many matched')
+  assert.equal(all.truncated, false, 'and says it is complete')
+
+  const windowed = await call(ben, 'office_read', { channel: '#general', limit: 2 })
+  assert.deepEqual(windowed.messages.map(message => message.text), ['unrelated', 'from the panel'])
+  assert.equal(windowed.total, 5, 'a window still reports the whole match count')
+  assert.equal(windowed.truncated, true, 'and says it is a window')
+  assert.match(
+    ben.tools.get('office_read').output.render({ limit: 2 }, windowed)[0].text,
+    /That is the newest 2 of 5 matching messages/,
+    'because a window that does not announce itself reads as the whole history',
+  )
+
+  await assert.rejects(
+    () => call(ben, 'office_read', {}),
+    /channel is required/,
+    'an omitted required argument is named as the omission, not as a channel called "undefined"',
+  )
+
+  const ranged = await call(ben, 'office_read', { channel: '#general', from: 2, to: 3 })
+  assert.deepEqual(ranged.messages.map(message => message.text), ['I am on the DOCS', '@ann please review'])
+
+  assert.deepEqual(
+    (await call(ben, 'office_read', { channel: '#general', limit: 1 })).messages.map(message => message.text),
+    ['from the panel'],
+    'limit keeps the newest',
+  )
+  assert.deepEqual(
+    (await call(ben, 'office_read', { channel: '#general', sender: 'ann' })).messages.map(message => message.text),
+    ['I am on the DOCS'],
+    'a colleague is matched by session, so a rename cannot split its history',
+  )
+  assert.deepEqual(
+    (await call(ben, 'office_read', { channel: '#general', sender: 'operator' })).messages.map(message => message.text),
+    ['from the panel'],
+    'the panel operator has no session and is still addressable',
+  )
+  await assert.rejects(
+    () => call(ben, 'office_read', { channel: '#general', sender: 'nobody' }),
+    /neither a colleague's session title nor the operator/,
+  )
+  assert.deepEqual(
+    (await call(ben, 'office_read', { channel: '#general', contains: 'docs' })).messages.map(message => message.text),
+    ['I am on the DOCS'],
+    'contains ignores case',
+  )
+  assert.deepEqual(
+    (await call(ben, 'office_read', { channel: '#general', mentions: 'ann' })).messages.map(message => message.text),
+    ['@ann please review'],
+  )
+  assert.deepEqual(
+    (await call(ann, 'office_read', { channel: '#general', mentions: 'me' })).messages.map(message => message.text),
+    ['@ann please review'],
+    'me resolves to the reading session',
+  )
+  assert.deepEqual((await call(ben, 'office_read', { channel: '#general', since: Date.now() + 60_000 })).messages, [])
+  assert.deepEqual((await call(ben, 'office_read', { channel: '#general', until: 1 })).messages, [])
+  const recent = await call(ben, 'office_read', { channel: '#general', since: all.messages.at(-1).createdAt })
+  assert.equal(recent.messages.at(-1).text, 'from the panel', 'since keeps what is at or after the instant')
+
+  const brief = await call(ben, 'office_read', { channel: '#general', brief: true, from: 2, to: 2 })
+  assert.deepEqual(brief.messages, [{
+    messageId: 'general-2',
+    channelId: 'general',
+    seq: 2,
+    kind: 'public',
+    senderName: 'ann',
+    createdAt: brief.messages[0].createdAt,
+  }])
+  const everywhere = await call(ann, 'office_read', { channel: '*' })
+  assert.equal(everywhere.channelId, '*')
+  assert.deepEqual(
+    everywhere.messages.map(message => message.channelId),
+    ['general', 'general', 'general', 'general', 'general'],
+    'a colleague with no direct channel sees the public one alone',
+  )
+  await assert.rejects(
+    () => call(ben, 'office_read', { channel: '#general', from: 3, to: 2 }),
+    /from \(3\) must not exceed to \(2\)/,
+  )
+})
+
+await check('office_compact replaces a range in place, and reads back as one summary', async () => {
+  const archive = makeHarness(
+    { officeName: 'archive' },
+    undefined,
+    { rowId: 'office_archive' },
+  )
+  await archive.ready
+  const chief = archive.publish('session-archive-boss', { preset: 'office-boss' })
+  archive.titles.set('session-archive-boss', 'chief')
+  archive.titles.set('session-iris', 'iris')
+  const iris = archive.publish('session-iris')
+  await callBoss(chief, 'archive', 'office_adopt', { session_id: 'session-iris' })
+  for (const text of ['plan a', 'plan b', 'plan c']) {
+    await callBoss(chief, 'archive', 'office_post', { text, mentions: [] })
+  }
+
+  const compacted = await callBoss(chief, 'archive', 'office_compact', {
+    from: 1,
+    to: 3,
+    summary: 'The team agreed to ship on Friday.',
+  })
+  assert.deepEqual(compacted.covers, [1, 3])
+  assert.equal(compacted.replaced, 3)
+  assert.equal(compacted.summaryId, 'general-1', 'the summary takes the lowest sequence of the range')
+  const feed = await callBoss(chief, 'archive', 'office_read', { channel: '#general' })
+  assert.deepEqual(feed.messages.map(message => message.text), ['The team agreed to ship on Friday.'])
+  assert.equal(feed.messages[0].kind, 'summary')
+  assert.deepEqual(feed.messages[0].covers, [1, 3])
+
+  // Compacting a range that holds a summary absorbs what that summary already replaced, so
+  // `covers` describes what is gone rather than what one call happened to name.
+  const nested = await callBoss(chief, 'archive', 'office_compact', {
+    from: 1,
+    to: 1,
+    summary: 'Everything so far is settled.',
+  })
+  assert.deepEqual(nested.covers, [1, 3], 'a nested summary keeps the coverage it stands for')
+  assert.equal(nested.replaced, 1, 'and removes the summary it replaces, never the messages already gone')
+  await assert.rejects(
+    () => callBoss(chief, 'archive', 'office_compact', { from: 90, to: 99, summary: 'nothing here' }),
+    /has no messages in 90\.\.99/,
+  )
+
+  const woke = await callBoss(chief, 'archive', 'office_post', { text: 'iris, standup', mentions: ['iris'] })
+  assert.deepEqual(woke.deliveries, [{ colleague: 'iris', status: 'delivered' }])
+  const body = iris.sent.at(-1).message.content[0].text
+  assert.ok(!body.includes('plan a'), 'a wake carries its own message and never replays the channel')
+  assert.ok(!body.includes('Everything so far'), 'not even the summary that now stands for it')
+  assert.match(body, /^\[office #general from chief \| general-4\]/)
+  assert.ok(!toolNames(iris).includes('office_compact'), 'compacting stays a boss operation')
+  // The summary is what a reader meets where the range used to be, so a range query over the
+  // covered sequences answers with the summary rather than with nothing.
+  const covered = await call(iris, 'office_read', { channel: '#general', from: 1, to: 3 })
+  assert.deepEqual(covered.messages.map(message => message.text), ['Everything so far is settled.'])
+})
+
+for (const label of checks) console.log(`  ok  ${label}`)
+console.log(`\ndsh-office probe: ${checks.length} checks passed`)

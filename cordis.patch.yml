@@ -1,0 +1,110 @@
+# dsh-office bundle patch.
+#
+# Two kinds of row, told apart by one thing: the row id. `office-host` is the HOST; every
+# other row is an OFFICE. The id decides rather than a config field, because a patch override
+# REPLACES the whole `config` — a field there would be lost by the first override that tunes
+# one value, and the office would be read as a second host.
+#
+# The host is a singleton. It owns everything that exists once per deployment — the agent
+# tool set and the Web panel with its `/dsh-office/*` routes — and holds no office of its
+# own, so its lifetime is independent of the registry. That is what lets the panel survive
+# every office being deleted, and it is why the tools and the routes take the office as an
+# argument.
+#
+# An office owns everything about storing and delivering its own messages: its domain, its
+# roster, and its channels. It registers no tool and no route.
+#
+# Both rows are active by default; disable them with `plugin_manager set_plugin` or a
+# higher-priority layer when the office should not run in a profile.
+- insert:
+    - id: office-host
+      name: 'dsh-office'
+      config:
+        bossPreset: office-boss
+        readLimit: 20
+        readLimitMax: 100
+
+    - id: office
+      name: 'dsh-office'
+      config:
+        # The name people and the model read and address; any script. The id beside it is the
+        # storage key, and here it is written out so the shipped office's unit stays
+        # `office` even if this row is ever renamed.
+        officeName: office
+        officeId: office
+        bossPreset: office-boss
+        operatorName: operator
+        wakesEnabled: true
+
+    - id: preset-office-boss
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: office-boss
+        name: Office Boss
+        description: >-
+          An agent that runs an office: it manages the roster, reads any channel, posts to
+          it, and holds one persistent Git Bash for reading what colleagues produce. It
+          holds no other tool. The shell needs the danger-full-access permission mode,
+          because an MSYS2 bash cannot start under the Windows ACL restricted token.
+        order: 20
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You run an agent office. A colleague is an ordinary session adopted into the
+                roster and addressed by that session's title; hiring creates and titles a new
+                session, and dismissing removes one from the roster without deleting it. You
+                can also read any channel and post to it. You hold one persistent bash shell,
+                for inspecting work a colleague produced on disk; you hold no file or search
+                tools, so read the roster and the channels instead of reaching for them, and
+                reserve the shell for the files themselves. When you run several offices you
+                hold one set of office tools, each taking the office to act on.
+              suffix: Your working directory is {{cwd}}.
+
+          # One Git Bash process per session, the same stack the `minimal-git-bash-persistent`
+          # agent preset mounts: environment, working directory, and history survive across
+          # calls, which is what makes it usable for reading a colleague's output.
+          #
+          # This row survives `office-boss-restrict` because that row denies GLOBAL names,
+          # and a name-scoped restriction is evaluated against the inherited set; see
+          # presets/boss-restrict.mjs for why an allow list cannot express this.
+          #
+          # The PTY registry is an agent-owned service, so it lives in an entry-local realm.
+          # Every row carries its own platform gate: the Loader treats a `group` row as
+          # always enabled, so a `disabled` on the group itself would be ignored.
+          - id: persistent-shell
+            name: cordis:group
+            group: true
+            isolate:
+              terminals: true
+            config:
+              - id: pty
+                name: '@deepseek-ai/dsh-terminal'
+
+              # The PTY backend hands `shellPath` straight to the native spawn, which does
+              # not search PATH, so a bare `bash` fails with "File not found" even when
+              # bash is on it. Resolve the absolute path here instead of pinning one
+              # machine's Git for Windows install, and fall back to the bare name so a
+              # deployment without bash loses only this one tool, not the whole preset.
+              - id: terminal-git-bash
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  shellDialect: bash
+                  shellPath: !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const path = process.getBuiltinModule('node:path'); const names = process.platform === 'win32' ? ['bash.exe'] : ['bash']; for (const dir of String(process.env.PATH || '').split(path.delimiter)) { if (dir === '') continue; for (const name of names) { const candidate = path.join(dir, name); if (fs.existsSync(candidate)) return candidate } } return 'bash' })()"
+                  timeoutMs: 300000
+
+              - id: terminal-posix-bash
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 300000
+
+              - id: persistent-bash
+                name: '@deepseek-ai/dsh-tool-bash-persistent'
+                config:
+                  timeoutMs: 300000
+
+          - id: office-boss-restrict
+            name: 'dsh-office/presets/boss-restrict.mjs'
