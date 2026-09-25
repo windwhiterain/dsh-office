@@ -976,9 +976,12 @@ window.__ModuleLoader__.load({
         key: message.messageId,
         style: message.kind === 'summary' ? summaryBubble : bubble,
       },
+      // The number is the channel's own sequence, the same number the office anchors a message
+      // with (general-12) and `office_read` addresses a range with, so a human can read and cite
+      // an anchor without a tool call.
       h('div', { style: bubbleHead }, message.kind === 'summary'
-        ? `Summary of ${String(message.covers[0])}–${String(message.covers[1])} by ${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
-        : `${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
+        ? `#${String(message.seq)} · Summary of ${String(message.covers[0])}–${String(message.covers[1])} by ${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
+        : `#${String(message.seq)} · ${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
           + `${message.origin === undefined ? '' : ` · also in #${message.origin.channelId} as ${message.origin.messageId}`}`),
       h('div', null, renderMentions(message.text, names, message.mentions)),
       )
@@ -1538,9 +1541,24 @@ window.__ModuleLoader__.load({
         total: mailboxTotal,
       })
       const messages = general.messages
-      /** The sidebar's own scrollport, and whether new mail should keep it at the newest message. */
+      /**
+       * The sidebar's own scrollport, driven by the same follow machinery the channel uses: one
+       * follow intent with settled sampling, a stored position that outlives a close, and the
+       * same height accounting for unfolds and rewraps.
+       */
       const mailboxRef = useRef(null)
-      const mailboxFollowRef = useRef(true)
+      const mailboxFollowRef = useRef(null)
+      /** The pending mailbox reader sample, which also marks reader input as not yet settled. */
+      const mailboxSampleRef = useRef(null)
+      /** Whether this mount has already put the saved mailbox position, or the tail, back. */
+      const mailboxRestoredRef = useRef(false)
+      /** The sidebar feed's last content height, the same prepend accounting the channel uses. */
+      const mailboxHeightRef = useRef(undefined)
+      const mailboxScrollKey = `mail:${officeName}`
+      if (mailboxFollowRef.current === null) {
+        const saved = panelState.get(mailboxScrollKey, undefined)
+        mailboxFollowRef.current = new FeedFollow(saved === undefined || saved === null, FEED_FOLLOW_THRESHOLD)
+      }
 
       /**
        * Write what the reader is doing: following the tail, or reading at this offset.
@@ -1627,25 +1645,76 @@ window.__ModuleLoader__.load({
       }, [messages.length, snapshot, mailboxShown, rememberPosition])
 
       /**
-       * Keep the mailbox at its newest message while the reader has not scrolled away from it.
+       * Keep the mailbox in step with its reader, exactly as the channel is kept in step.
        *
-       * A sidebar the operator is not watching must still show what arrived: it opens at the tail
-       * and a poll that appends follows it, while a reader who scrolled up keeps the place they
-       * chose. It has no stored position, unlike the channel, because it is a place to look rather
-       * than the record being read.
+       * The same three pieces the channel has, applied to the sidebar: a settled sample that
+       * writes follow intent and the stored position (a mailbox the operator is not watching
+       * still shows what arrived, because following the tail is the default both feeds share);
+       * one restore per mount that puts the saved position — or the tail — back; and the same
+       * content-height accounting, which an unfold and a column rewrap both drive.
+       * @returns nothing; reader state lives in the refs.
        */
-      const onMailboxScroll = useCallback(() => {
+      const rememberMailbox = useCallback((node) => {
+        panelState.set(mailboxScrollKey, mailboxFollowRef.current.following ? null : node.scrollTop)
+      }, [mailboxScrollKey])
+
+      const sampleMailbox = useCallback(() => {
+        mailboxSampleRef.current = null
         const node = mailboxRef.current
         if (node === null) return
-        mailboxFollowRef.current = node.scrollHeight - node.clientHeight - node.scrollTop
-          <= FEED_FOLLOW_THRESHOLD
-      }, [])
+        mailboxFollowRef.current.sample(mailboxFollowRef.current.metrics(node))
+        rememberMailbox(node)
+      }, [rememberMailbox])
+
+      const onMailboxScroll = useCallback(() => {
+        if (mailboxSampleRef.current !== null) window.clearTimeout(mailboxSampleRef.current)
+        mailboxSampleRef.current = window.setTimeout(sampleMailbox, FEED_SAMPLE_MS)
+      }, [sampleMailbox])
 
       useEffect(() => {
         const node = mailboxRef.current
-        if (node === null || !mailboxFollowRef.current) return
-        node.scrollTop = node.scrollHeight
-      }, [mailbox.messages.length])
+        if (node === null || !mailboxShown) return undefined
+        node.addEventListener('scrollend', sampleMailbox)
+        return () => {
+          node.removeEventListener('scrollend', sampleMailbox)
+          if (mailboxSampleRef.current !== null) window.clearTimeout(mailboxSampleRef.current)
+        }
+      }, [sampleMailbox, mailboxShown])
+
+      // The column unmounts every time it closes, so each open restores: the follow effect reads
+      // the saved position through a fresh `restored` flag over the reset below.
+      useEffect(() => {
+        mailboxRestoredRef.current = false
+        mailboxHeightRef.current = undefined
+      }, [mailboxShown])
+
+      useEffect(() => {
+        const node = mailboxRef.current
+        if (node === null || mailbox.messages.length === 0) return
+        const follow = mailboxFollowRef.current
+        if (!mailboxRestoredRef.current) {
+          mailboxRestoredRef.current = true
+          const saved = panelState.get(mailboxScrollKey, undefined)
+          if (typeof saved === 'number') follow.jump(node, follow.metrics(node), saved)
+          else follow.toBottom(node, follow.metrics(node))
+          rememberMailbox(node)
+          return
+        }
+        // Unsettled reader input owns the feed, exactly as it does in the channel.
+        if (mailboxSampleRef.current !== null) return
+        if (follow.following) follow.toBottom(node, follow.metrics(node))
+      }, [mailboxScrollKey, snapshot, mailbox.messages.length, railShown, rememberMailbox])
+
+      useEffect(() => {
+        const node = mailboxRef.current
+        if (node === null) return
+        const previous = mailboxHeightRef.current
+        mailboxHeightRef.current = node.scrollHeight
+        if (previous === undefined || mailboxFollowRef.current.following) return
+        if (mailboxSampleRef.current !== null) return
+        node.scrollTop += node.scrollHeight - previous
+        rememberMailbox(node)
+      }, [mailbox.messages.length, snapshot, railShown, rememberMailbox])
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
         error === undefined ? null : h('p', { style: notice }, `Cannot reach office "${officeName}": ${error}`),

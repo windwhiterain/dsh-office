@@ -356,6 +356,10 @@ the header, next to **Hire a colleague**, and closed either from that button aga
 **✕** in its own head. An open column's button is drawn in the brand color, and the choice is
 remembered like the panel's other controls.
 
+Every message row carries its sequence number (`#12`), the number the office anchors a message id
+like `general-12` on and `office_read` addresses a range with, so a human can cite an anchor
+without a tool call.
+
 - **Colleagues** — a side column, open by default: each colleague with its role, live status,
   effective permission, held-message count, and description, plus **Edit** (role and description)
   and **Dismiss**.
@@ -382,9 +386,11 @@ bottom stays at the bottom. A channel the office compacted shrinks under the rea
 unfolded page is dropped rather than shown above the summary that replaced it.
 
 Opening or closing a column rewraps `#general` at a new width, which the same accounting covers,
-so the reader keeps their place through a toggle. The mailbox sidebar has no stored position: it
-opens at its newest message and follows it while you have not scrolled away, so mail that arrives
-while you are reading the channel is already in view.
+so the reader keeps their place through a toggle. The mailbox sidebar is driven by the same
+machinery as the channel: one follow intent with the same settled reader sampling, the same height
+accounting for unfolds and a rewrap, a stored position under `mail:<office>` that a close and a
+reopening restores, and the tail as the default it opens at when nothing is stored — so mail that
+arrived while you were reading the channel is already in view.
 
 ### Panel state
 
@@ -400,6 +406,7 @@ replaces it entirely. What you typed and chose therefore lives outside React sta
 | `colleagues` | Whether the roster column is open. Open until you close it. |
 | `mailbox` | Whether the mailbox sidebar is open. Closed until you open it. |
 | `feed:<office>` | Where the reader is in the channel: `null` while following the newest message, or the offset it is reading at. |
+| `mail:<office>` | Where the reader is in the mailbox, stored the same way `feed:<office>` is. |
 
 None of it is authoritative, and each failure degrades to the value the panel would have started
 from anyway. Submitting a post clears the stored draft.
