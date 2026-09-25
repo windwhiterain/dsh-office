@@ -934,6 +934,33 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
+   * The route one session last actually ran a request with, when it has one.
+   *
+   * The session's own log is the source: the newest `request/header` carries the provider, model,
+   * and reasoning effort that request used. An older event without a usable pair is skipped.
+   * @param sessionId - the session to read.
+   * @returns the logged route, or undefined when the session logs no usable request.
+   */
+  const loggedRoute = async (sessionId) => {
+    const query = ctx.get('sessionQuery')
+    if (query === undefined) return undefined
+    const snapshot = await query.readSession(sessionId)
+    for (let index = snapshot.events.length - 1; index >= 0; index--) {
+      const event = snapshot.events[index]
+      if (event.type !== 'request/header') continue
+      const config = event.data?.header?.config
+      if (typeof config?.provider === 'string' && typeof config?.model === 'string') {
+        return compact({
+          provider: config.provider,
+          model: config.model,
+          reasoningEffort: config.reasoningEffort,
+        })
+      }
+    }
+    return undefined
+  }
+
+  /**
    * Resolve the model route a cold-resumed colleague runs on.
    *
    * The `provider` and `model` prompt variables read `agent.options`, so a resume
@@ -941,22 +968,8 @@ function createOffice(ctx, domain, config, hooks) {
    * session itself last logged, then the deployment default.
    */
   const resolveRoute = async (sessionId) => {
-    const query = ctx.get('sessionQuery')
-    if (query !== undefined) {
-      const snapshot = await query.readSession(sessionId)
-      for (let index = snapshot.events.length - 1; index >= 0; index--) {
-        const event = snapshot.events[index]
-        if (event.type !== 'request/header') continue
-        const config = event.data?.header?.config
-        if (typeof config?.provider === 'string' && typeof config?.model === 'string') {
-          return compact({
-            provider: config.provider,
-            model: config.model,
-            reasoningEffort: config.reasoningEffort,
-          })
-        }
-      }
-    }
+    const logged = await loggedRoute(sessionId)
+    if (logged !== undefined) return logged
     const fallback = ctx.get('agentDefaultModel')?.currentSelection()
     if (fallback === undefined) {
       throw new Error(
@@ -969,6 +982,37 @@ function createOffice(ctx, domain, config, hooks) {
       model: fallback.model,
       reasoningEffort: fallback.reasoningEffort,
     })
+  }
+
+  /**
+   * The model route one live colleague runs on, as the harness reports it.
+   *
+   * `agent.options` is **not** this, and reading it was wrong: it is the route the agent was
+   * constructed or resumed with, while a model switch — from the Web UI, from a preset, or from
+   * `office_hire` — is recorded as a `model/selection` session event that never touches it. The
+   * authoritative read is the session's own `modelSelection` projection, the very value the Web UI
+   * displays, whose pending selection wins over the one last used. A deployment that mounts no
+   * projection registry falls back to the route the session last logged a request with, and only
+   * then to the route the agent was built with; no route at all is reported as no model, because a
+   * default this office guessed is not a fact about the colleague.
+   * @param agent - the colleague's live agent.
+   * @returns `{ provider, model }`, or undefined when none can be read.
+   */
+  const modelRouteOf = async (agent) => {
+    const projections = ctx.get('sessionProjections')
+    if (projections !== undefined) {
+      try {
+        const state = projections.stateOf(agent.session, 'modelSelection')
+        const selected = state?.pending ?? state?.lastUsed
+        if (selected != null) return compact({ provider: selected.provider, model: selected.model })
+      } catch {
+        // A registry without that unit is reported as no model, not as a failed read: the roster
+        // is an inspection surface, and one unreadable field must not fail the whole listing.
+      }
+    }
+    const logged = await loggedRoute(agent.session.header.id)
+    if (logged !== undefined) return compact({ provider: logged.provider, model: logged.model })
+    return compact({ provider: agent.options?.provider, model: agent.options?.model })
   }
 
   /**
@@ -1520,29 +1564,32 @@ function createOffice(ctx, domain, config, hooks) {
    * Status is read from the live agent when the session is loaded and is `inactive` when it is
    * not, because an unloaded colleague has no turn to be in either state of. The effective
    * permission preset and the model route are reported only for a loaded session: they are
-   * properties of that live agent, and guessing them from storage would report a fact this
+   * properties of that live session, and guessing them from storage would report a fact this
    * office does not hold.
    * @returns one record per colleague, in roster order.
    */
   const rosterStatus = async () => {
     const list = await listColleagues()
     const times = lastMessageTimes()
-    return list.map((colleague) => {
+    const described = []
+    for (const colleague of list) {
       const live = liveAgent(colleague.sessionId)
-      return compact({
+      const route = live === undefined ? undefined : await modelRouteOf(live)
+      described.push(compact({
         name: colleague.name,
         sessionId: colleague.sessionId,
         role: canonicalRole(colleague.role),
         description: colleague.description,
         status: live === undefined ? 'inactive' : live.status,
         permission: live === undefined ? undefined : currentPermission(live),
-        provider: live === undefined ? undefined : live.options.provider,
-        model: live === undefined ? undefined : live.options.model,
+        provider: route?.provider,
+        model: route?.model,
         pending: heldWakes(colleague.sessionId).length,
         lastMessageAt: times.get(colleague.sessionId),
         adoptedAt: colleague.adoptedAt,
-      })
-    })
+      }))
+    }
+    return described
   }
 
   /** Set the session title that every surface displays as the colleague's name. */
@@ -2734,8 +2781,10 @@ function createColleaguesTool(tool) {
       'List every colleague of one office with its role, its description, and its current status: '
       + '`running` while it works, `idle` when it is loaded and waiting, and `inactive` when its session is '
       + 'not loaded at all. A loaded colleague also reports the permission preset its session runs under and '
-      + 'the model route it uses; every colleague reports how many messages the office is holding for it and '
-      + 'when the office last carried a message from it or to it. Reading this never wakes anybody.',
+      + 'the model route its session is set to — the same value the Web UI shows, read from the session '
+      + 'rather than from the route its agent process was started with; every colleague reports how many '
+      + 'messages the office is holding for it and when the office last carried a message from it or to it. '
+      + 'Reading this never wakes anybody.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {

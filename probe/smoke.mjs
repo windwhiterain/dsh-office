@@ -434,6 +434,14 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
           },
         }
       }
+      if (name === 'sessionProjections') {
+        // Only the harnesses that declare one model selection per session expose the registry, so
+        // the checks below can tell a read of the projection from a read of `agent.options`.
+        if (features.modelSelection === undefined) return undefined
+        return {
+          stateOf: (session, key) => (key === 'modelSelection' ? features.modelSelection[session.header.id] : undefined),
+        }
+      }
       if (name === 'sessionController') {
         return {
           create: async (request) => {
@@ -2564,6 +2572,44 @@ await check('the history route pages the older messages a feed folds away', asyn
   assert.equal(
     (await callRoute(routes, `${officeRoute('history', 'deepfeed')}&channel=general&before=0`)).status,
     400,
+  )
+})
+
+await check('the reported model is the session selection, not the route the agent was built with', async () => {
+  // `agent.options` is only the route an agent was constructed or resumed with; a model switch is
+  // a `model/selection` session event that never touches it. Reporting `options` showed a live
+  // office four colleagues each wearing its neighbour's model, so the projection is what is read.
+  const drift = makeHarness({ officeName: 'drift' }, undefined, {
+    rowId: 'office_drift',
+    modelSelection: {
+      'session-moved': {
+        lastUsed: { provider: 'opencode-go', model: 'glm-5.3-flash' },
+        pending: { provider: 'opencode-go', model: 'space-bunny-free' },
+      },
+      'session-settled': {
+        lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+        pending: null,
+      },
+    },
+  })
+  await drift.ready
+  const chief = drift.publish('session-drift-boss', { preset: 'office-boss' })
+  drift.titles.set('session-moved', 'moved')
+  drift.titles.set('session-settled', 'settled')
+  drift.publish('session-moved')
+  drift.publish('session-settled')
+  await callBoss(chief, 'drift', 'office_adopt', { session_id: 'session-moved' })
+  await callBoss(chief, 'drift', 'office_adopt', { session_id: 'session-settled' })
+
+  const listed = (await callBoss(chief, 'drift', 'office_colleagues', {})).colleagues
+  assert.deepEqual(
+    listed.map(entry => `${entry.name}=${entry.provider}/${entry.model}`),
+    ['moved=opencode-go/space-bunny-free', 'settled=deepseek-official/deepseek-v4-pro'],
+    'the pending selection wins, and a settled session reports the route it last used',
+  )
+  assert.ok(
+    listed.every(entry => entry.provider !== 'probe-provider'),
+    'and the route the agent was built with is never mistaken for the session current model',
   )
 })
 

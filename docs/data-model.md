@@ -66,6 +66,14 @@ session is a colleague of an office at most once.
 types every key it lists, so a hand-edited medium carrying a number there must fail at the read
 rather than at the tool.
 
+`role` and `description` are the only per-colleague facts the office stores. Everything else a
+roster reports — status, effective permission, model route, held messages, last activity — is
+read at the moment it is asked for and is therefore never stale in storage. The model route in
+particular is read from the session's own `modelSelection` projection, which is the value the Web
+UI shows (a pending selection wins over the one last used), not from `agent.options`: that field
+holds only the route the colleague's agent process was constructed or resumed with, so a model
+switched afterwards is invisible in it.
+
 ### `channels`
 
 | Field | Meaning |
