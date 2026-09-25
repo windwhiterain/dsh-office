@@ -2102,8 +2102,8 @@ await check('each predefined role holds exactly the office tools it is defined w
   ])
   assert.deepEqual(
     toolNames(sessions.consultant),
-    ['office_colleagues', 'office_read'],
-    'a consultant holds no tool that writes into the office',
+    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    'a consultant speaks like a member and carries no leader-only tool',
   )
   const roster = await callBoss(chief, 'roles', 'office_roster', {})
   assert.deepEqual(
@@ -2130,14 +2130,14 @@ await check('changing a role moves the live session to the tool set the new role
   const demoted = await callBoss(chief, 'shifts', 'office_configure', {
     name: 'dana',
     role: 'consultant',
-    description: 'reads the record and writes nothing',
+    description: 'reads the record and writes no files',
   })
   assert.deepEqual(
     toolNames(dana),
-    ['office_colleagues', 'office_read'],
-    'a demotion withdraws the tools rather than leaving them to refuse at call time',
+    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    'a demotion withdraws the leader-only tools rather than leaving them to refuse at call time',
   )
-  assert.equal(demoted.colleague.description, 'reads the record and writes nothing')
+  assert.equal(demoted.colleague.description, 'reads the record and writes no files')
 
   const cleared = await callBoss(chief, 'shifts', 'office_configure', { name: 'dana', description: '' })
   assert.equal(cleared.colleague.description, undefined, 'an empty description removes it')
@@ -2374,7 +2374,7 @@ await check('an office row refuses a rolePermissions map it cannot act on', asyn
   )
 })
 
-await check('a consultant is told the truth about what its turn can reach', async () => {
+await check('a consultant speaks into the office while its session runs read-only', async () => {
   const quiet = makeHarness({ officeName: 'quiet' }, undefined, { rowId: 'office_quiet' })
   await quiet.ready
   const chief = quiet.publish('session-quiet-boss', { preset: 'office-boss' })
@@ -2385,21 +2385,27 @@ await check('a consultant is told the truth about what its turn can reach', asyn
     role: 'consultant',
     description: 'reads and advises',
   })
-  assert.equal(hired.colleague.permission, 'read-only')
+  assert.equal(hired.colleague.permission, 'read-only', 'the preset is the session restriction, not the voice')
 
-  await callBoss(chief, 'quiet', 'office_dm', { to: 'rose', text: 'review this, please' })
+  // The frame answers with the tools the role holds, so a consultant is told where a public
+  // answer belongs rather than being pointed at its own transcript.
+  await callBoss(chief, 'quiet', 'office_post', { text: 'any advice? mention me if so', mentions: ['rose'] })
   const frame = rose.sent.at(-1).message.content[0].text
-  assert.match(frame, /your role holds no tool that writes to a channel/, 'the frame never names a tool it does not hold')
-  assert.ok(!frame.includes('office_dm'), 'a consultant is not told to answer with office_dm')
-  assert.ok(!frame.includes('office_post'))
+  assert.match(frame, /To answer the sender alone, use office_dm/, 'the frame names what the role holds')
+  assert.match(frame, /use office_post with mentions naming who should read it/)
+
+  const spoken = await call(rose, 'office_post', { text: 'advice: the summary is settled', mention_all: false })
+  assert.equal(spoken.message.channelId, 'general', 'a consultant writes into the office like a member')
+  const read = await callBoss(chief, 'quiet', 'office_read', { channel: '#general' })
+  assert.equal(read.messages.at(-1).text, 'advice: the summary is settled')
 
   const greeting = await callBoss(chief, 'quiet', 'office_hire', { name: 'sage', role: 'consultant' })
   const greeted = quiet.liveAgents.get(greeting.colleague.sessionId)
   const text = greeted.sent[0].message.content[0].text
   assert.match(text, /Your role: consultant\./)
-  assert.match(text, /Notes on you:|You hold 2 tools/)
-  assert.ok(!text.includes('office_post says something'), 'the greeting lists the tools the role actually holds')
-  assert.match(text, /You hold no tool that writes into the office/)
+  assert.match(text, /office_post says something in #general/, 'the greeting lists the tools the role actually holds')
+  assert.match(text, /You hold 4 tools/)
+  assert.ok(!text.includes('You hold no tool that writes into the office'), 'a consultant holds the messaging tools')
 })
 
 await check('the panel snapshot offers the roles, and the configure route edits a colleague', async () => {
@@ -2432,10 +2438,10 @@ await check('the panel snapshot offers the roles, and the configure route edits 
   assert.equal(configured.payload.colleague.permission, 'read-only')
   assert.deepEqual(
     toolNames(pia),
-    ['office_colleagues', 'office_read'],
+    ['office_colleagues', 'office_dm', 'office_post', 'office_read'],
     'the panel edit reaches the live session exactly as the tool does',
   )
-  assert.ok(!pia.tools.has('office_post'), 'and a consultant the panel created holds no way to write')
+  assert.ok(pia.tools.has('office_post'), 'and a consultant the panel created holds the messaging tools')
   const refused = await callRoute(routes, officeRoute('configure', 'paneledit'), {
     method: 'POST',
     body: { name: 'pia', role: 'reviewer' },

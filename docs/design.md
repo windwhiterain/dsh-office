@@ -184,10 +184,12 @@ A role is two independent things at once:
 | session permission preset | sandbox mode and approval policy the colleague's session runs under | `config.rolePermissions`, applied through `ctx.permissionPresets` |
 
 They are separate because they answer different questions: what a colleague may say into the
-office, and what its session may write to disk. `consultant` is restricted on both axes — it
-holds no channel-write capability, and the default map runs it under `read-only` — while `member`
-and `leader` keep whatever permission their session already has, because the default map names no
-preset for them.
+office, and what its session may write to disk. The two diverge in `consultant`: its capability
+set speaks like a `member`'s, and the default map runs its session under `read-only`. The two
+restrictions do not compound, because an office tool is this plugin's own code writing through
+the office's storage domain — not a confined capability of the session — so a session that
+cannot write a file can still write history. `member` and `leader` keep whatever permission
+their session already has, because the default map names no preset for them.
 
 The preset is applied when a role is **set** — at hire, at adopt, and at the configure that
 carries a role. It is deliberately **not** re-applied on every turn, nor on a description-only
@@ -235,7 +237,7 @@ No office tool reads it, and that is enforced in one place: `visibleChannels` ex
 `kind: 'mailbox'`, and `office_read({ channel: '*' })` walks exactly that list. `office_read`
 additionally refuses the mailbox by name, and `resolveDirectChannel` refuses it for `office_dm`
 and `office_compact`, so a colleague cannot reach the user's mail through any spelling of it.
-Colleagues may still *write* to it: a `member` or `leader` holds `office_dm`, and a public post
+Colleagues may still *write* to it — every predefined role holds `office_dm` — and a public post
 that names the user is stored in its channel and then copied in. See
 [delivery.md](delivery.md) for the copy's ordering and its delivery outcome,
 and [data-model.md](data-model.md) for the record shape.

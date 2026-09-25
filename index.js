@@ -75,7 +75,7 @@ const COLLEAGUE_ROLES = [ROLE_MEMBER, ROLE_LEADER, ROLE_CONSULTANT]
 const ROLE_CAPABILITIES = {
   [ROLE_MEMBER]: ['read', 'colleagues', 'post', 'dm'],
   [ROLE_LEADER]: ['read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure'],
-  [ROLE_CONSULTANT]: ['read', 'colleagues'],
+  [ROLE_CONSULTANT]: ['read', 'colleagues', 'post', 'dm'],
 }
 
 /** Capabilities a boss holds: it runs the office, so it holds every capability there is. */
@@ -92,8 +92,10 @@ const DESCRIPTION_MAX_CHARS = 2000
  *
  * A role's office capabilities decide which office tools its session holds; this map decides
  * the DSH permission preset its session runs under (sandbox mode plus approval policy, owned
- * by `ctx.permissionPresets` and enforced by every confined capability). `consultant` is
- * read-only by default: it takes part in the office but cannot write to disk.
+ * by `ctx.permissionPresets` and enforced by every confined capability). A preset governs the
+ * session's own disk writes, never the office's storage, which is this plugin's domain — so
+ * every role speaks into the office, and `consultant` is read-only by default so that what it
+ * cannot do is touch anything outside the office.
  */
 const DEFAULT_ROLE_PERMISSIONS = { [ROLE_CONSULTANT]: 'read-only' }
 
@@ -151,8 +153,9 @@ function roleProperty() {
     type: 'string',
     enum: COLLEAGUE_ROLES,
     description: `Predefined role: ${COLLEAGUE_ROLES.join(', ')}. The role decides which office tools `
-      + 'the colleague holds: member reads and writes to the office, leader also interrupts and compacts, '
-      + 'consultant reads only. It also selects the session permission preset the office row maps it to.',
+      + 'the colleague holds: member reads and writes to the office, leader also interrupts, compacts, '
+      + 'and configures, and consultant speaks like a member while its session runs read-only by default. '
+      + 'It also selects the session permission preset the office row maps it to.',
   }
 }
 
@@ -743,8 +746,8 @@ const OFFICE_PUBLIC_ANSWER_RULE = 'To answer the sender alone, use office_dm; to
  *
  * Two rules meet here. A direct message never suggests a public post, because turning a private
  * message into a public one is not the recipient's call to make. And the rule cannot name a tool
- * the recipient does not hold: a consultant's scope carries neither `office_post` nor `office_dm`,
- * so telling it to answer with one would spend its turn on a tool that is not there.
+ * the recipient does not hold: it is read off the role's own capabilities, so a role that held
+ * no channel-write tool would be told instead that whoever needs its answer reads this session.
  * @param kind - the delivered message's kind: `dm` or `public`.
  * @param role - the receiving colleague's predefined role.
  * @returns the sentence appended to the frame that colleague receives.
@@ -1628,7 +1631,7 @@ function createOffice(ctx, domain, config, hooks) {
     const role = canonicalRole(colleague.role)
     const held = ROLE_CAPABILITIES[role]
     // The greeting names the tools this colleague actually holds, because the role decides them:
-    // a consultant told about office_post would spend its first turn on a tool it does not have.
+    // a colleague told about a tool its scope lacks would spend its first turn on it regardless.
     const described = [
       'office_read reads #general or a direct channel',
       'office_colleagues lists the roster with each colleague\'s role, description, and current status',
@@ -3158,10 +3161,10 @@ function createReadTool(agent, tool, config) {
 /**
  * Build the channel-writing tools one agent's capabilities include.
  *
- * Writing into the office is a capability, not a property of being a colleague: a member and a
- * leader hold it, a consultant does not, so a consultant's scope carries no way to speak. The
- * gate is repeated per call because the tool set is the union of every membership's
- * capabilities; see {@link officeToolContext}.
+ * Writing into the office is a capability, not a property of being a colleague: every predefined
+ * role holds it, and a role without it would find no way to speak. The gate is repeated per call
+ * because the tool set is the union of every membership's capabilities; see
+ * {@link officeToolContext}.
  * @param agent - the agent whose scope receives these tools.
  * @param tool - the caller's shared declaration helpers.
  * @returns the communication tool definitions the caller's capabilities admit.

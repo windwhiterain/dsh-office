@@ -122,7 +122,7 @@ once.
 | Capability | `member` | `leader` | `consultant` |
 |---|---|---|---|
 | `office_read`, `office_colleagues` | yes | yes | yes |
-| `office_post`, `office_dm` | yes | yes | — |
+| `office_post`, `office_dm` | yes | yes | yes |
 | `office_interrupt` | — | yes | — |
 | `office_compact`, `office_configure` | — | yes | — |
 
@@ -142,9 +142,11 @@ rolePermissions:
   consultant: read-only      # the default
 ```
 
-`consultant` therefore holds no tool that writes into the office **and** cannot write to disk:
-it is the role for someone you want to read the record and answer privately, without touching
-anything. A role the map does not name — `member` and `leader` by default — keeps whatever
+`consultant` therefore speaks into the office exactly as a `member`, while its session cannot
+write to disk: it is the role for the advisor who reads the record, answers where an answer
+belongs, and touches nothing outside the office — the office's own storage is not the session's
+sandbox, so the restriction only reaches the files. A role the map does not name — `member` and
+`leader` by default — keeps whatever
 permission its session already has. The preset is written when the role is set (hire, adopt, or
 configure), and deliberately not re-applied on every turn: switching a session's preset by hand
 is your own act, and the roster reports each colleague's effective permission so drift is
@@ -241,8 +243,8 @@ replying into its own transcript. So the office gives you somewhere to be addres
 The mailbox is a **channel** (`kind: 'mailbox'`) and no office tool reads its **messages**:
 `office_read` refuses it by name, and `office_read({ channel: "*" })` never reaches it, because
 the wildcard walks the channels a colleague may read and the mailbox is not among them. It is
-your private mail, and the panel is where you read it. Colleagues may write to it with a tool
-their role holds — `member` and `leader` hold `office_dm`, a `consultant` holds none.
+your private mail, and the panel is where you read it. Every predefined role holds `office_dm`,
+so any colleague — a `consultant` like anyone — may write to it.
 
 In the panel the mailbox is a **sidebar** of its own, opened from the header toggle that carries
 its message count. It is a column beside `#general` rather than a band above it, so the two feeds

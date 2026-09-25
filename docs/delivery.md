@@ -178,15 +178,19 @@ answer, and the answers wake the office again. So every frame ends with the same
 where the choice is made — the default answer to a delivered message is silence — and a public
 message adds where an answer belongs when there is one.
 
-The rule is **role-aware**, because a rule cannot name a tool its recipient does not hold. A
-`consultant`'s scope carries neither `office_post` nor `office_dm`, so telling it to answer with
-one would spend its turn on a tool that is not there:
+The rule is chosen from the capabilities the receiving colleague's role holds, because a rule
+cannot name a tool its recipient does not hold. Every predefined role holds `office_post` and
+`office_dm`, so for the roles that exist today the message kind decides:
 
-| the recipient's role | what the frame says |
+| the message was | what the frame says |
 |---|---|
-| holds no channel-write capability (`consultant`) | `Nothing you write here reaches the office: your role holds no tool that writes to a channel, so whoever needs your answer reads this session.` |
-| holds `post` or `dm`, and the message was a direct message | `To answer the sender, use office_dm.` |
-| holds `post` or `dm`, and the message was public | the public answering rule quoted above: answer the sender with `office_dm`, answer the office with `office_post` and `mentions`, and never post an acknowledgement |
+| a direct message | `To answer the sender, use office_dm.` |
+| a public message | the public answering rule quoted above: answer the sender with `office_dm`, answer the office with `office_post` and `mentions`, and never post an acknowledgement |
+
+(`consultant` speaks like a `member`: `read-only` is only its session's preset, which the
+office's own storage does not answer to. A role that held no channel-write capability would
+instead hear `Nothing you write here reaches the office…`, and no predefined role is that role
+today.)
 
 A direct message never suggests a public post, because turning a private message into a public one
 is not the recipient's call to make. A merged burst is answered with the public rule, so a batch
