@@ -792,10 +792,10 @@ const OFFICE_SILENCE_RULE = 'Your reply stays in this session and reaches nobody
   + 'need no answer, and silence is a normal one.'
 
 /** Where an answer belongs when a delivered public message does need one. */
-const OFFICE_PUBLIC_ANSWER_RULE = 'To answer the sender alone, use office_dm; to answer the office, '
-  + 'use office_post with mentions naming who should read it. Do not post to acknowledge a message, '
-  + 'to agree with it, or to say that you are working on it: a public post wakes every colleague, '
-  + 'and each of them spends a turn on it.'
+const OFFICE_PUBLIC_ANSWER_RULE = 'Post important information to #general so everyone can learn from it; '
+  + 'send short exchanges privately with office_dm. Never post to acknowledge a message, to agree '
+  + 'with it, or to say that you are working on it: a public post wakes every colleague, and each '
+  + 'of them spends a turn on it.'
 
 /**
  * Where an answer belongs, for the message kind that arrived and the role that received it.
@@ -1798,8 +1798,8 @@ function createOffice(ctx, domain, config, hooks) {
     const described = [
       'office_read reads #general or a direct channel',
       'office_colleagues lists the roster with each colleague\'s role, description, and current status',
-      held.includes('post') ? 'office_post says something in #general, where the rest of the office can read it' : undefined,
-      held.includes('dm') ? 'office_dm sends one colleague a private message' : undefined,
+      held.includes('post') ? 'office_post posts important information to #general for everyone' : undefined,
+      held.includes('dm') ? 'office_dm sends one colleague a private message for short exchanges' : undefined,
       held.includes('interrupt')
         ? 'office_interrupt cancels a colleague\'s running turn, which then receives everything the office held for it as one turn'
         : undefined,
@@ -1824,10 +1824,9 @@ function createOffice(ctx, domain, config, hooks) {
       'A message delivered to you is a private turn in your own session, and what you answer here'
       + ' reaches nobody. Most messages need no answer, and silence is a normal one.',
       held.includes('post')
-        ? '#general is the office\'s shared record, not a chat room. A post there wakes every colleague'
-          + ' and each of them spends a turn on it, so post when the whole office needs to know'
-          + ' something, and answer one colleague with office_dm. Do not post to acknowledge a message,'
-          + ' to agree with it, or to announce that you are working.'
+        ? '#general is the office\'s shared record. Post important information there so everyone can'
+          + ' learn from it; send short exchanges privately with office_dm. Never post to acknowledge'
+          + ' a message, to agree with it, or to announce that you are working.'
         : undefined,
       'You do not need to announce yourself in #general, and nobody is waiting on you yet. Answer'
       + ' this message briefly, then wait for real work.',
@@ -3328,13 +3327,12 @@ function createCommunicationTools(agent, tool) {
     definitions.push({
       name: 'office_post',
       description:
-        'Post to the public office channel "#general". #general is the office\'s shared record, not a '
-        + 'chat room: a public post wakes every colleague by default, and each of them spends a turn '
-        + 'reading it. Post when the office needs something it does not have, and never to acknowledge a '
-        + 'message, to agree with it, or to announce that you are working. Name the colleagues who need to '
-        + 'read it in mentions to wake only them, or pass mention_all:false to write to the record without '
-        + 'waking anyone — everyone can still read it with office_read. An answer stays in its own session '
-        + 'unless it posts back. Use office_dm to answer one colleague.',
+        'Post to the public office channel "#general". Post important information the whole office '
+        + 'should learn from, and never to acknowledge a message, to agree with one, or to announce '
+        + 'that you are working — a public post wakes every colleague, and each of them spends a turn '
+        + 'reading it. Name the colleagues who need to read it in mentions to wake only them, or pass '
+        + 'mention_all:false to write to the record without waking anyone. Use office_dm for short or '
+        + 'private exchanges.',
       parameters: tool.parameters(['text'], {
         text: { type: 'string', description: 'The message body.' },
         mentions: {
@@ -3381,15 +3379,14 @@ function createCommunicationTools(agent, tool) {
     definitions.push({
       name: 'office_dm',
       description:
-        'Send a private message to one colleague, which is how to answer one person without waking the '
-        + "rest of the office. The message is stored in the office and delivered into that colleague's "
-        + 'session as a user turn, waking it if it is inactive. A colleague that is mid-turn is not '
-        + 'interrupted by default: the message is held and handed over as one turn when that turn ends. '
-        + 'Pass notify:"step-end" to steer instead, so the colleague reads it at the end of the step it '
-        + 'is running — that is how to change what a colleague is doing, where the default answers it '
-        + 'afterwards. Every delivery outcome is reported: a wake that could not happen is reported '
-        + 'rather than silently dropped. Addressing the user writes to the user mailbox instead: the '
-        + 'user has no session, so nothing is woken and the message waits there.',
+        'Send a private message to one colleague, for short exchanges that do not need the whole '
+        + 'office. The message is stored in the office and delivered into that colleague\'s session as '
+        + 'a user turn, waking it if it is inactive. A colleague that is mid-turn is not interrupted by '
+        + 'default: the message is held and handed over as one turn when that turn ends. Pass '
+        + 'notify:"step-end" to steer instead, so the colleague reads it at the end of the step it is '
+        + 'running. Every delivery outcome is reported: a wake that could not happen is reported rather '
+        + 'than silently dropped. Addressing the user writes to the user mailbox instead: the user has '
+        + 'no session, so nothing is woken and the message waits there.',
       parameters: tool.parameters(['to', 'text'], {
         to: { type: 'string', description: "The colleague's session title, or the user's name for the user mailbox." },
         text: { type: 'string', description: 'The message body.' },

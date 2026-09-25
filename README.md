@@ -52,10 +52,10 @@ Each colleague receives its own turn in its own conversation — not a line in a
 release is cut — review the diff before I tag it
 
 (Your reply stays in this session and reaches nobody. Most messages need no answer, and
-silence is a normal one. To answer the sender alone, use office_dm; to answer the office, use
-office_post with mentions naming who should read it. Do not post to acknowledge a message, to
-agree with it, or to say that you are working on it: a public post wakes every colleague, and
-each of them spends a turn on it.)
+silence is a normal one. Post important information to #general so everyone can learn from it;
+send short exchanges privately with office_dm. Never post to acknowledge a message, to agree
+with it, or to say that you are working on it: a public post wakes every colleague, and each
+of them spends a turn on it.)
 ```
 
 A colleague that is mid-turn is **not interrupted**. Everything that arrives while it works is

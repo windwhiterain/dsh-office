@@ -1280,7 +1280,7 @@ await check('hiring greets the new colleague privately, and that greeting makes 
   assert.match(text, /^\[office office \| you were hired\]/, 'it is framed as an onboarding note, not as a channel post')
   assert.match(text, /You are "Greeted", a colleague of the office "office"/, 'the greeting states who it is')
   assert.match(text, /Your role: member\./)
-  assert.match(text, /office_post says something in #general/, 'and what it can do')
+  assert.match(text, /office_post posts important information to #general/, 'and what it can do')
   assert.match(text, /nothing here was posted to a channel/)
   assert.equal(greeted.sent[0].message.source.channelId, 'office-onboarding')
   const feed = await callBoss(boss, 'office', 'office_read', { channel: '#general' })
@@ -1380,10 +1380,10 @@ await check('the delivery frame states where a reply does and does not surface',
   assert.ok(!dmText.includes('a public post wakes every colleague'), 'a private message must not invite a public reply')
   await call(alice, 'office_post', { text: 'public note', mentions: ['bob'] })
   const publicText = bob.sent.at(-1).message.content[0].text
-  assert.match(publicText, /use office_post with mentions naming who should read it/)
+  assert.match(publicText, /Post important information to #general so everyone can learn from it/)
   assert.match(
     publicText,
-    /Do not post to acknowledge a message, to agree with it, or to say that you are working on it/,
+    /Never post to acknowledge a message, to agree with it, or to say that you are working on it/,
     'a wake states the rule that keeps one post from waking the office again',
   )
 })
@@ -2671,8 +2671,8 @@ await check('a consultant speaks into the office while its session runs read-onl
   // answer belongs rather than being pointed at its own transcript.
   await callBoss(chief, 'quiet', 'office_post', { text: 'any advice? mention me if so', mentions: ['rose'] })
   const frame = rose.sent.at(-1).message.content[0].text
-  assert.match(frame, /To answer the sender alone, use office_dm/, 'the frame names what the role holds')
-  assert.match(frame, /use office_post with mentions naming who should read it/)
+  assert.match(frame, /Post important information to #general so everyone can learn from it/, 'the frame names what the role holds')
+  assert.match(frame, /send short exchanges privately with office_dm/)
 
   const spoken = await call(rose, 'office_post', { text: 'advice: the summary is settled', mention_all: false })
   assert.equal(spoken.message.channelId, 'general', 'a consultant writes into the office like a member')
@@ -2683,7 +2683,7 @@ await check('a consultant speaks into the office while its session runs read-onl
   const greeted = quiet.liveAgents.get(greeting.colleague.sessionId)
   const text = greeted.sent[0].message.content[0].text
   assert.match(text, /Your role: consultant\./)
-  assert.match(text, /office_post says something in #general/, 'the greeting lists the tools the role actually holds')
+  assert.match(text, /office_post posts important information to #general/, 'the greeting lists the tools the role actually holds')
   assert.match(text, /You hold 4 tools/)
   assert.ok(!text.includes('You hold no tool that writes into the office'), 'a consultant holds the messaging tools')
 })

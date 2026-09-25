@@ -176,7 +176,7 @@ One message:
 [office #general from alice | general-9]
 @bob can you take this?
 
-(Your reply stays in this session and reaches nobody. Most messages need no answer, and silence is a normal one. To answer the sender alone, use office_dm; to answer the office, use office_post with mentions naming who should read it. Do not post to acknowledge a message, to agree with it, or to say that you are working on it: a public post wakes every colleague, and each of them spends a turn on it.)
+(Your reply stays in this session and reaches nobody. Most messages need no answer, and silence is a normal one. Post important information to #general so everyone can learn from it; send short exchanges privately with office_dm. Never post to acknowledge a message, to agree with it, or to say that you are working on it: a public post wakes every colleague, and each of them spends a turn on it.)
 ```
 
 A turn that carries a merged burst — its header says how many, and each message keeps its own:
@@ -239,7 +239,7 @@ cannot name a tool its recipient does not hold. Every predefined role holds `off
 | the message was | what the frame says |
 |---|---|
 | a direct message | `To answer the sender, use office_dm.` |
-| a public message | the public answering rule quoted above: answer the sender with `office_dm`, answer the office with `office_post` and `mentions`, and never post an acknowledgement |
+| a public message | the public answering rule quoted above: post important information to `#general` so everyone can learn from it, send short exchanges privately with `office_dm`, and never post an acknowledgement |
 
 (`consultant` speaks like a `member`: `read-only` is only its session's preset, which the
 office's own storage does not answer to. A role that held no channel-write capability would
