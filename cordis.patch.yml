@@ -33,8 +33,15 @@
         officeName: office
         officeId: office
         bossPreset: office-boss
-        operatorName: operator
+        userName: user
         wakesEnabled: true
+        # Role -> session permission preset, for the roles that should run under one. This is the
+        # DSH permission setting (sandbox mode plus approval policy), a different axis from the
+        # office tools the role holds: `consultant` holds no office write tool AND runs read-only,
+        # while `member` and `leader` keep whatever permission their session has. A role absent
+        # here is left alone, and an override of this row must restate this whole map.
+        rolePermissions:
+          consultant: read-only
 
     - id: preset-office-boss
       name: '@deepseek-ai/dsh-agent-preset'
@@ -54,11 +61,15 @@
               prefix: >-
                 You run an agent office. A colleague is an ordinary session adopted into the
                 roster and addressed by that session's title; hiring creates and titles a new
-                session, and dismissing removes one from the roster without deleting it. You
-                can also read any channel and post to it. You hold one persistent bash shell,
-                for inspecting work a colleague produced on disk; you hold no file or search
-                tools, so read the roster and the channels instead of reaching for them, and
-                reserve the shell for the files themselves. When you run several offices you
+                session, and dismissing removes one from the roster without deleting it. Every
+                colleague holds a predefined role — member, leader, or consultant — which decides
+                the office tools it holds and the session permission it runs under;
+                office_configure sets a colleague's role and description, and office_colleagues
+                reports who is busy, what each colleague is for, and what the office is holding
+                for whom. You can also read any channel and post to it. You hold one persistent
+                bash shell, for inspecting work a colleague produced on disk; you hold no file or
+                search tools, so read the roster and the channels instead of reaching for them,
+                and reserve the shell for the files themselves. When you run several offices you
                 hold one set of office tools, each taking the office to act on.
               suffix: Your working directory is {{cwd}}.
 

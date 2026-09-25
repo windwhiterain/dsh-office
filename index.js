@@ -1,7 +1,7 @@
 /**
  * dsh-office — a persistent colleague office over ordinary DSH sessions.
  *
- * Colleagues are ordinary sessions the operator adopts by id. Channels, direct
+ * Colleagues are ordinary sessions the user adopts by id. Channels, direct
  * messages, and delivery bookkeeping live in the office's own storage domain, so the
  * office outlives any session and no session log is the coordination authority.
  *
@@ -40,6 +40,135 @@ export const inject = ['tools', 'agents', 'storageDomain']
 const GENERAL_CHANNEL = 'general'
 
 /**
+ * The user's mailbox: the one channel every colleague is refused.
+ *
+ * A colleague can address the user — with `office_dm` to the user's name, or a public post that
+ * mentions it — and the user has no session to wake, so the message needs somewhere to live. It
+ * lives here, which makes the mailbox a single authoritative feed rather than a query the panel
+ * assembles. `kind: 'mailbox'` is what keeps it out of every colleague's `office_read`: this is
+ * the user's private mail, and `office_read({ channel: '*' })` must not reach it.
+ */
+const MAILBOX_CHANNEL = 'mailbox'
+
+/**
+ * The predefined colleague roles. A colleague's stored `role` is one of these and nothing
+ * else: the role decides which office tools that colleague's session receives, so a
+ * free-text label would be a permission nobody can predict from the roster.
+ */
+const ROLE_MEMBER = 'member'
+const ROLE_LEADER = 'leader'
+const ROLE_CONSULTANT = 'consultant'
+
+/** Every predefined colleague role, in the order the Web panel offers them. */
+const COLLEAGUE_ROLES = [ROLE_MEMBER, ROLE_LEADER, ROLE_CONSULTANT]
+
+/**
+ * Office capabilities each predefined role holds. A capability is one group of tools, and
+ * the tool set a colleague receives is the union of the capabilities its roles hold — a
+ * single session may be a colleague of several offices, so the same agent can hold two
+ * roles at once. Every gated tool re-checks the capability against the office the call
+ * resolved, because the union grants the tool, not the right to use it everywhere.
+ *
+ * `member` is the default and the migration target: a stored role that is absent, or that
+ * no longer names a predefined role, reads as `member`.
+ */
+const ROLE_CAPABILITIES = {
+  [ROLE_MEMBER]: ['read', 'colleagues', 'post', 'dm'],
+  [ROLE_LEADER]: ['read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure'],
+  [ROLE_CONSULTANT]: ['read', 'colleagues'],
+}
+
+/** Capabilities a boss holds: it runs the office, so it holds every capability there is. */
+const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure']
+
+/** Role a colleague holds when its stored role is absent or no longer predefined. */
+const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
+
+/** Longest description one colleague may carry. It reaches the roster, the greeting, and the panel. */
+const DESCRIPTION_MAX_CHARS = 2000
+
+/**
+ * Role → session permission preset, per office row.
+ *
+ * A role's office capabilities decide which office tools its session holds; this map decides
+ * the DSH permission preset its session runs under (sandbox mode plus approval policy, owned
+ * by `ctx.permissionPresets` and enforced by every confined capability). `consultant` is
+ * read-only by default: it takes part in the office but cannot write to disk.
+ */
+const DEFAULT_ROLE_PERMISSIONS = { [ROLE_CONSULTANT]: 'read-only' }
+
+/**
+ * The predefined role a stored value names, or the default.
+ * @param value - a stored or requested role.
+ * @returns a role of {@link COLLEAGUE_ROLES}.
+ */
+function canonicalRole(value) {
+  return typeof value === 'string' && COLLEAGUE_ROLES.includes(value) ? value : DEFAULT_COLLEAGUE_ROLE
+}
+
+/**
+ * Validate a role supplied by a caller.
+ * @param value - the requested role.
+ * @param where - the tool or operation refusing it, for the diagnostic.
+ * @returns the role.
+ * @throws {TypeError} when the value is not a predefined role.
+ */
+function requireRole(value, where) {
+  if (typeof value !== 'string' || !COLLEAGUE_ROLES.includes(value)) {
+    throw new TypeError(
+      `dsh-office: ${where}: role must be one of ${COLLEAGUE_ROLES.join(', ')}, got ${JSON.stringify(value)}`,
+    )
+  }
+  return value
+}
+
+/**
+ * Normalize a description supplied by a caller.
+ * @param value - the requested description.
+ * @param where - the tool or operation refusing it, for the diagnostic.
+ * @returns the trimmed description, or undefined when it is empty.
+ * @throws {TypeError} when the value is not a string, or is longer than {@link DESCRIPTION_MAX_CHARS}.
+ */
+function normalizeDescription(value, where) {
+  if (typeof value !== 'string') {
+    throw new TypeError(`dsh-office: ${where}: description must be a string, got ${JSON.stringify(value)}`)
+  }
+  const trimmed = value.trim()
+  if (trimmed.length > DESCRIPTION_MAX_CHARS) {
+    throw new TypeError(
+      `dsh-office: ${where}: description is ${String(trimmed.length)} characters; the limit is ${String(DESCRIPTION_MAX_CHARS)}`,
+    )
+  }
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
+ * The `role` property every tool that sets a colleague's role declares.
+ * @returns the property schema.
+ */
+function roleProperty() {
+  return {
+    type: 'string',
+    enum: COLLEAGUE_ROLES,
+    description: `Predefined role: ${COLLEAGUE_ROLES.join(', ')}. The role decides which office tools `
+      + 'the colleague holds: member reads and writes to the office, leader also interrupts and compacts, '
+      + 'consultant reads only. It also selects the session permission preset the office row maps it to.',
+  }
+}
+
+/**
+ * The `description` property every tool that sets a colleague's description declares.
+ * @returns the property schema.
+ */
+function descriptionProperty() {
+  return {
+    type: 'string',
+    description: `What this colleague is for, in one or two sentences (at most ${String(DESCRIPTION_MAX_CHARS)} `
+      + 'characters). It reaches the colleague\'s onboarding message, the roster, and the Web panel.',
+  }
+}
+
+/**
  * Deployment defaults for the office HOST row.
  *
  * The host owns everything that exists once per deployment rather than once per office:
@@ -57,8 +186,9 @@ const DEFAULT_HOST_CONFIG = {
 const DEFAULT_OFFICE_CONFIG = {
   maxMessageChars: 16384,
   wakesEnabled: true,
-  operatorName: 'operator',
+  userName: 'user',
   bossPreset: 'office-boss',
+  rolePermissions: { ...DEFAULT_ROLE_PERMISSIONS },
   // Both are listed so the unknown-key check accepts them, and neither carries a value here.
   // They are the two halves of an office's identity: `officeName` is the name people and the
   // model read and pass, and `officeId` is the storage key behind it, which defaults to the
@@ -71,7 +201,7 @@ const DEFAULT_OFFICE_CONFIG = {
  * The row id this package reserves for its host.
  *
  * The row kind comes from the id rather than from a config field, because a patch override
- * REPLACES the whole `config`: an operator tweaking one value on the office row would
+ * REPLACES the whole `config`: a user tweaking one value on the office row would
  * otherwise drop the very field that says which kind of row it is, and the office would be
  * read as a second host. An id is the patch's own match key, so no override can remove it.
  */
@@ -123,7 +253,7 @@ const OFFICE_ID_RE = /^[a-z][a-z0-9_]*$/
 const OFFICE_ID_MAX_CHARS = 64
 
 /**
- * An office NAME is what the operator, the panel, and the model read and pass, so it accepts
+ * An office NAME is what the user, the panel, and the model read and pass, so it accepts
  * any script — Chinese, accented Latin, Cyrillic — and is canonicalized before this test.
  * Underscore is the only punctuation it takes: the name travels in tool arguments and in a
  * query parameter, so a blank, a separator, or a quote in it would be ambiguous at best.
@@ -146,7 +276,7 @@ function canonicalName(value) {
  *
  * Names are how people and the model address an office or a colleague, so two that differ only
  * in case would be ambiguous everywhere; comparing case-insensitively makes them one name
- * rather than a surprise. The stored spelling keeps whatever the operator typed. This is a
+ * rather than a surprise. The stored spelling keeps whatever the user typed. This is a
  * Unicode comparison and not a slug, because a colleague titled `张三` has no ASCII form: an
  * ASCII-only normalization would erase the title entirely and make every mention of it fail.
  * @param value - an office name or a session title.
@@ -276,9 +406,12 @@ function resolveRowConfig(raw, defaults, label, rowId) {
   if (typeof config.wakesEnabled !== 'boolean') {
     throw new TypeError(`dsh-office: config.wakesEnabled must be a boolean, got ${JSON.stringify(config.wakesEnabled)}`)
   }
-  if (typeof config.operatorName !== 'string' || config.operatorName.trim().length === 0) {
-    throw new TypeError(`dsh-office: config.operatorName must be a non-empty name, got ${JSON.stringify(config.operatorName)}`)
+  if (typeof config.userName !== 'string' || config.userName.trim().length === 0) {
+    throw new TypeError(`dsh-office: config.userName must be a non-empty name, got ${JSON.stringify(config.userName)}`)
   }
+  // Canonical for the same reason a colleague name is: the name travels in tool arguments and in
+  // message bodies, and two spellings of it would be two addresses in one office.
+  config.userName = canonicalName(config.userName)
   const officeName = canonicalName(config.officeName)
   if (typeof config.officeName !== 'string' || !OFFICE_NAME_RE.test(officeName)) {
     throw new TypeError(
@@ -300,6 +433,31 @@ function resolveRowConfig(raw, defaults, label, rowId) {
     )
   }
   config.officeId = officeId
+  // A fresh object rather than the shared default, so one row's edit cannot reach another's
+  // mapping. A key that is not a predefined role is refused rather than ignored: it would
+  // look configured while granting nothing.
+  const rolePermissions = config.rolePermissions
+  if (rolePermissions === null || typeof rolePermissions !== 'object' || Array.isArray(rolePermissions)) {
+    throw new TypeError(
+      `dsh-office: config.rolePermissions must be an object mapping a role to a permission preset, `
+      + `got ${JSON.stringify(rolePermissions)}`,
+    )
+  }
+  const mapping = {}
+  for (const [role, preset] of Object.entries(rolePermissions)) {
+    if (!COLLEAGUE_ROLES.includes(role)) {
+      throw new TypeError(
+        `dsh-office: config.rolePermissions.${role} names no predefined role; it takes ${COLLEAGUE_ROLES.join(', ')}`,
+      )
+    }
+    if (typeof preset !== 'string' || preset.trim().length === 0) {
+      throw new TypeError(
+        `dsh-office: config.rolePermissions.${role} must name a permission preset, got ${JSON.stringify(preset)}`,
+      )
+    }
+    mapping[role] = preset.trim()
+  }
+  config.rolePermissions = mapping
   return config
 }
 
@@ -351,7 +509,7 @@ function profilePatchPath(ctx, config) {
 /**
  * Read the profile patch as a comment-preserving YAML document.
  *
- * The document model is what keeps the operator's own comments intact across an edit;
+ * The document model is what keeps the user's own comments intact across an edit;
  * parsing to plain data and re-serializing would discard them.
  * @param path - the profile patch file.
  * @returns the parsed document.
@@ -382,7 +540,7 @@ async function writePatch(path, document) {
  *
  * A row is found by the name it declares, by the storage key it declares, or by an id this
  * package gives an office row — the stored key, the shipped `office` row, and the `office-<name>`
- * form the panel used to write. The name comes first because it is what an operator reads; a
+ * form the panel used to write. The name comes first because it is what a user reads; a
  * key catches the row after the office was renamed, because a rename changes stored data
  * rather than the profile. Matching on a defaulted name instead would mistake any unrelated
  * override, such as `- id: browser`, for an office row.
@@ -515,6 +673,14 @@ function validateColleague(value) {
   if (typeof record.sessionId !== 'string') {
     throw new Error(`dsh-office: stored colleague record is invalid: ${JSON.stringify(value)}`)
   }
+  // Both optional fields reach a declared result schema, which types every present key, so a
+  // hand-edited medium carrying a number here must fail at the read rather than at the tool.
+  if (record.role !== undefined && typeof record.role !== 'string') {
+    throw new Error(`dsh-office: stored colleague role is invalid: ${JSON.stringify(value)}`)
+  }
+  if (record.description !== undefined && typeof record.description !== 'string') {
+    throw new Error(`dsh-office: stored colleague description is invalid: ${JSON.stringify(value)}`)
+  }
   return record
 }
 
@@ -573,6 +739,27 @@ const OFFICE_PUBLIC_ANSWER_RULE = 'To answer the sender alone, use office_dm; to
   + 'and each of them spends a turn on it.'
 
 /**
+ * Where an answer belongs, for the message kind that arrived and the role that received it.
+ *
+ * Two rules meet here. A direct message never suggests a public post, because turning a private
+ * message into a public one is not the recipient's call to make. And the rule cannot name a tool
+ * the recipient does not hold: a consultant's scope carries neither `office_post` nor `office_dm`,
+ * so telling it to answer with one would spend its turn on a tool that is not there.
+ * @param kind - the delivered message's kind: `dm` or `public`.
+ * @param role - the receiving colleague's predefined role.
+ * @returns the sentence appended to the frame that colleague receives.
+ */
+function answerRule(kind, role) {
+  const capabilities = ROLE_CAPABILITIES[canonicalRole(role)]
+  if (!capabilities.includes('post') && !capabilities.includes('dm')) {
+    return 'Nothing you write here reaches the office: your role holds no tool that writes to a channel, '
+      + 'so whoever needs your answer reads this session.'
+  }
+  if (kind === 'dm') return 'To answer the sender, use office_dm.'
+  return OFFICE_PUBLIC_ANSWER_RULE
+}
+
+/**
  * Compose the model-visible framing of one delivered office message.
  *
  * The frame names the destination, the sender, and the message identity so the
@@ -585,12 +772,11 @@ const OFFICE_PUBLIC_ANSWER_RULE = 'To answer the sender alone, use office_dm; to
  * and answering it reads as engaging with something already settled.
  * @param message - the stored message record that triggered the wake.
  * @param newestSeq - the channel's newest sequence when this turn was queued, when known.
+ * @param role - the receiving colleague's predefined role, which decides what an answer may use.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameDelivery(message, newestSeq) {
-  const answer = message.kind === 'dm'
-    ? `${OFFICE_SILENCE_RULE} To answer the sender, use office_dm.`
-    : `${OFFICE_SILENCE_RULE} ${OFFICE_PUBLIC_ANSWER_RULE}`
+function frameDelivery(message, newestSeq, role) {
+  const answer = `${OFFICE_SILENCE_RULE} ${answerRule(message.kind, role)}`
   const freshness = newestSeq === undefined || newestSeq <= message.seq
     ? undefined
     : `(${channelLabel(message)} had already reached ${message.channelId}-${String(newestSeq)} when this turn was queued. `
@@ -611,17 +797,18 @@ function frameDelivery(message, newestSeq) {
  * @param officeName - the office the wakes came from.
  * @param messages - the batched messages, oldest first.
  * @param newestSeq - the newest sequence of the last message's channel, when known.
+ * @param role - the receiving colleague's predefined role, which decides what an answer may use.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameBatch(officeName, messages, newestSeq) {
-  if (messages.length === 1) return frameDelivery(messages[0], newestSeq)
+function frameBatch(officeName, messages, newestSeq, role) {
+  if (messages.length === 1) return frameDelivery(messages[0], newestSeq, role)
   const last = messages.at(-1)
   const freshness = newestSeq === undefined || newestSeq <= last.seq
     ? undefined
     : `(${channelLabel(last)} had already reached ${last.channelId}-${String(newestSeq)} when this turn was queued.)`
   const guidance = 'These arrived while your previous turn was running. They are one turn because '
     + 'they arrived together, not because each one asks for an answer. '
-    + `${OFFICE_SILENCE_RULE} ${OFFICE_PUBLIC_ANSWER_RULE}`
+    + `${OFFICE_SILENCE_RULE} ${answerRule('public', role)}`
   return [
     `[office ${officeName} | ${String(messages.length)} messages arrived while you were working]`,
     ...messages.map(message => `[office ${whereOf(message)} | ${message.messageId}]\n${message.text}`),
@@ -641,8 +828,9 @@ function shortSessionId(sessionId) {
  * @param ctx - the plugin context carrying the agent service.
  * @param domain - the opened office domain.
  * @param config - the resolved deployment configuration.
- * @param hooks - `onAdopted` and `onDismissed` run after one session enters or leaves the
- *   roster, so the caller can install or withdraw that session's channel tools.
+ * @param hooks - `onAdopted`, `onConfigured`, and `onDismissed` run after one session enters or
+ *   leaves the roster, or changes the role it holds in it, so the caller can bring that session's
+ *   office tool set in line.
  * @returns the office operations.
  */
 function createOffice(ctx, domain, config, hooks) {
@@ -723,9 +911,19 @@ function createOffice(ctx, domain, config, hooks) {
     return keys.slice(-limit).map((key) => validateMessage(messages.get(key)))
   }
 
-  /** Every channel one colleague can read: the public channel and its own direct-message ones. */
-  const visibleChannels = (sessionId) => listChannels().filter(channel => channel.kind !== 'dm'
-    || channel.members.includes(sessionId))
+  /**
+   * Every channel one colleague can read: the public channel and its own direct-message ones.
+   *
+   * The user's mailbox is never in this list. It is the user's private mail, and `office_read`
+   * with `channel: "*"` walks exactly this list, so excluding it here is what keeps a colleague
+   * from reading mail addressed to the user.
+   * @param sessionId - the reading session.
+   * @returns the channels it may read.
+   */
+  const visibleChannels = (sessionId) => listChannels().filter((channel) => {
+    if (channel.kind === 'mailbox') return false
+    return channel.kind !== 'dm' || channel.members.includes(sessionId)
+  })
 
   /** Record the outcome of one delivery attempt on the message that caused it. */
   const recordDelivery = async (key, colleagueName, entry) => {
@@ -855,16 +1053,17 @@ function createOffice(ctx, domain, config, hooks) {
    * single delivery; every message keeps its own header inside the body.
    * @param batch - the batched messages, oldest first.
    * @param newestSeq - the newest sequence of the last message's channel, when known.
+   * @param role - the receiving colleague's predefined role, which decides what the frame may suggest.
    * @returns the message payload to hand to the colleague's session.
    */
-  const batchPayload = (batch, newestSeq) => {
+  const batchPayload = (batch, newestSeq, role) => {
     const newest = batch.at(-1)
     return {
       id: `office-${newest.messageId}`,
       role: 'user',
-      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq) }],
+      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, role) }],
       // Every field here reaches the session log, which is JSON, and the harness rejects a
-      // value JSON cannot round-trip — `undefined` among them. A message the operator posted
+      // value JSON cannot round-trip — `undefined` among them. A message the user posted
       // from the panel has no sender session, so that field must be absent rather than present
       // and undefined; leaving it in fails the whole delivery with "carries
       // non-JSON-serializable data".
@@ -881,7 +1080,8 @@ function createOffice(ctx, domain, config, hooks) {
 
   /** Release one colleague's held wakes: the records go only after their turn is queued. */
   const releaseWakes = async (sessionId, held, agent) => {
-    agent.followup(batchPayload(held.map(entry => entry.message)))
+    const colleague = colleagueBySession(sessionId)
+    agent.followup(batchPayload(held.map(entry => entry.message), undefined, canonicalRole(colleague?.role)))
     for (const entry of held) {
       await pendingWakes.delete(entry.pendingKey)
       if (messages.get(entry.messageKey) === undefined) continue
@@ -958,7 +1158,7 @@ function createOffice(ctx, domain, config, hooks) {
     const held = heldWakes(colleague.sessionId)
     const batch = [...held.map(entry => entry.message), message]
     const newest = readMessages(message.channelId, 1).at(-1)
-    agent.followup(batchPayload(batch, newest?.seq))
+    agent.followup(batchPayload(batch, newest?.seq, canonicalRole(colleague.role)))
     for (const entry of held) {
       await pendingWakes.delete(entry.pendingKey)
       if (messages.get(entry.messageKey) === undefined) continue
@@ -989,41 +1189,119 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
-   * Resolve colleague names supplied by the model into roster records, rejecting an
-   * unknown name instead of silently dropping the wake.
+   * Whether one name addresses the user rather than a colleague.
+   *
+   * The user name is configuration, so a deployment that renames the user addresses the mailbox
+   * by the name it configured; the comparison is the same case-insensitive one a colleague name
+   * gets, because both are names people type.
+   * @param name - a name from a tool argument, a request body, or a message body.
+   * @returns whether it names the user.
+   */
+  const isUser = (name) => typeof name === 'string' && nameKey(name) === nameKey(config.userName)
+
+  /**
+   * Resolve the names one message addresses into colleagues and the user.
+   *
+   * A name the office cannot resolve is refused rather than dropped: a wake nobody receives is
+   * worse than a call that fails, and the user's name is a recipient like any other.
+   * @param names - the caller's names, from `mentions` or `to`.
+   * @param tool - the registered tool name, prefixed onto a refusal.
+   * @returns the resolved colleagues, and whether the user was addressed.
    */
   const resolveRecipients = async (names, tool) => {
     const list = names ?? []
     if (!Array.isArray(list)) throw new TypeError(`${tool}: mentions must be an array of colleague names`)
-    const resolved = []
+    const colleagues = []
+    let toUser = false
     for (const raw of list) {
       if (typeof raw !== 'string' || raw.trim().length === 0) continue
+      if (isUser(raw)) {
+        toUser = true
+        continue
+      }
       const colleague = await colleagueByName(raw)
       if (colleague === undefined) {
-        throw new Error(`${tool}: "${raw}" does not match any colleague's session title`)
+        throw new Error(
+          `${tool}: "${raw}" does not match any colleague's session title or the user "${config.userName}"`,
+        )
       }
-      if (!resolved.some(entry => entry.sessionId === colleague.sessionId)) resolved.push(colleague)
+      if (!colleagues.some(entry => entry.sessionId === colleague.sessionId)) colleagues.push(colleague)
     }
-    return resolved
+    return { colleagues, toUser }
   }
+
+  /**
+   * Append one message to the user's mailbox.
+   *
+   * The user has no session: nothing is woken, nothing is delivered, and there is no delivery
+   * record to write, because reading the mailbox is the panel's own read. A message copied here
+   * from a channel keeps `origin`, so the panel can say where it was also said.
+   * @param request.sender - the sending identity.
+   * @param request.text - the body.
+   * @param request.origin - `{ channelId, messageId }` when this copies a channel message.
+   * @returns the stored mailbox record.
+   */
+  const mail = async ({ sender, text, origin }) => {
+    const channelRecord = channels.get(MAILBOX_CHANNEL)
+    if (channelRecord === undefined) {
+      throw new Error(`dsh-office: office "${name()}" has no "${MAILBOX_CHANNEL}" channel`)
+    }
+    const seq = await allocateSequence(MAILBOX_CHANNEL)
+    const record = compact({
+      messageId: `${MAILBOX_CHANNEL}-${seq}`,
+      channelId: MAILBOX_CHANNEL,
+      channelName: channelRecord.name,
+      kind: 'mailbox',
+      seq,
+      senderName: sender.name,
+      senderSessionId: sender.sessionId,
+      recipients: [],
+      text,
+      createdAt: Date.now(),
+      deliveries: {},
+      origin,
+    })
+    await messages.put(messageKey(MAILBOX_CHANNEL, seq), record)
+    return record
+  }
+
+  /** The delivery outcome a message addressed to the user reports, since no session is woken. */
+  const mailboxDelivery = () => ({
+    colleague: config.userName,
+    status: 'mailbox',
+    detail: 'the user has no session to wake; the message waits in the user mailbox',
+  })
 
   /**
    * Append one message and wake every colleague it names. Every named colleague
    * gets a durable delivery record: the wake itself, or the reason it could not be
    * delivered, so a failure is visible rather than a silent drop.
+   *
+   * A message that also addresses the user is copied into the user mailbox. The public record is
+   * written first and the copy second, so the office's own history never depends on the mailbox
+   * being writable, and a failure to copy is reported instead of losing the message.
    * @param request - the destination, the sender identity, the body, and the named recipients.
    * @returns the stored message and one delivery outcome per recipient.
    */
-  const post = async ({ channel, sender, text, recipients, kind, mentionAll }) => {
+  const post = async ({ channel, sender, text, recipients, kind, mentionAll, toUser = false }) => {
+    if (text.length > config.maxMessageChars) {
+      throw new Error(`dsh-office: message is ${text.length} characters; the limit is ${config.maxMessageChars}`)
+    }
+    // A direct message to the user is mail and nothing else: there is no colleague to hand it to
+    // and no wake to attempt, so it is written to the mailbox and the call is done.
+    if (kind === 'dm' && toUser) {
+      const mailed = await mail({ sender, text })
+      return {
+        message: mailed,
+        deliveries: [mailboxDelivery()],
+      }
+    }
     // A broadcast addresses every other colleague; a session never receives its own message.
     const audience = mentionAll
       ? (await listColleagues()).filter(colleague => colleague.sessionId !== sender.sessionId)
       : recipients
     if (kind === 'dm' && audience[0] === undefined) {
       throw new Error('dsh-office: a direct message needs exactly one recipient colleague')
-    }
-    if (text.length > config.maxMessageChars) {
-      throw new Error(`dsh-office: message is ${text.length} characters; the limit is ${config.maxMessageChars}`)
     }
     const channelId = kind === 'dm'
       ? await ensureDirectChannel(
@@ -1052,10 +1330,26 @@ function createOffice(ctx, domain, config, hooks) {
     }
     const key = messageKey(channelId, seq)
     await messages.put(key, message)
-    if (!config.wakesEnabled) {
-      return { message, deliveries: audience.map(c => ({ colleague: c.name, status: 'wakes-disabled' })) }
+    const deliveries = toUser
+      ? [mailboxDelivery()]
+      : []
+    if (toUser) {
+      try {
+        await mail({ sender, text, origin: { channelId, messageId: message.messageId } })
+      } catch (error) {
+        deliveries[0] = {
+          colleague: config.userName,
+          status: 'failed',
+          detail: error instanceof Error ? error.message : String(error),
+        }
+      }
     }
-    const deliveries = []
+    if (!config.wakesEnabled) {
+      return {
+        message,
+        deliveries: [...deliveries, ...audience.map(c => ({ colleague: c.name, status: 'wakes-disabled' }))],
+      }
+    }
     for (const colleague of audience) {
       try {
         const status = await deliver(message, key, colleague)
@@ -1083,18 +1377,172 @@ function createOffice(ctx, domain, config, hooks) {
   /**
    * Adopt one session, keyed by its durable id. The colleague's name is the session
    * title, so renaming that session from any other surface renames the colleague too.
+   *
+   * The stored role is canonicalized on every write, which is what migrates a record that
+   * predates the predefined roles: a free-text label reads — and is rewritten — as
+   * {@link DEFAULT_COLLEAGUE_ROLE} rather than surviving as a permission nobody can resolve.
+   * @param request - the session, and the role and description to store.
+   * @returns the stored colleague record.
    */
   const adopt = async ({ sessionId, role, description }) => {
     const existing = colleagueBySession(sessionId)
+    if (role !== undefined) requireRole(role, 'adopt')
+    const nextRole = canonicalRole(role ?? existing?.role)
+    // The role's permission preset is applied before the record is written, so a role whose
+    // restriction this deployment cannot enforce fails the adopt instead of being stored.
+    const permission = await applyRolePermission(sessionId, nextRole)
     const record = compact({
       sessionId,
-      role: typeof role === 'string' ? role : existing?.role,
-      description: typeof description === 'string' ? description : existing?.description,
+      role: nextRole,
+      description: description === undefined ? existing?.description : normalizeDescription(description, 'adopt'),
       adoptedAt: existing?.adoptedAt ?? Date.now(),
     })
     await colleagues.put(sessionId, record)
     hooks.onAdopted(sessionId)
-    return record
+    return { record, permission }
+  }
+
+  /**
+   * Change the role and description one colleague record carries.
+   *
+   * A key the caller omits keeps its stored value, and an explicit empty description removes
+   * it, so the two fields are set independently.
+   * @param sessionId - the colleague's session.
+   * @param changes - `role` and/or `description`, the latter as `undefined` to remove.
+   * @returns the stored record.
+   * @throws {Error} when the session is not a colleague of this office.
+   */
+  const configure = async (sessionId, changes) => {
+    const existing = colleagueBySession(sessionId)
+    if (existing === undefined) {
+      throw new Error(`dsh-office: session ${sessionId} is not a colleague of office "${name()}"`)
+    }
+    if (Object.hasOwn(changes, 'role')) requireRole(changes.role, 'configure')
+    const nextRole = canonicalRole(Object.hasOwn(changes, 'role') ? changes.role : existing.role)
+    // Only a role change touches the session's permission. Re-applying it on a description-only
+    // change would revert a preset the user switched by hand, which is their own act.
+    const permission = Object.hasOwn(changes, 'role')
+      ? await applyRolePermission(sessionId, nextRole)
+      : undefined
+    const record = compact({
+      ...existing,
+      role: nextRole,
+      description: Object.hasOwn(changes, 'description')
+        ? (changes.description === undefined ? undefined : normalizeDescription(changes.description, 'configure'))
+        : existing.description,
+    })
+    await colleagues.put(sessionId, record)
+    hooks.onConfigured(sessionId)
+    return { record, permission }
+  }
+
+  /**
+   * Enforce the office row's role → permission map on one colleague's session.
+   *
+   * The role's office capabilities are enforced by which tools the session holds; this is the
+   * other half of the role, the DSH permission preset its session runs under. It is applied
+   * when the role is set — at hire, at adopt, and at configure — and deliberately NOT re-applied
+   * on every turn: switching a session's preset from the Web UI is the user's own explicit
+   * act, and reverting it silently at the next wake would be a surprise. The drift stays
+   * visible instead, because the roster reports each colleague's effective preset.
+   *
+   * A role the map does not name leaves the session's own permission alone, and a mapping whose
+   * preset the deployment does not define is refused rather than skipped: a restriction that
+   * did not apply must not look like one that did.
+   * @param sessionId - the colleague's session.
+   * @param role - the role being set.
+   * @returns the effective preset, or undefined when the map names none for this role.
+   */
+  const applyRolePermission = async (sessionId, role) => {
+    const preset = config.rolePermissions[canonicalRole(role)]
+    if (preset === undefined) return undefined
+    const service = ctx.get('permissionPresets')
+    if (service === undefined) {
+      throw new Error(
+        `dsh-office: office "${name()}" maps role "${canonicalRole(role)}" to permission preset "${preset}", `
+        + 'but this deployment mounts no permission presets; mount @deepseek-ai/dsh-permission-presets or '
+        + 'remove that entry from the office row\'s rolePermissions',
+      )
+    }
+    if (!service.names.includes(preset)) {
+      throw new Error(
+        `dsh-office: office "${name()}" maps role "${canonicalRole(role)}" to permission preset "${preset}", `
+        + `which this deployment does not define; available: ${service.names.join(', ')}`,
+      )
+    }
+    let agent
+    try {
+      agent = await ensureAgent(sessionId)
+    } catch (error) {
+      throw new Error(
+        `dsh-office: cannot apply permission preset "${preset}" for role "${canonicalRole(role)}" to session `
+        + `${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    service.set(agent.session, preset)
+    return currentPermission(agent)
+  }
+
+  /** The permission preset one colleague's live session currently runs under, when it can be read. */
+  const currentPermission = (agent) => {    const service = ctx.get('permissionPresets')
+    if (service === undefined) return undefined
+    try {
+      return service.current(agent.session)
+    } catch {
+      // An unreadable projection is reported as an absent preset rather than failing the read:
+      // the roster is an inspection surface, not a gate.
+      return undefined
+    }
+  }
+
+  /** Newest office message time per session: what it sent, and what was addressed to it. */
+  const lastMessageTimes = () => {
+    const times = new Map()
+    const bump = (sessionId, at) => {
+      if (typeof sessionId !== 'string' || !Number.isSafeInteger(at)) return
+      if ((times.get(sessionId) ?? 0) >= at) return
+      times.set(sessionId, at)
+    }
+    for (const [, value] of messages.entries()) {
+      const message = validateMessage(value)
+      bump(message.senderSessionId, message.createdAt)
+      for (const sessionId of message.recipients ?? []) bump(sessionId, message.createdAt)
+    }
+    return times
+  }
+
+  /** The live agent of one session, or undefined when that session is not loaded. */
+  const liveAgent = (sessionId) => ctx.agents.get(sessionId)
+
+  /**
+   * The roster with each colleague's live status, for the roster tools and the panel.
+   *
+   * Status is read from the live agent when the session is loaded and is `inactive` when it is
+   * not, because an unloaded colleague has no turn to be in either state of. The effective
+   * permission preset and the model route are reported only for a loaded session: they are
+   * properties of that live agent, and guessing them from storage would report a fact this
+   * office does not hold.
+   * @returns one record per colleague, in roster order.
+   */
+  const rosterStatus = async () => {
+    const list = await listColleagues()
+    const times = lastMessageTimes()
+    return list.map((colleague) => {
+      const live = liveAgent(colleague.sessionId)
+      return compact({
+        name: colleague.name,
+        sessionId: colleague.sessionId,
+        role: canonicalRole(colleague.role),
+        description: colleague.description,
+        status: live === undefined ? 'inactive' : live.status,
+        permission: live === undefined ? undefined : currentPermission(live),
+        provider: live === undefined ? undefined : live.options.provider,
+        model: live === undefined ? undefined : live.options.model,
+        pending: heldWakes(colleague.sessionId).length,
+        lastMessageAt: times.get(colleague.sessionId),
+        adoptedAt: colleague.adoptedAt,
+      })
+    })
   }
 
   /** Set the session title that every surface displays as the colleague's name. */
@@ -1116,7 +1564,7 @@ function createOffice(ctx, domain, config, hooks) {
    * session unless it is the selected one: a colleague nobody has spoken to yet is invisible
    * in the workspace it was hired into, and knows nothing about the office it joined. One
    * message solves both — the delivered turn clears the blank state, and the body names the
-   * colleague, the office, and the three tools it holds.
+   * colleague, the office, its role, and the tools that role holds.
    *
    * Onboarding is a private turn and nothing else: it is not written to `#general` or to any
    * other channel, so the office's public history stays a record of work rather than of
@@ -1130,22 +1578,44 @@ function createOffice(ctx, domain, config, hooks) {
    */
   const greet = async (colleague) => {
     if (!config.wakesEnabled) return 'wakes-disabled'
+    const role = canonicalRole(colleague.role)
+    const held = ROLE_CAPABILITIES[role]
+    // The greeting names the tools this colleague actually holds, because the role decides them:
+    // a consultant told about office_post would spend its first turn on a tool it does not have.
+    const described = [
+      'office_read reads #general or a direct channel',
+      'office_colleagues lists the roster with each colleague\'s role, description, and current status',
+      held.includes('post') ? 'office_post says something in #general, where the rest of the office can read it' : undefined,
+      held.includes('dm') ? 'office_dm sends one colleague a private message' : undefined,
+      held.includes('interrupt')
+        ? 'office_interrupt cancels a colleague\'s running turn, which then receives everything the office held for it as one turn'
+        : undefined,
+      held.includes('compact')
+        ? 'office_compact replaces a range of a channel\'s messages with a summary you wrote'
+        : undefined,
+      held.includes('configure') ? 'office_configure sets a colleague\'s role or description' : undefined,
+    ].filter(line => line !== undefined)
     const body = [
       `You are "${colleague.name}", a colleague of the office "${name()}".`,
-      colleague.role === undefined ? undefined : `Your role: ${colleague.role}.`,
+      `Your role: ${role}.`,
       colleague.description === undefined ? undefined : `Notes on you: ${colleague.description}.`,
-      'This office is a set of ordinary sessions. You hold three tools: office_read reads'
-      + ' #general or a direct channel; office_post says something in #general, where the rest of'
-      + ' the office can read it; office_dm sends one colleague a private message.',
+      `This office is a set of ordinary sessions. You hold ${String(described.length)} `
+      + `${described.length === 1 ? 'tool' : 'tools'}: ${described.join('; ')}.`,
+      held.includes('post') || held.includes('dm')
+        ? undefined
+        : 'You hold no tool that writes into the office: what you answer in this session reaches no '
+          + 'channel, and the office reads the record rather than your replies.',
       'The office has a history from before you joined, and nothing replays it. Read the range you'
       + ' need with office_read, which takes a sequence range and filters by sender, text, mention,'
       + ' or time; a channel that grew long holds summaries where older messages were compacted.',
       'A message delivered to you is a private turn in your own session, and what you answer here'
       + ' reaches nobody. Most messages need no answer, and silence is a normal one.',
-      '#general is the office\'s shared record, not a chat room. A post there wakes every colleague'
-      + ' and each of them spends a turn on it, so post when the whole office needs to know'
-      + ' something, and answer one colleague with office_dm. Do not post to acknowledge a message,'
-      + ' to agree with it, or to announce that you are working.',
+      held.includes('post')
+        ? '#general is the office\'s shared record, not a chat room. A post there wakes every colleague'
+          + ' and each of them spends a turn on it, so post when the whole office needs to know'
+          + ' something, and answer one colleague with office_dm. Do not post to acknowledge a message,'
+          + ' to agree with it, or to announce that you are working.'
+        : undefined,
       'You do not need to announce yourself in #general, and nobody is waiting on you yet. Answer'
       + ' this message briefly, then wait for real work.',
     ].filter(line => line !== undefined).join('\n')
@@ -1165,7 +1635,7 @@ function createOffice(ctx, domain, config, hooks) {
         kind: 'office-message',
         channelId: 'office-onboarding',
         messageId: `onboarding-${colleague.sessionId}`,
-        senderName: config.operatorName,
+        senderName: config.userName,
       }),
     }
     try {
@@ -1210,6 +1680,9 @@ function createOffice(ctx, domain, config, hooks) {
     if ((provider === undefined) !== (model === undefined)) {
       throw new TypeError('dsh-office: a model route needs both provider and model')
     }
+    // The role is validated before the session exists: a name that cannot be a title, or a role
+    // nobody defined, must be refused before a session is created for it.
+    const nextRole = role === undefined ? undefined : requireRole(role, 'hire')
     const created = await controller.create(compact({ workspaceId: requested, agentPreset }))
     const title = await rename(created.sessionId, name)
     if (provider !== undefined && model !== undefined) {
@@ -1220,12 +1693,13 @@ function createOffice(ctx, domain, config, hooks) {
         reasoningEffort,
       }))
     }
-    const record = await adopt({ sessionId: created.sessionId, role, description })
+    const { record, permission } = await adopt({ sessionId: created.sessionId, role: nextRole, description })
     const greeting = await greet({ ...record, name: title })
     return {
       colleague: { ...record, name: title },
       workspaceId: requested,
       agentPreset: created.agentPreset,
+      permission,
       greeting,
     }
   }
@@ -1342,7 +1816,7 @@ function createOffice(ctx, domain, config, hooks) {
   /**
    * Erase everything this office holds, leaving it open and empty.
    *
-   * Used when the operator deletes the office: the roster, the channels, and every
+   * Used when the user deletes the office: the roster, the channels, and every
    * message go, and the name returns to the configured one.
    */
   const purge = () => purgeDomain(domain, { officeId: config.officeId, name: config.officeName })
@@ -1360,7 +1834,13 @@ function createOffice(ctx, domain, config, hooks) {
     ensureChannel,
     readMessages,
     resolveRecipients,
+    isUser,
+    mail,
     adopt,
+    configure,
+    applyRolePermission,
+    rosterStatus,
+    liveAgent,
     dismiss,
     rename,
     hire,
@@ -1370,6 +1850,8 @@ function createOffice(ctx, domain, config, hooks) {
     restoreWakes,
     senderOf,
     generalChannel: GENERAL_CHANNEL,
+    mailboxChannel: MAILBOX_CHANNEL,
+    userName: config.userName,
   }
 }
 
@@ -1445,7 +1927,8 @@ function toPostResult(posted, officeName) {
  * @returns the rendered content blocks.
  */
 function renderPostResult(value) {
-  const head = `[${value.office}] Posted ${value.message.messageId} to ${value.message.channelId}.`
+  const destination = value.message.channelId === MAILBOX_CHANNEL ? "the user's mailbox" : value.message.channelId
+  const head = `[${value.office}] Posted ${value.message.messageId} to ${destination}.`
   if (value.deliveries.length === 0) {
     return `${head} No colleague was woken; the message waits in the office for office_read.`
   }
@@ -1455,8 +1938,17 @@ function renderPostResult(value) {
   return `${head} Delivery:\n${lines}`
 }
 
-/** Resolve the channel one direct-message tool call addresses, from the caller's view. */
+/**
+ * Resolve the channel one direct-message tool call addresses, from the caller's view.
+ *
+ * The user's mailbox is refused here rather than by each caller: it is not a direct channel
+ * between two sessions, and no office tool may read it, so the refusal lives with the
+ * resolution every reading tool shares.
+ */
 async function resolveDirectChannel(office, sender, requested, caller) {
+  if (office.isUser(requested) || nameKey(requested) === nameKey(MAILBOX_CHANNEL)) {
+    throw new Error(`${caller}: "${requested}" is the user's mailbox, which no office tool reads`)
+  }
   const other = await office.colleagueByName(requested)
   if (other === undefined) {
     throw new Error(`${caller}: "${requested}" is neither "#general" nor a known colleague`)
@@ -1491,22 +1983,49 @@ function officeArgument(role) {
 }
 
 /**
- * The mounted offices one agent may act on, and the role it acts as.
+ * The mounted offices one agent may act on, the role it acts as, and the capabilities it holds.
  *
  * A matching boss preset wins over membership: a session that runs one office and was also
  * adopted by another acts as the boss of the offices it runs, never as their colleague.
+ *
+ * A colleague may belong to several offices and hold a different predefined role in each, and
+ * the capability set is a property of the *agent*, not of one membership — so it is the union of
+ * the roles' capabilities. The union grants the tool; the capability is checked again against the
+ * office a call resolved, so a membership that does not hold it cannot use the tool there.
  * @param agent - the agent whose scope is resolving an office.
- * @returns the agent's role and the offices it may act on, in mount order.
+ * @returns the agent's acting role, the capabilities it holds, and the offices it may act on.
  */
 function actingOffices(agent) {
   const preset = agent.session.header.agentPreset
   const running = [...mountedOffices.values()].filter(entry => entry.bossPreset === preset)
-  if (running.length > 0) return { role: 'boss', offices: running }
+  if (running.length > 0) {
+    return { role: 'boss', capabilities: [...BOSS_CAPABILITIES], offices: running }
+  }
   const sessionId = agent.session.header.id
+  const memberships = [...mountedOffices.values()]
+    .map(entry => ({ entry, record: entry.office.colleagueBySession(sessionId) }))
+    .filter(membership => membership.record !== undefined)
+  const capabilities = new Set()
+  for (const membership of memberships) {
+    for (const capability of ROLE_CAPABILITIES[canonicalRole(membership.record.role)]) capabilities.add(capability)
+  }
   return {
     role: 'colleague',
-    offices: [...mountedOffices.values()].filter(entry => entry.office.colleagueBySession(sessionId) !== undefined),
+    capabilities: [...capabilities],
+    offices: memberships.map(membership => membership.entry),
   }
+}
+
+/**
+ * The predefined role, or `boss`, one agent holds in one mounted office.
+ * @param agent - the agent whose membership is read.
+ * @param entry - the mounted office entry.
+ * @returns `boss`, a predefined colleague role, or undefined when the session belongs to neither.
+ */
+function roleInOffice(agent, entry) {
+  if (agent.session.header.agentPreset === entry.bossPreset) return 'boss'
+  const record = entry.office.colleagueBySession(agent.session.header.id)
+  return record === undefined ? undefined : canonicalRole(record.role)
 }
 
 /**
@@ -1517,15 +2036,15 @@ function actingOffices(agent) {
  * rather than trusted from the schema, because a tool schema is not enforcement. It is
  * matched by name first — names are canonical and case-insensitive — and by storage key
  * second, so a caller that learned an id still resolves.
- * @param agent - the calling agent, closed over when its tools were registered.
+ * @param acting - the resolution {@link actingOffices} produced for the calling agent.
  * @param requested - the call's `office` argument, when the caller supplied one.
  * @param tool - the registered tool name, prefixed onto every failure message.
  * @returns the resolved mounted-office entry, which carries the office and its own config.
  * @throws {Error} when the caller acts on no office, named one it may not act on, or
  *   omitted a name it needed to choose.
  */
-function resolveActingOffice(agent, requested, tool) {
-  const { role, offices } = actingOffices(agent)
+function resolveActingOffice(acting, requested, tool) {
+  const { role, offices } = acting
   const listing = () => offices.map(entry => `"${entry.name}"`).join(', ')
   if (offices.length === 0) {
     throw new Error(`${tool}: this session neither runs nor belongs to a mounted office`)
@@ -1558,16 +2077,45 @@ function resolveActingOffice(agent, requested, tool) {
  * optional. Schemas are declared through {@link parameters} so the role's `office`
  * argument is added in exactly one place.
  * @param agent - the agent whose scope receives these tools.
- * @param role - `boss` or `colleague`.
- * @returns the content-block helper, the office resolver, and the two declaration helpers.
+ * @param acting - the resolution {@link actingOffices} produced for that agent.
+ * @returns the content-block helper, the office resolver, the capability gate, and the
+ *   declaration helper.
  */
-function officeToolContext(agent, role) {
+function officeToolContext(agent, acting) {
   const text = (value) => [{ type: 'text', text: value }]
-  const argument = officeArgument(role)
-  const entry = (args, tool) => resolveActingOffice(agent, args?.office, tool)
+  const argument = officeArgument(acting.role)
+  // The office argument is resolved against the registry as it is NOW, not against the set the
+  // tools were built from: a tool is installed once and a session can join or leave an office
+  // between two calls, so a captured list would route a call by a roster that no longer holds.
+  const entry = (args, tool) => resolveActingOffice(actingOffices(agent), args?.office, tool)
   return {
     text,
     entry,
+    /** The capabilities this agent holds, which decide which tools are built at all. */
+    capabilities: acting.capabilities,
+    /** The predefined role, or `boss`, this session holds in each office it acts on. */
+    roleIn: (resolved) => roleInOffice(agent, resolved),
+    /**
+     * Refuse one call whose capability the resolved office's role does not hold.
+     *
+     * The tool is registered from the union of every membership's capabilities, so this is where
+     * a colleague that is a leader of one office and a member of another is held to the office it
+     * actually addresses. A boss holds every capability by definition.
+     * @param resolved - the mounted office entry the call resolved.
+     * @param capability - the capability the tool needs.
+     * @param tool - the registered tool name, prefixed onto the failure message.
+     * @throws {Error} when the caller's role in that office does not hold the capability.
+     */
+    require(resolved, capability, tool) {
+      const held = roleInOffice(agent, resolved)
+      if (held === 'boss') return
+      if (held !== undefined && ROLE_CAPABILITIES[held].includes(capability)) return
+      throw new Error(held === undefined
+        ? `${tool}: this session is not a colleague of office "${resolved.name}"`
+        : `${tool}: the "${held}" role in office "${resolved.name}" holds no ${capability} permission `
+          + `(it holds ${ROLE_CAPABILITIES[held].join(', ')})`,
+      )
+    },
     /**
      * Declare one tool's parameters, including the role's `office` argument.
      * @param required - the tool's own required argument names.
@@ -1588,7 +2136,7 @@ function officeToolContext(agent, role) {
 /**
  * Find a mounted office by whatever names it: its name, or its storage key.
  *
- * The name is what an operator and the model read, so it is matched first and
+ * The name is what a user and the model read, so it is matched first and
  * case-insensitively; the key resolves a caller that learned an id instead — for example a
  * session log written before the office was renamed.
  * @param wanted - an office name or storage key.
@@ -1611,11 +2159,11 @@ function findMountedOffice(wanted) {
  * not a capability every session holds.
  * @param agent - the boss agent whose scope receives these tools.
  * @param host - the hosting office's configuration and service readers.
+ * @param tool - the caller's shared declaration helpers.
  * @returns the management tool definitions.
  */
-function createManagementTools(agent, host) {
+function createManagementTools(agent, host, tool) {
   const { config, resolveQuery } = host
-  const tool = officeToolContext(agent, 'boss')
   const { text } = tool
 
   /**
@@ -1711,7 +2259,7 @@ function createManagementTools(agent, host) {
                 properties: {
                   name: { type: 'string' },
                   sessionId: { type: 'string' },
-                  role: { type: 'string' },
+                  role: { type: 'string', enum: COLLEAGUE_ROLES },
                   description: { type: 'string' },
                 },
               },
@@ -1724,7 +2272,7 @@ function createManagementTools(agent, host) {
                 required: ['channelId', 'kind', 'members'],
                 properties: {
                   channelId: { type: 'string' },
-                  kind: { type: 'string', enum: ['public', 'dm'] },
+                  kind: { type: 'string', enum: ['public', 'dm', 'mailbox'] },
                   topic: { type: 'string' },
                   members: { type: 'array', items: { type: 'string' } },
                 },
@@ -1749,7 +2297,8 @@ function createManagementTools(agent, host) {
           const roster = value.colleagues.length === 0
             ? 'No colleagues yet.'
             : value.colleagues
-              .map(c => `- ${c.name}${c.role === undefined ? '' : ` (${c.role})`} — session ${c.sessionId}`)
+              .map(c => `- ${c.name} (${c.role})${c.description === undefined ? '' : ` — ${c.description}`} `
+                + `— session ${c.sessionId}`)
               .join('\n')
           const channelList = value.channels
             .map(c => `- ${c.kind === 'dm' ? c.channelId : `#${c.channelId}`}`)
@@ -1769,7 +2318,7 @@ function createManagementTools(agent, host) {
           colleagues: (await office.listColleagues()).map(c => compact({
             name: c.name,
             sessionId: c.sessionId,
-            role: c.role,
+            role: canonicalRole(c.role),
             description: c.description,
           })),
           channels: office.listChannels().map(c => compact({
@@ -1788,12 +2337,13 @@ function createManagementTools(agent, host) {
       description:
         'Adopt an existing session as a colleague. The session keeps its own workspace, history, and tools. '
         + 'A colleague is addressed by its session title, so supplying name renames that session and any '
-        + 'other rename changes how the colleague is addressed.',
+        + 'other rename changes how the colleague is addressed. The role decides the office tools the '
+        + 'colleague holds and the session permission preset the office row maps that role to.',
       parameters: tool.parameters(['session_id'], {
         session_id: { type: 'string', description: 'The session id to adopt.' },
         name: { type: 'string', description: 'Optional new session title; a colleague is addressed by its session title.' },
-        role: { type: 'string', description: 'Optional short role, for example "reviewer".' },
-        description: { type: 'string', description: 'Optional one-line description of the colleague.' },
+        role: roleProperty(),
+        description: descriptionProperty(),
       }),
       output: {
         schema: {
@@ -1805,17 +2355,20 @@ function createManagementTools(agent, host) {
             colleague: {
               type: 'object',
               additionalProperties: false,
-              required: ['name', 'sessionId'],
+              required: ['name', 'sessionId', 'role'],
               properties: {
                 name: { type: 'string' },
                 sessionId: { type: 'string' },
-                role: { type: 'string' },
+                role: { type: 'string', enum: COLLEAGUE_ROLES },
+                description: { type: 'string' },
+                permission: { type: 'string' },
               },
             },
           },
         },
         render: (_args, value) =>
-          text(`[${value.office}] Adopted session ${value.colleague.sessionId} as colleague "${value.colleague.name}".`),
+          text(`[${value.office}] Adopted session ${value.colleague.sessionId} as colleague "${value.colleague.name}"`
+            + ` (role ${value.colleague.role}${value.colleague.permission === undefined ? '' : `, permission ${value.colleague.permission}`}).`),
       },
       async execute(args) {
         const { office, name: officeName } = tool.entry(args, 'office_adopt')
@@ -1826,7 +2379,7 @@ function createManagementTools(agent, host) {
         // A supplied name renames the session; the office keeps no name of its own, so
         // renaming that session anywhere else renames the colleague too.
         if (args?.name !== undefined) await office.rename(sessionId, args.name)
-        const record = await office.adopt({
+        const { record, permission } = await office.adopt({
           sessionId,
           role: args?.role,
           description: args?.description,
@@ -1836,7 +2389,9 @@ function createManagementTools(agent, host) {
           colleague: compact({
             name: await office.nameOf(sessionId),
             sessionId: record.sessionId,
-            role: record.role,
+            role: canonicalRole(record.role),
+            description: record.description,
+            permission,
           }),
         }
       },
@@ -1847,11 +2402,12 @@ function createManagementTools(agent, host) {
         'Create a new session and adopt it as a colleague in one step, for when the colleague does not exist '
         + 'yet. The session is created through the same host path the Web UI uses, so it appears in the '
         + 'workspace sidebar, and name becomes its session title. Use office_adopt instead for a session that '
-        + 'already exists.',
+        + 'already exists. The role decides the office tools the colleague holds and the session permission '
+        + 'preset the office row maps that role to.',
       parameters: tool.parameters(['name'], {
         name: { type: 'string', description: 'Session title for the new colleague.' },
-        role: { type: 'string', description: 'Optional short role, for example "reviewer".' },
-        description: { type: 'string', description: 'Optional one-line description of the colleague.' },
+        role: roleProperty(),
+        description: descriptionProperty(),
         workspace_id: {
           type: 'string',
           description: 'Workspace to create the session in; defaults to the first registered workspace.',
@@ -1883,11 +2439,13 @@ function createManagementTools(agent, host) {
             colleague: {
               type: 'object',
               additionalProperties: false,
-              required: ['name', 'sessionId'],
+              required: ['name', 'sessionId', 'role'],
               properties: {
                 name: { type: 'string' },
                 sessionId: { type: 'string' },
-                role: { type: 'string' },
+                role: { type: 'string', enum: COLLEAGUE_ROLES },
+                description: { type: 'string' },
+                permission: { type: 'string' },
               },
             },
             workspaceId: { type: 'string' },
@@ -1896,7 +2454,9 @@ function createManagementTools(agent, host) {
           },
         },
         render: (_args, value) =>
-          text(`[${value.office}] Hired colleague "${value.colleague.name}" on new session ${value.colleague.sessionId}.`
+          text(`[${value.office}] Hired colleague "${value.colleague.name}" on new session ${value.colleague.sessionId}`
+            + ` with role ${value.colleague.role}`
+            + `${value.colleague.permission === undefined ? '' : ` and permission ${value.colleague.permission}`}.`
             + ` Its greeting was ${value.greeting ?? 'not delivered'}: until it takes a turn, the workspace list`
             + ' hides the session, because a session with no turn yet is the provisional New Session row.'),
       },
@@ -1923,7 +2483,9 @@ function createManagementTools(agent, host) {
           colleague: compact({
             name: hired.colleague.name,
             sessionId: hired.colleague.sessionId,
-            role: hired.colleague.role,
+            role: canonicalRole(hired.colleague.role),
+            description: hired.colleague.description,
+            permission: hired.permission,
           }),
           workspaceId: hired.workspaceId,
           agentPreset: hired.agentPreset,
@@ -1999,75 +2561,319 @@ function createManagementTools(agent, host) {
         return { office: officeName, renamedTo: await office.renameOffice(args?.name) }
       },
     },
-    {
-      name: 'office_compact',
-      description:
-        'Replace a range of one channel\'s messages with a summary you wrote, so a long channel stays readable '
-        + 'and bounded. Read the range with office_read first, then pass the sequences you covered. The summary '
-        + 'takes the lowest sequence of the range and the covered messages are deleted, so anyone reading the '
-        + 'channel afterwards meets the summary exactly where they stood. Compact ranges nobody will need in '
-        + 'full; a colleague that has already been woken past the range never sees the summary.',
-      parameters: tool.parameters(['from', 'to', 'summary'], {
-        channel: { type: 'string', description: 'Channel to compact: "#general" (the default), or a colleague\'s session title for your DM with it.' },
-        from: { type: 'integer', description: 'First message sequence number to replace, inclusive.' },
-        to: { type: 'integer', description: 'Last message sequence number to replace, inclusive.' },
-        summary: { type: 'string', description: 'The text that replaces the range. Say what happened and what was decided, not that a range was compacted.' },
-      }),
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['office', 'channelId', 'summaryId', 'covers', 'replaced'],
-          properties: {
-            office: { type: 'string' },
-            channelId: { type: 'string' },
-            summaryId: { type: 'string' },
-            covers: { type: 'array', items: { type: 'integer' } },
-            replaced: { type: 'integer' },
+  ]
+}
+
+/**
+ * Build the compaction tool for one agent.
+ *
+ * Compacting rewrites the office's shared record, so it is the `compact` capability rather
+ * than a tool every colleague holds: a boss holds it because it runs the office, and a leader
+ * holds it because tending the record is what its role is for.
+ * @param agent - the agent whose scope receives the tool.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the compaction tool definition.
+ */
+function createCompactTool(agent, tool) {
+  return {
+    name: 'office_compact',
+    description:
+      'Replace a range of one channel\'s messages with a summary you wrote, so a long channel stays readable '
+      + 'and bounded. Read the range with office_read first, then pass the sequences you covered. The summary '
+      + 'takes the lowest sequence of the range and the covered messages are deleted, so anyone reading the '
+      + 'channel afterwards meets the summary exactly where they stood. Compact ranges nobody will need in '
+      + 'full; a colleague that has already been woken past the range never sees the summary.',
+    parameters: tool.parameters(['from', 'to', 'summary'], {
+      channel: { type: 'string', description: 'Channel to compact: "#general" (the default), or a colleague\'s session title for your DM with it.' },
+      from: { type: 'integer', description: 'First message sequence number to replace, inclusive.' },
+      to: { type: 'integer', description: 'Last message sequence number to replace, inclusive.' },
+      summary: { type: 'string', description: 'The text that replaces the range. Say what happened and what was decided, not that a range was compacted.' },
+    }),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'channelId', 'summaryId', 'covers', 'replaced'],
+        properties: {
+          office: { type: 'string' },
+          channelId: { type: 'string' },
+          summaryId: { type: 'string' },
+          covers: { type: 'array', items: { type: 'integer' } },
+          replaced: { type: 'integer' },
+        },
+      },
+      render: (_args, value) => tool.text(
+        `[${value.office}] compacted ${String(value.replaced)} message(s) of #${value.channelId} `
+        + `into ${value.summaryId}, covering ${String(value.covers[0])}-${String(value.covers[1])}.`,
+      ),
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, 'office_compact')
+      const { office, name: officeName } = resolved
+      tool.require(resolved, 'compact', 'office_compact')
+      const summary = typeof args?.summary === 'string' ? args.summary : ''
+      if (summary.trim().length === 0) {
+        throw new TypeError('office_compact: summary must be a non-empty string')
+      }
+      for (const key of ['from', 'to']) {
+        if (!Number.isSafeInteger(args?.[key]) || args[key] < 1) {
+          throw new TypeError(`office_compact: ${key} must be a safe integer of at least 1`)
+        }
+      }
+      if (args.from > args.to) {
+        throw new TypeError(`office_compact: from (${String(args.from)}) must not exceed to (${String(args.to)})`)
+      }
+      const requested = typeof args?.channel === 'string' ? args.channel.trim() : ''
+      const isGeneral = requested === '' || requested === 'general' || requested === '#general'
+      const sender = await office.senderOf(agent)
+      const channelId = isGeneral
+        ? office.generalChannel
+        : await resolveDirectChannel(office, sender, requested, 'office_compact')
+      const compacted = await office.compactRange({
+        channelId,
+        from: args.from,
+        to: args.to,
+        text: summary,
+        sender,
+      })
+      return {
+        office: officeName,
+        channelId,
+        summaryId: compacted.summaryId,
+        covers: compacted.covers,
+        replaced: compacted.replaced,
+      }
+    },
+  }
+}
+
+/**
+ * Build the interrupt tool for one agent.
+ *
+ * A colleague that is mid-turn is never interrupted by a delivery — that is the office's
+ * delivery contract — so stopping one is an explicit act, and only the `interrupt` capability
+ * holds it. The cancellation keeps the colleague's inbox, and the office then hands it
+ * everything held for it as one fresh turn: the work in flight is stopped, and nothing anyone
+ * sent is lost with it.
+ * @param agent - the agent whose scope receives the tool.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the interrupt tool definition.
+ */
+function createInterruptTool(agent, tool) {
+  return {
+    name: 'office_interrupt',
+    description:
+      'Cancel a colleague\'s running turn. The colleague is not left with a lost message: everything the '
+      + 'office held for it while that turn ran is handed over as one turn when it stops. Use it when a '
+      + 'colleague is working on the wrong thing and a message alone would arrive too late. A colleague that '
+      + 'is idle or not loaded has nothing to interrupt, which the result reports rather than treating as a '
+      + 'failure.',
+    parameters: tool.parameters(['name'], {
+      name: { type: 'string', description: "The colleague's session title." },
+    }),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'colleague', 'status', 'interrupted'],
+        properties: {
+          office: { type: 'string' },
+          colleague: { type: 'string' },
+          status: { type: 'string', enum: ['running', 'idle', 'inactive'] },
+          interrupted: { type: 'boolean' },
+        },
+      },
+      render: (_args, value) => tool.text(value.interrupted
+        ? `[${value.office}] Interrupted "${value.colleague}"; the office hands it everything held for it as `
+          + 'one turn once it stops.'
+        : `[${value.office}] "${value.colleague}" was not running (status ${value.status}); nothing to interrupt.`),
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, 'office_interrupt')
+      const { office, name: officeName } = resolved
+      tool.require(resolved, 'interrupt', 'office_interrupt')
+      if (typeof args?.name !== 'string' || args.name.trim().length === 0) {
+        throw new TypeError('office_interrupt: name must be a non-empty session title')
+      }
+      const colleague = await office.colleagueByName(args.name)
+      if (colleague === undefined) {
+        throw new Error(`office_interrupt: "${args.name}" does not match any colleague's session title`)
+      }
+      if (colleague.sessionId === agent.session.header.id) {
+        throw new Error('office_interrupt: a colleague cannot interrupt itself')
+      }
+      const live = office.liveAgent(colleague.sessionId)
+      if (live === undefined) {
+        return { office: officeName, colleague: colleague.name, status: 'inactive', interrupted: false }
+      }
+      const status = live.status === 'running' ? 'running' : 'idle'
+      if (status !== 'running') {
+        return { office: officeName, colleague: colleague.name, status, interrupted: false }
+      }
+      // The inbox is kept: a message the leader sent moments ago is not the turn being stopped.
+      live.cancel({ kind: 'user' }, { keepInbox: true })
+      return { office: officeName, colleague: colleague.name, status, interrupted: true }
+    },
+  }
+}
+
+/**
+ * Build the roster-status tool for one agent.
+ *
+ * Every role holds it: a colleague cannot otherwise discover its peers at all, and the status
+ * it reports is what makes "who is busy" and "who is waiting on what" answerable without
+ * waking anybody. It is a query — it reads the registry and the office domain, and never
+ * delivers, wakes, or cancels.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the roster-status tool definition.
+ */
+function createColleaguesTool(tool) {
+  return {
+    name: 'office_colleagues',
+    description:
+      'List every colleague of one office with its role, its description, and its current status: '
+      + '`running` while it works, `idle` when it is loaded and waiting, and `inactive` when its session is '
+      + 'not loaded at all. A loaded colleague also reports the permission preset its session runs under and '
+      + 'the model route it uses; every colleague reports how many messages the office is holding for it and '
+      + 'when the office last carried a message from it or to it. Reading this never wakes anybody.',
+    parameters: tool.parameters([], {}),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'colleagues'],
+        properties: {
+          office: { type: 'string' },
+          colleagues: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['name', 'sessionId', 'role', 'status', 'pending'],
+              properties: {
+                name: { type: 'string' },
+                sessionId: { type: 'string' },
+                role: { type: 'string', enum: COLLEAGUE_ROLES },
+                description: { type: 'string' },
+                status: { type: 'string', enum: ['running', 'idle', 'inactive'] },
+                permission: { type: 'string' },
+                provider: { type: 'string' },
+                model: { type: 'string' },
+                pending: { type: 'integer' },
+                lastMessageAt: { type: 'integer' },
+                adoptedAt: { type: 'integer' },
+              },
+            },
           },
         },
-        render: (_args, value) => tool.text(
-          `[${value.office}] compacted ${String(value.replaced)} message(s) of #${value.channelId} `
-          + `into ${value.summaryId}, covering ${String(value.covers[0])}-${String(value.covers[1])}.`,
-        ),
       },
-      async execute(args) {
-        const { office, name: officeName } = tool.entry(args, 'office_compact')
-        const summary = typeof args?.summary === 'string' ? args.summary : ''
-        if (summary.trim().length === 0) {
-          throw new TypeError('office_compact: summary must be a non-empty string')
-        }
-        for (const key of ['from', 'to']) {
-          if (!Number.isSafeInteger(args?.[key]) || args[key] < 1) {
-            throw new TypeError(`office_compact: ${key} must be a safe integer of at least 1`)
-          }
-        }
-        if (args.from > args.to) {
-          throw new TypeError(`office_compact: from (${String(args.from)}) must not exceed to (${String(args.to)})`)
-        }
-        const requested = typeof args?.channel === 'string' ? args.channel.trim() : ''
-        const isGeneral = requested === '' || requested === 'general' || requested === '#general'
-        const sender = await office.senderOf(agent)
-        const channelId = isGeneral
-          ? office.generalChannel
-          : await resolveDirectChannel(office, sender, requested, 'office_compact')
-        const compacted = await office.compactRange({
-          channelId,
-          from: args.from,
-          to: args.to,
-          text: summary,
-          sender,
+      render: (_args, value) => {
+        if (value.colleagues.length === 0) return tool.text(`[${value.office}] No colleagues yet.`)
+        const lines = value.colleagues.map((colleague) => {
+          const details = [
+            colleague.permission === undefined ? undefined : `permission ${colleague.permission}`,
+            colleague.model === undefined ? undefined : `model ${colleague.provider ?? '?'}/${colleague.model}`,
+            colleague.pending === 0 ? undefined : `${String(colleague.pending)} message(s) held for it`,
+            colleague.lastMessageAt === undefined
+              ? 'no message from or to it yet'
+              : `last message ${new Date(colleague.lastMessageAt).toISOString()}`,
+          ].filter(detail => detail !== undefined)
+          return `- ${colleague.name} (${colleague.role}) — ${colleague.status}; ${details.join('; ')}`
+            + `${colleague.description === undefined ? '' : `\n  ${colleague.description}`}`
         })
-        return {
-          office: officeName,
-          channelId,
-          summaryId: compacted.summaryId,
-          covers: compacted.covers,
-          replaced: compacted.replaced,
-        }
+        return tool.text(`[${value.office}] ${String(value.colleagues.length)} colleague(s):\n${lines.join('\n')}`)
       },
     },
-  ]
+    async execute(args) {
+      const { office, name: officeName } = tool.entry(args, 'office_colleagues')
+      return { office: officeName, colleagues: await office.rosterStatus() }
+    },
+  }
+}
+
+/**
+ * Build the configure tool for one agent.
+ *
+ * It sets the two fields that describe a colleague rather than its membership: the predefined
+ * role, which decides its office tools and its session permission preset, and the free-text
+ * description. A boss holds it because it runs the roster; a leader holds it because curating
+ * how the roster is described is what its role is for, without being able to hire or dismiss.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the configure tool definition.
+ */
+function createConfigureTool(tool) {
+  return {
+    name: 'office_configure',
+    description:
+      'Set a colleague\'s predefined role and/or its description. The role decides which office tools the '
+      + 'colleague holds and the session permission preset the office row maps it to, so the change is '
+      + 'refused when this deployment cannot enforce that preset. Passing description as an empty string '
+      + 'removes it. Omitted fields keep their stored value.',
+    parameters: tool.parameters(['name'], {
+      name: { type: 'string', description: "The colleague's session title." },
+      role: roleProperty(),
+      description: descriptionProperty(),
+    }),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'colleague'],
+        properties: {
+          office: { type: 'string' },
+          colleague: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['name', 'sessionId', 'role'],
+            properties: {
+              name: { type: 'string' },
+              sessionId: { type: 'string' },
+              role: { type: 'string', enum: COLLEAGUE_ROLES },
+              description: { type: 'string' },
+              permission: { type: 'string' },
+            },
+          },
+        },
+      },
+      render: (_args, value) => tool.text(
+        `[${value.office}] "${value.colleague.name}" is now a ${value.colleague.role}`
+        + `${value.colleague.permission === undefined ? '' : ` with permission ${value.colleague.permission}`}`
+        + `${value.colleague.description === undefined ? '' : `: ${value.colleague.description}`}.`,
+      ),
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, 'office_configure')
+      const { office, name: officeName } = resolved
+      tool.require(resolved, 'configure', 'office_configure')
+      if (typeof args?.name !== 'string' || args.name.trim().length === 0) {
+        throw new TypeError('office_configure: name must be a non-empty session title')
+      }
+      if (args?.role === undefined && args?.description === undefined) {
+        throw new TypeError('office_configure: pass role, description, or both')
+      }
+      const colleague = await office.colleagueByName(args.name)
+      if (colleague === undefined) {
+        throw new Error(`office_configure: "${args.name}" does not match any colleague's session title`)
+      }
+      const role = args?.role === undefined ? undefined : requireRole(args.role, 'office_configure')
+      const changes = {}
+      if (role !== undefined) changes.role = role
+      if (args?.description !== undefined) {
+        changes.description = normalizeDescription(args.description, 'office_configure')
+      }
+      const { record, permission } = await office.configure(colleague.sessionId, changes)
+      return {
+        office: officeName,
+        colleague: compact({
+          name: colleague.name,
+          sessionId: record.sessionId,
+          role: canonicalRole(record.role),
+          description: record.description,
+          permission,
+        }),
+      }
+    },
+  }
 }
 
 /**
@@ -2109,29 +2915,29 @@ function createReadTool(agent, tool, config) {
    * Resolve the `sender` filter into a predicate over stored messages.
    *
    * The filter names a sender the way the caller reads one: a colleague's session title, or
-   * the operator that posts from the panel. A colleague is matched by session id, because
-   * renaming a session must not split its own history; the operator has no session, so its
+   * the user that posts from the panel. A colleague is matched by session id, because
+   * renaming a session must not split its own history; the user has no session, so its
    * messages are the ones stored without a sender session.
    * @param office - the acting office.
    * @param raw - the caller's `sender` argument.
-   * @param operatorName - the office's configured operator name.
+   * @param userName - the office's configured user name.
    * @returns the predicate, or undefined when the caller set no sender.
    */
-  const senderFilter = async (office, raw, operatorName) => {
+  const senderFilter = async (office, raw, userName) => {
     if (raw === undefined) return undefined
     const wanted = optionalText(raw, 'sender')
     const colleague = await office.colleagueByName(wanted)
     if (colleague !== undefined) return message => message.senderSessionId === colleague.sessionId
-    if (nameKey(wanted) === nameKey(operatorName)) return message => message.senderSessionId === undefined
+    if (nameKey(wanted) === nameKey(userName)) return message => message.senderSessionId === undefined
     throw new Error(
-      `${name}: "${wanted}" is neither a colleague's session title nor the operator "${operatorName}"`,
+      `${name}: "${wanted}" is neither a colleague's session title nor the user "${userName}"`,
     )
   }
 
   /**
    * Resolve the `mentions` filter into a predicate over stored messages.
    * @param office - the acting office.
-   * @param raw - the caller's `mentions` argument: `me`, or a colleague's session title.
+   * @param raw - the caller's `mentions` argument: `me`, a colleague's session title, or the user's name.
    * @param sender - the reading session's own identity, which `me` resolves to.
    * @returns the predicate, or undefined when the caller set no mention filter.
    */
@@ -2139,9 +2945,12 @@ function createReadTool(agent, tool, config) {
     if (raw === undefined) return undefined
     const wanted = optionalText(raw, 'mentions')
     if (wanted === 'me') return message => mentionsIn(message.text, [sender.name]).length > 0
+    // The user's name is a valid mention target, so it is a valid filter target: a message that
+    // named the user is exactly what someone looking for the user's mail wants to find.
+    if (office.isUser(wanted)) return message => mentionsIn(message.text, [wanted]).length > 0
     const colleague = await office.colleagueByName(wanted)
     if (colleague === undefined) {
-      throw new Error(`${name}: mentions takes "me" or a colleague's session title, got "${wanted}"`)
+      throw new Error(`${name}: mentions takes "me", a colleague's session title, or the user's name, got "${wanted}"`)
     }
     return message => mentionsIn(message.text, [colleague.name]).length > 0
   }
@@ -2165,7 +2974,7 @@ function createReadTool(agent, tool, config) {
         type: 'integer',
         description: `At most this many messages, newest kept (default ${String(config.readLimit)}, maximum ${String(config.readLimitMax)}).`,
       },
-      sender: { type: 'string', description: "Only messages from this colleague's session title, or from the operator." },
+      sender: { type: 'string', description: "Only messages from this colleague's session title, or from the user." },
       contains: { type: 'string', description: 'Only messages whose body contains this text, ignoring case.' },
       mentions: { type: 'string', description: 'Only messages that mention "me" or the named colleague\'s session title.' },
       since: { type: 'integer', description: 'Only messages created at or after this Unix time in milliseconds.' },
@@ -2258,7 +3067,7 @@ function createReadTool(agent, tool, config) {
       const channelIds = everyChannel
         ? office.visibleChannels(sender.sessionId).map(channel => channel.channelId)
         : [isGeneral ? office.generalChannel : await resolveDirectChannel(office, sender, requested, name)]
-      const fromSender = await senderFilter(office, args?.sender, officeConfig.operatorName)
+      const fromSender = await senderFilter(office, args?.sender, officeConfig.userName)
       const mentioning = await mentionsFilter(office, args?.mentions, sender)
       const matched = []
       for (const channelId of channelIds) {
@@ -2298,21 +3107,21 @@ function createReadTool(agent, tool, config) {
 }
 
 /**
- * Build the channel tools one agent's role receives.
+ * Build the channel-writing tools one agent's capabilities include.
  *
- * A colleague participates; a boss also inspects and speaks for the office it runs, which
- * is why both roles hold these and only the boss holds the management tools.
+ * Writing into the office is a capability, not a property of being a colleague: a member and a
+ * leader hold it, a consultant does not, so a consultant's scope carries no way to speak. The
+ * gate is repeated per call because the tool set is the union of every membership's
+ * capabilities; see {@link officeToolContext}.
  * @param agent - the agent whose scope receives these tools.
- * @param host - the hosting office's configuration and service readers.
- * @param role - `boss` or `colleague`, which decides whether `office` is required.
- * @returns the communication tool definitions.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the communication tool definitions the caller's capabilities admit.
  */
-function createCommunicationTools(agent, host, role) {
-  const { config } = host
-  const tool = officeToolContext(agent, role)
+function createCommunicationTools(agent, tool) {
   const { text } = tool
-  return [
-    {
+  const definitions = []
+  if (tool.capabilities.includes('post')) {
+    definitions.push({
       name: 'office_post',
       description:
         'Post to the public office channel "#general". #general is the office\'s shared record, not a '
@@ -2339,10 +3148,12 @@ function createCommunicationTools(agent, host, role) {
         render: (_args, value) => text(renderPostResult(value)),
       },
       async execute(args) {
-        const { office, name: officeName } = tool.entry(args, 'office_post')
+        const resolved = tool.entry(args, 'office_post')
+        const { office, name: officeName } = resolved
+        tool.require(resolved, 'post', 'office_post')
         const body = requireText(args, 'office_post')
         const sender = await office.senderOf(agent)
-        const recipients = await office.resolveRecipients(args?.mentions, 'office_post')
+        const audience = await office.resolveRecipients(args?.mentions, 'office_post')
         if (args?.mention_all !== undefined && typeof args.mention_all !== 'boolean') {
           throw new TypeError('office_post: mention_all must be a boolean')
         }
@@ -2354,21 +3165,26 @@ function createCommunicationTools(agent, host, role) {
           channel: office.generalChannel,
           sender,
           text: body,
-          recipients,
+          recipients: audience.colleagues,
           kind: 'public',
           mentionAll,
+          toUser: audience.toUser,
         }), officeName)
       },
-    },
-    {
+    })
+  }
+  if (tool.capabilities.includes('dm')) {
+    definitions.push({
       name: 'office_dm',
       description:
         'Send a private message to one colleague, which is how to answer one person without waking the '
         + "rest of the office. The message is stored in the office and delivered into that colleague's "
         + 'session as a user turn, waking it if it is inactive. Every delivery outcome is reported: '
-        + 'a wake that could not happen is reported rather than silently dropped.',
+        + 'a wake that could not happen is reported rather than silently dropped. Addressing the user '
+        + 'writes to the user mailbox instead: the user has no session, so nothing is woken and the '
+        + 'message waits there.',
       parameters: tool.parameters(['to', 'text'], {
-        to: { type: 'string', description: "The colleague's session title." },
+        to: { type: 'string', description: "The colleague's session title, or the user's name for the user mailbox." },
         text: { type: 'string', description: 'The message body.' },
       }),
       output: {
@@ -2376,18 +3192,26 @@ function createCommunicationTools(agent, host, role) {
         render: (_args, value) => text(renderPostResult(value)),
       },
       async execute(args) {
-        const { office, name: officeName } = tool.entry(args, 'office_dm')
+        const resolved = tool.entry(args, 'office_dm')
+        const { office, name: officeName } = resolved
+        tool.require(resolved, 'dm', 'office_dm')
         const body = requireText(args, 'office_dm')
         if (typeof args?.to !== 'string' || args.to.length === 0) {
-          throw new TypeError('office_dm: to must be a non-empty colleague name')
+          throw new TypeError('office_dm: to must be a non-empty colleague name or the user name')
         }
         const sender = await office.senderOf(agent)
-        const recipients = await office.resolveRecipients([args.to], 'office_dm')
-        return toPostResult(await office.post({ sender, text: body, recipients, kind: 'dm' }), officeName)
+        const audience = await office.resolveRecipients([args.to], 'office_dm')
+        return toPostResult(await office.post({
+          sender,
+          text: body,
+          recipients: audience.colleagues,
+          kind: 'dm',
+          toUser: audience.toUser,
+        }), officeName)
       },
-    },
-    createReadTool(agent, tool, config),
-  ]
+    })
+  }
+  return definitions
 }
 
 /**
@@ -2396,36 +3220,65 @@ function createCommunicationTools(agent, host, role) {
  * The set is built per agent because the caller is closed over, which keeps routing
  * independent of the optional `ToolRunContext.agent`. The tool names are
  * office-independent: the office is an argument, not part of the name, so one boss preset
- * that runs several offices still holds one constant set.
+ * that runs several offices still holds one constant set. Which tools are built is decided by
+ * the capabilities the agent holds, so a colleague's role decides its tool set, and a role
+ * change is a change to that set rather than to a check the model never sees.
  * @param agent - the agent whose scope is receiving tools.
  * @param host - the hosting office's configuration and service readers.
  * @returns the tool definitions, or undefined when the agent has no office role.
  */
 function createOfficeTools(agent, host) {
-  const { role, offices } = actingOffices(agent)
-  if (offices.length === 0) return undefined
-  if (role === 'boss') {
-    return [...createManagementTools(agent, host), ...createCommunicationTools(agent, host, 'boss')]
-  }
-  return createCommunicationTools(agent, host, 'colleague')
+  const acting = actingOffices(agent)
+  if (acting.offices.length === 0) return undefined
+  const tool = officeToolContext(agent, acting)
+  const definitions = []
+  if (acting.capabilities.includes('manage')) definitions.push(...createManagementTools(agent, host, tool))
+  if (acting.capabilities.includes('interrupt')) definitions.push(createInterruptTool(agent, tool))
+  if (acting.capabilities.includes('configure')) definitions.push(createConfigureTool(tool))
+  if (acting.capabilities.includes('compact')) definitions.push(createCompactTool(agent, tool))
+  definitions.push(...createCommunicationTools(agent, tool))
+  definitions.push(createReadTool(agent, tool, host.config))
+  definitions.push(createColleaguesTool(tool))
+  return definitions
 }
 
 /**
- * Arm one agent with the shared office tool set, at most once.
+ * The signature of the office tool set one agent holds.
+ *
+ * A tool set is a function of the acting role and the capabilities the agent's roles hold, so
+ * this is what {@link syncOfficeTools} compares to notice that a roster change moved an
+ * agent to a different set. `undefined` means the agent holds no office role at all.
+ * @param agent - the agent whose set is described.
+ * @returns the signature, or undefined when the agent holds no office tool.
+ */
+function officeToolSignature(agent) {
+  const acting = actingOffices(agent)
+  if (acting.offices.length === 0) return undefined
+  return `${acting.role}:${[...acting.capabilities].sort().join(',')}`
+}
+
+/**
+ * Arm one agent with the office tool set its roles admit.
  *
  * The set is registered into the agent's own scope, never globally, because an office tool
  * is a role a session holds. The host is the only installer, so there is no collision to
- * avoid and no share to count: it installs once per agent and withdraws when the agent
- * holds no office role at all.
+ * avoid and no share to count: it installs once per agent, reinstalls when a role change
+ * moves the agent to a different set, and withdraws when the agent holds no office role at
+ * all. The signature is what makes a role change take effect: a leader demoted to member must
+ * lose `office_interrupt` and `office_compact` from its scope, not merely be refused by them.
  * @param agent - the agent to arm.
  */
 function installOfficeTools(agent) {
-  if (officeToolInstalls.has(agent)) return
   if (officeHost === undefined) return
-  const definitions = createOfficeTools(agent, officeHost)
-  if (definitions === undefined) return
+  const signature = officeToolSignature(agent)
+  const installed = officeToolInstalls.get(agent)
+  if (installed?.signature === signature) return
+  installed?.dispose()
+  officeToolInstalls.delete(agent)
+  if (signature === undefined) return
+  const definitions = createOfficeTools(agent, officeHost) ?? []
   const disposers = definitions.map(definition => agent.ctx.tools.register(definition))
-  officeToolInstalls.set(agent, { dispose: () => { for (const dispose of disposers) dispose() } })
+  officeToolInstalls.set(agent, { signature, dispose: () => { for (const dispose of disposers) dispose() } })
 }
 
 /**
@@ -2440,16 +3293,16 @@ function withdrawOfficeTools(agent) {
 /**
  * Bring every listed agent's office tool set in line with the current registry.
  *
- * An office mounting or unmounting, and a roster gaining or losing a session, all change
- * which agents hold a role — so each of those only asks for a resync instead of installing
- * or withdrawing anything itself. An agent gains the set when it first holds a role and
- * loses it when it holds none.
+ * An office mounting or unmounting, a roster gaining or losing a session, and a colleague's
+ * role change all change which tools an agent holds — so each of those only asks for a resync
+ * instead of installing or withdrawing anything itself. An agent gains a set when it first
+ * holds a role, moves to another when its capabilities change, and loses it when it holds none.
  * @param agents - the agents to bring in line.
  */
 function syncOfficeTools(agents) {
   if (officeHost === undefined) return
   for (const agent of agents) {
-    if (actingOffices(agent).offices.length === 0) withdrawOfficeTools(agent)
+    if (officeToolSignature(agent) === undefined) withdrawOfficeTools(agent)
     else installOfficeTools(agent)
   }
 }
@@ -2542,44 +3395,75 @@ function officeRowId(name) {
 }
 
 /**
+ * Project one stored message onto the shape the panel renders.
+ *
+ * One projection for the snapshot and the history page, so a message cannot read one way while
+ * it is the newest page and another way after the reader unfolds the older ones.
+ * @param message - the stored message record.
+ * @param names - the colleague names, so the panel colors exactly the mentions that resolved.
+ * @returns the panel's message view.
+ */
+function panelMessage(message, names) {
+  return compact({
+    messageId: message.messageId,
+    // The sequence number is what the panel's folded row asks below when it unfolds older
+    // messages, so a view without it can render the feed but can never open its history.
+    seq: message.seq,
+    kind: message.kind,
+    senderName: message.senderName,
+    createdAt: message.createdAt,
+    text: message.text,
+    covers: Array.isArray(message.covers) ? message.covers : undefined,
+    recipients: message.recipients,
+    // Where a mailbox copy came from, so the panel can say it was also said in a channel.
+    origin: message.origin,
+    mentions: mentionsIn(message.text, names),
+  })
+}
+
+/**
  * Snapshot one office for the panel.
  *
  * The host registers the route but the office owns the data, so the whole snapshot is derived
  * from the mounted entry: its stored name, its roster, its channels, and its messages.
+ *
+ * Each message list travels with its total, because the panel renders the newest `readLimit`
+ * and folds the rest behind one row: without the total it could not say how many are folded.
  * @param ctx - the plugin context carrying the optional listing services.
  * @param mounted - the mounted office entry.
  * @returns the panel snapshot.
  */
 async function officeState(ctx, mounted) {
   const { office } = mounted
-  const colleagues = await office.listColleagues()
-  const names = colleagues.map(entry => entry.name)
+  const colleagues = await office.rosterStatus()
+  // The user name is a mention target like a colleague name, so the panel colors it in the same
+  // pass: a body that named the user is exactly what the mailbox exists to collect.
+  const names = [...colleagues.map(entry => entry.name), mounted.config.userName]
+  const limit = hostConfig().readLimit
+  const general = office.readMessages(office.generalChannel, Infinity)
+  const mailbox = office.readMessages(office.mailboxChannel, Infinity)
   return {
     office: mounted.name,
     officeId: mounted.id,
-    colleagues: colleagues.map(c => compact({
-      name: c.name,
-      sessionId: c.sessionId,
-      role: c.role,
-      description: c.description,
+    colleagues,
+    // What the hire and edit dialogs offer. A role's mapped preset travels with it, so the panel
+    // shows what choosing a role does to that colleague's session rather than only its name.
+    roles: COLLEAGUE_ROLES.map(role => compact({
+      id: role,
+      permission: mounted.config.rolePermissions[role],
     })),
+    // The name `@` addresses to reach the user's mailbox, and the mailbox itself. A colleague
+    // cannot read it through any tool, so this route is the only way it reaches a surface.
+    user: { name: mounted.config.userName },
     channels: office.listChannels().map(c => compact({
       channelId: c.channelId,
       kind: c.kind,
       topic: c.topic,
     })),
-    messages: office.readMessages(office.generalChannel, hostConfig().readLimit).map(m => compact({
-      messageId: m.messageId,
-      kind: m.kind,
-      senderName: m.senderName,
-      createdAt: m.createdAt,
-      text: m.text,
-      covers: Array.isArray(m.covers) ? m.covers : undefined,
-      recipients: m.recipients,
-      // The names this body resolved to, so the panel colors exactly what was woken rather
-      // than what its own preview guessed.
-      mentions: mentionsIn(m.text, names),
-    })),
+    messages: general.slice(-limit).map(m => panelMessage(m, names)),
+    messagesTotal: general.length,
+    mailbox: mailbox.slice(-limit).map(m => panelMessage(m, names)),
+    mailboxTotal: mailbox.length,
     workspaces: (ctx.get('workspaceRegistry')?.list() ?? []).map(workspace => ({
       id: workspace.id,
       title: workspace.title ?? workspace.path,
@@ -2593,6 +3477,32 @@ async function officeState(ctx, mounted) {
         model: entry.id,
         name: `${group.name} / ${entry.name}`,
       }))),
+  }
+}
+
+/**
+ * One page of older messages for one panel feed, newest page first.
+ *
+ * The panel holds the newest `readLimit` messages from the snapshot and asks for what is older
+ * than the oldest it holds, which is what makes the folded row expandable without the snapshot
+ * carrying an office's whole history on every poll.
+ * @param mounted - the mounted office entry.
+ * @param channelId - the channel to read.
+ * @param before - return messages older than this sequence; absent reads the newest page.
+ * @param limit - the page size, already bounded by the host's ceiling.
+ * @param names - the colleague names the message view resolves mentions against.
+ * @returns the page, oldest first, and whether older messages remain.
+ */
+function officeHistory(mounted, channelId, before, limit, names) {
+  const all = mounted.office.readMessages(channelId, Infinity)
+  const older = before === undefined ? all : all.filter(message => message.seq < before)
+  const page = older.slice(-limit)
+  return {
+    office: mounted.name,
+    channelId,
+    messages: page.map(message => panelMessage(message, names)),
+    total: all.length,
+    truncated: page.length < older.length,
   }
 }
 
@@ -2661,6 +3571,43 @@ function registerHostRoutes(ctx, config) {
       },
     }))
 
+    // One page of older messages for a panel feed. The panel renders the newest `readLimit`
+    // messages and folds the rest behind a count, so this is what the folded row asks for when
+    // the reader opens it — the snapshot never has to carry an office's whole history.
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: `${OFFICES_ROUTE}/history`,
+      handler: async (req, res) => {
+        const refused = refusal(req)
+        if (refused !== undefined) return respondJson(res, refused, { error: 'not authorized' })
+        if (req.method !== 'GET') return respondJson(res, 405, { error: 'use GET' })
+        const mounted = officeOr404(req, res)
+        if (mounted === undefined) return undefined
+        try {
+          const query = new URL(req.url ?? '/', 'http://x').searchParams
+          const wanted = query.get('channel') ?? mounted.office.generalChannel
+          const channelId = wanted === 'mailbox' ? mounted.office.mailboxChannel : mounted.office.generalChannel
+          const beforeRaw = query.get('before')
+          const before = beforeRaw === null ? undefined : Number(beforeRaw)
+          if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) {
+            return respondJson(res, 400, { error: 'before must be a positive integer sequence number' })
+          }
+          const requested = query.get('limit')
+          const limit = requested === null ? hostConfig().readLimitMax : Number(requested)
+          if (!Number.isSafeInteger(limit) || limit <= 0 || limit > hostConfig().readLimitMax) {
+            return respondJson(res, 400, { error: `limit must be a positive integer no greater than ${String(hostConfig().readLimitMax)}` })
+          }
+          const names = [
+            ...(await mounted.office.listColleagues()).map(entry => entry.name),
+            mounted.config.userName,
+          ]
+          return respondJson(res, 200, officeHistory(mounted, channelId, before, limit, names))
+        } catch (error) {
+          return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }))
+
     web.effect(() => web.webServer.register({
       kind: 'exact',
       path: `${OFFICES_ROUTE}/post`,
@@ -2676,17 +3623,23 @@ function registerHostRoutes(ctx, config) {
             return respondJson(res, 400, { error: 'text must be a non-empty string' })
           }
           // The panel sends the body alone: who is woken follows from the names written in it,
-          // so nothing a client claims can wake a colleague the message does not address.
+          // so nothing a client claims can wake a colleague the message does not address. The
+          // user's name is scanned the same way, which is what collects `@user` into the mailbox.
           const roster = await mounted.office.listColleagues()
+          const audience = await mounted.office.resolveRecipients(
+            mentionsIn(body.text, [...roster.map(entry => entry.name), mounted.config.userName]),
+            'office',
+          )
           const posted = await mounted.office.post({
             channel: mounted.office.generalChannel,
-            sender: { sessionId: undefined, name: mounted.config.operatorName },
+            sender: { sessionId: undefined, name: mounted.config.userName },
             text: body.text,
-            recipients: await mounted.office.resolveRecipients(mentionsIn(body.text, roster.map(entry => entry.name)), 'office'),
+            recipients: audience.colleagues,
             kind: 'public',
             // The panel notifies the whole office by default, exactly as `office_post` does;
             // unchecking the box narrows the wake to the colleagues the body names.
             mentionAll: body.mention_all !== false,
+            toUser: audience.toUser,
           })
           return respondJson(res, 200, toPostResult(posted, mounted.name))
         } catch (error) {
@@ -2720,12 +3673,56 @@ function registerHostRoutes(ctx, config) {
             colleague: compact({
               name: hired.colleague.name,
               sessionId: hired.colleague.sessionId,
-              role: hired.colleague.role,
+              role: canonicalRole(hired.colleague.role),
+              description: hired.colleague.description,
+              permission: hired.permission,
             }),
             workspaceId: hired.workspaceId,
             agentPreset: hired.agentPreset,
             greeting: hired.greeting,
           }))
+        } catch (error) {
+          return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }))
+
+    // The panel's edit path for an existing colleague. It is the route twin of `office_configure`
+    // and shares every rule with it: role and description are validated by the same functions,
+    // and a role this deployment cannot enforce is refused rather than stored.
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: `${OFFICES_ROUTE}/configure`,
+      handler: async (req, res) => {
+        const refused = refusal(req)
+        if (refused !== undefined) return respondJson(res, refused, { error: 'not authorized' })
+        if (req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
+        const mounted = officeOr404(req, res)
+        if (mounted === undefined) return undefined
+        try {
+          const body = await readJson(req)
+          if (body.role === undefined && body.description === undefined) {
+            return respondJson(res, 400, { error: 'pass role, description, or both' })
+          }
+          const colleague = await mounted.office.colleagueByName(body.name)
+          if (colleague === undefined) {
+            return respondJson(res, 404, { error: `"${String(body.name)}" does not match any colleague's session title` })
+          }
+          const changes = {}
+          if (body.role !== undefined) changes.role = requireRole(body.role, 'office')
+          if (body.description !== undefined) {
+            changes.description = normalizeDescription(body.description, 'office')
+          }
+          const configured = await mounted.office.configure(colleague.sessionId, changes)
+          return respondJson(res, 200, {
+            colleague: compact({
+              name: colleague.name,
+              sessionId: configured.record.sessionId,
+              role: canonicalRole(configured.record.role),
+              description: configured.record.description,
+              permission: configured.permission,
+            }),
+          })
         } catch (error) {
           return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
         }
@@ -2903,7 +3900,7 @@ function registerHostRoutes(ctx, config) {
           return respondJson(res, 200, compact({
             office: officeName,
             deleted: true,
-            // A disabled row survives in the patch, so the operator can re-enable it there.
+            // A disabled row survives in the patch, so the user can re-enable it there.
             disabledRow: path.length !== 3 && mounted !== undefined ? true : undefined,
           }))
         } catch (error) {
@@ -2928,7 +3925,10 @@ function applyHost(ctx, raw) {
   if (officeHost !== undefined) {
     throw new Error('dsh-office: only one office host row may be mounted in a process')
   }
-  officeHost = { config, resolveQuery: () => ctx.get('sessionQuery') }
+  officeHost = {
+    config,
+    resolveQuery: () => ctx.get('sessionQuery'),
+  }
   ctx.effect(() => () => { officeHost = undefined })
 
   // Every office mounting or unmounting, and every roster change, resyncs the affected
@@ -2997,12 +3997,20 @@ async function applyOffice(ctx, raw, rowId) {
     )
   }
 
-  const hooks = { onAdopted: () => {}, onDismissed: () => {} }
+  const hooks = { onAdopted: () => {}, onConfigured: () => {}, onDismissed: () => {} }
   const office = createOffice(ctx, domain, config, hooks)
   await office.ensureChannel(GENERAL_CHANNEL, {
     kind: 'public',
     name: GENERAL_CHANNEL,
     topic: 'General office channel for every colleague.',
+    members: [],
+  })
+  // The user's mailbox is created beside the public channel and never listed as a colleague's
+  // channel: it is what gives a message addressed to the user somewhere to live.
+  await office.ensureChannel(MAILBOX_CHANNEL, {
+    kind: 'mailbox',
+    name: MAILBOX_CHANNEL,
+    topic: `Messages addressed to the user "${config.userName}".`,
     members: [],
   })
 
@@ -3043,14 +4051,15 @@ async function applyOffice(ctx, raw, rowId) {
     ctx.logger?.warn?.(`dsh-office: restoring held wakes failed: ${String(error)}`)
   })
 
-  hooks.onAdopted = (sessionId) => {
+  // One roster event, one resync: entering, leaving, and changing role all move the agent's
+  // tool set, so none of them installs or withdraws anything itself.
+  const resyncAgent = (sessionId) => {
     const agent = ctx.agents.get(sessionId)
     if (agent !== undefined) syncOfficeTools([agent])
   }
-  hooks.onDismissed = (sessionId) => {
-    const agent = ctx.agents.get(sessionId)
-    if (agent !== undefined) syncOfficeTools([agent])
-  }
+  hooks.onAdopted = resyncAgent
+  hooks.onConfigured = resyncAgent
+  hooks.onDismissed = resyncAgent
 }
 
 /**

@@ -38,6 +38,20 @@ window.__ModuleLoader__.load({
     const DELETE_OFFICE_ROUTE = '/dsh-office/offices/delete'
     const RENAME_OFFICE_ROUTE = '/dsh-office/offices/rename'
     /**
+     * The roles offered before the snapshot arrives, and the one a colleague starts as.
+     *
+     * The office owns both values and reports them in the state snapshot — a role travels with the
+     * session permission preset the office row maps it to — so this list is only what the picker
+     * shows while that read is still in flight. A deployment that changes its mapping is therefore
+     * reflected as soon as the snapshot lands, not overridden by these defaults.
+     */
+    const FALLBACK_ROLES = [
+      { id: 'member' },
+      { id: 'leader' },
+      { id: 'consultant', permission: 'read-only' },
+    ]
+    const DEFAULT_ROLE = 'member'
+    /**
      * The `localStorage` key holding this panel's own UI state.
      *
      * The panel is registered in the `main` slot, so opening another page unmounts it and
@@ -45,6 +59,8 @@ window.__ModuleLoader__.load({
      * One record holds every field that must outlive that.
      */
     const PANEL_STATE_KEY = 'dsh-office.panel'
+    /** The mailbox disclosure, which is a standing preference rather than a per-visit default. */
+    const MAILBOX_STATE_KEY = 'mailbox'
 
     /**
      * Build a URL for one office route.
@@ -52,12 +68,59 @@ window.__ModuleLoader__.load({
      * The office travels as a query parameter rather than as a path segment, because an office
      * name accepts any script and a path segment would have to be percent-encoded twice — once
      * when the Host registers the route and once here. `URLSearchParams` encodes for both.
-     * @param verb - `state`, `post`, `hire`, or `dismiss`.
+     * @param verb - `state`, `history`, `post`, `hire`, `configure`, or `dismiss`.
      * @param officeName - the office to act on.
      * @returns the request path.
      */
     function officeRoute(verb, officeName) {
       return `${OFFICES_ROUTE}/${verb}?${new URLSearchParams({ office: officeName })}`
+    }
+
+    /**
+     * How one role reads in a picker.
+     *
+     * A role that the office row maps to a session permission preset shows it, because choosing
+     * that role changes what the colleague's session may write, not only what it is called.
+     * @param role - one `{ id, permission }` entry from the snapshot's `roles`.
+     * @returns the option label.
+     */
+    function roleLabel(role) {
+      return role.permission === undefined ? role.id : `${role.id} · ${role.permission}`
+    }
+
+    /**
+     * The role and description fields the hire and edit dialogs share.
+     *
+     * One declaration for both, so the two surfaces cannot drift: they post to different routes
+     * but offer the same choices and read back the same validation.
+     * @param props.roles - the roles the office offers, from its snapshot.
+     * @param props.role - the selected role id.
+     * @param props.onRole - receives a newly selected role id.
+     * @param props.description - the description draft.
+     * @param props.onDescription - receives a new description draft.
+     * @param props.onEnter - the dialog's Enter handler.
+     * @returns the two form rows, as one array of children.
+     */
+    function colleagueFields(props) {
+      const { roles, role, onRole, description, onDescription, onEnter } = props
+      return [
+        h('select', {
+          key: 'role',
+          style: field,
+          value: role,
+          'aria-label': 'Colleague role',
+          onChange: event => onRole(event.target.value),
+        }, roles.map(entry => h('option', { key: entry.id, value: entry.id }, roleLabel(entry)))),
+        h('input', {
+          key: 'description',
+          style: field,
+          value: description,
+          placeholder: 'Description (optional)',
+          'aria-label': 'Colleague description',
+          onChange: event => onDescription(event.target.value),
+          onKeyDown: onEnter,
+        }),
+      ]
     }
 
     /**
@@ -242,6 +305,8 @@ window.__ModuleLoader__.load({
     const person = { padding: '6px 0', fontSize: '13px' }
     const personHead = { display: 'flex', alignItems: 'center', gap: '6px' }
     const personName = { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+    /** What a colleague was configured to be: it wraps, where the name beside it is elided. */
+    const personNote = { ...muted, marginTop: '2px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }
     const dismissButton = {
       flex: 'none',
       padding: '2px 6px',
@@ -254,6 +319,40 @@ window.__ModuleLoader__.load({
     }
     const channel = { display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }
     const feed = { flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '12px' }
+    /**
+     * The row that stands where the folded messages are: it is part of the feed's column, so it
+     * scrolls with the messages it precedes rather than floating over them.
+     */
+    const foldedRow = { display: 'flex', justifyContent: 'center' }
+    /** The user's mailbox: a collapsed-by-default section above the public channel. */
+    const mailboxSection = {
+      flex: 'none',
+      borderBottom: '1px solid var(--dsw-alias-border-l1)',
+      background: 'var(--dsw-alias-bg-layer-1)',
+    }
+    const mailboxHeader = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      width: '100%',
+      padding: '8px 20px',
+      border: 'none',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-primary)',
+      font: 'inherit',
+      fontSize: '12px',
+      textAlign: 'left',
+      cursor: 'pointer',
+    }
+    /** The mailbox's own scrollport: bounded, so opening it never hides the channel below. */
+    const mailboxFeed = {
+      maxHeight: '40vh',
+      overflowY: 'auto',
+      padding: '4px 20px 12px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px',
+    }
     const bubble = {
       border: '1px solid var(--dsw-alias-border-l1)',
       borderRadius: '8px',
@@ -484,7 +583,7 @@ window.__ModuleLoader__.load({
      * a post wakes exactly the colleagues it names.
      */
     function Composer(props) {
-      const { officeName, colleagues, onPosted } = props
+      const { officeName, colleagues, userName, onPosted } = props
       // The draft is stored per office: switching offices, leaving the page, and reloading the
       // browser all keep a post that was typed but not sent.
       const [draft, setDraft] = useStoredState(`draft:${officeName}`, '')
@@ -503,7 +602,8 @@ window.__ModuleLoader__.load({
       /** Caret position to restore after an accepted mention rewrites the draft. */
       const caretRef = useRef(undefined)
 
-      const names = colleagues.map(colleague => colleague.name)
+      const names = [...colleagues.map(colleague => colleague.name), userName]
+        .filter(name => typeof name === 'string' && name.length > 0)
       const spans = parseMentions(draft, names)
       const candidates = trigger === undefined
         ? []
@@ -698,6 +798,100 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * One panel feed: the newest page from the snapshot, plus the older pages a reader unfolded.
+     *
+     * The snapshot polls every few seconds and carries only the newest messages, so the unfolded
+     * pages live beside it rather than in it: a poll replaces the newest page and never discards
+     * what the reader opened. The server owns the page size, so the request carries no limit —
+     * the host's own ceiling is what one unfold costs.
+     * @param props.officeName - the office the feed belongs to.
+     * @param props.channel - `general` or `mailbox`.
+     * @param props.newest - the newest page, from the snapshot.
+     * @param props.total - how many messages the channel holds in all, from the snapshot.
+     * @returns the combined messages, how many are still folded, the loader, and its failure.
+     */
+    function useFeedHistory({ officeName, channel, newest, total }) {
+      const [older, setOlder] = useState([])
+      const [failure, setFailure] = useState(undefined)
+      const loading = useRef(false)
+      const previousTotal = useRef(undefined)
+      const oldest = older.at(0)?.seq ?? newest.at(0)?.seq
+
+      // Another office, or another channel of the same one, invalidates what was unfolded: the
+      // page is a range of one channel's sequence numbers.
+      useEffect(() => {
+        setOlder([])
+        setFailure(undefined)
+      }, [officeName, channel])
+
+      // A channel that shrank lost messages the reader had unfolded — a compacted range replaces
+      // them with one summary — so the whole page is dropped rather than shown above messages that
+      // no longer exist. Which of them went is not knowable here; one click unfolds what remains.
+      useEffect(() => {
+        const shrank = previousTotal.current !== undefined && total < previousTotal.current
+        previousTotal.current = total
+        if (shrank) setOlder([])
+      }, [total])
+
+      const load = useCallback(async () => {
+        if (loading.current || oldest === undefined) return
+        loading.current = true
+        try {
+          const page = await requestJson(`${officeRoute('history', officeName)}&channel=${channel}&before=${oldest}`)
+          setOlder(current => [...(page?.messages ?? []), ...current])
+          setFailure(undefined)
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          loading.current = false
+        }
+      }, [officeName, channel, oldest])
+
+      const messages = [...older, ...newest]
+      return { messages, folded: Math.max(0, total - messages.length), load, failure }
+    }
+
+    /**
+     * The row that keeps an old channel from pushing the newest message off the screen.
+     *
+     * A feed renders the newest page and folds everything older behind this one row, the way the
+     * conversation view folds the history it has not loaded: one click opens the next page in
+     * place, and the row stays while anything older remains.
+     * @param props.folded - how many messages the feed is not showing.
+     * @param props.onUnfold - loads the next older page.
+     * @returns the row, or null when the feed is complete.
+     */
+    function FoldedRow(props) {
+      const { folded, onUnfold } = props
+      if (folded <= 0) return null
+      return h('div', { style: foldedRow },
+        h('button', { type: 'button', style: smallButton, onClick: onUnfold },
+          `${String(folded)} earlier ${folded === 1 ? 'message' : 'messages'}`))
+    }
+
+    /**
+     * One message as a feed draws it, shared by the public channel and the mailbox.
+     * @param message - one message, from the snapshot or from an unfolded page.
+     * @param colleagues - the roster, whose names are the mention candidates besides the user.
+     * @param userName - the user's name, which a body may also address.
+     * @returns the rendered message.
+     */
+    function messageNode(message, colleagues, userName) {
+      const names = [...colleagues.map(colleague => colleague.name), userName]
+        .filter(name => typeof name === 'string')
+      return h('div', {
+        key: message.messageId,
+        style: message.kind === 'summary' ? summaryBubble : bubble,
+      },
+      h('div', { style: bubbleHead }, message.kind === 'summary'
+        ? `Summary of ${String(message.covers[0])}–${String(message.covers[1])} by ${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
+        : `${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
+          + `${message.origin === undefined ? '' : ` · also in #${message.origin.channelId} as ${message.origin.messageId}`}`),
+      h('div', null, renderMentions(message.text, names, message.mentions)),
+      )
+    }
+
+    /**
      * One office's snapshot: colleagues, channels, newest public messages, hire options.
      *
      * The panel owns this, not the view, because the hire dialog needs the same snapshot and
@@ -727,7 +921,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The hire dialog: name, role, workspace, preset, and an optional model route.
+     * The hire dialog: name, role, description, workspace, preset, and an optional model route.
      *
      * Hiring is a deliberate act with several choices, so it lives in a dialog rather than in
      * the rail, which keeps the roster visible while the choice is made. The dialog stays open
@@ -736,13 +930,15 @@ window.__ModuleLoader__.load({
     function HireDialog(props) {
       const { open, onClose, officeName, snapshot, onHired } = props
       const [name, setName] = useState('')
-      const [role, setRole] = useState('')
+      const [role, setRole] = useState(DEFAULT_ROLE)
+      const [description, setDescription] = useState('')
       const [workspaceId, setWorkspaceId] = useState('')
       const [presetId, setPresetId] = useState('')
       const [route, setRoute] = useState('')
       const [busy, setBusy] = useState(false)
       const [failure, setFailure] = useState(undefined)
 
+      const roles = snapshot?.roles ?? FALLBACK_ROLES
       const workspaces = snapshot?.workspaces ?? []
       const presets = snapshot?.presets ?? []
       const models = snapshot?.models ?? []
@@ -755,13 +951,15 @@ window.__ModuleLoader__.load({
           const [provider, model] = route.split(ROUTE_SEPARATOR)
           await submitJson(officeRoute('hire', officeName), {
             name: trimmed,
-            ...(role.trim().length === 0 ? {} : { role: role.trim() }),
+            role,
+            ...(description.trim().length === 0 ? {} : { description: description.trim() }),
             ...(workspaceId === '' ? {} : { workspace_id: workspaceId }),
             ...(presetId === '' ? {} : { agent_preset: presetId }),
             ...(provider === undefined || model === undefined ? {} : { provider, model }),
           })
           setName('')
-          setRole('')
+          setRole(DEFAULT_ROLE)
+          setDescription('')
           setFailure(undefined)
           await onHired()
           onClose()
@@ -783,7 +981,8 @@ window.__ModuleLoader__.load({
         onClose,
         title: `Hire a colleague into ${officeName}`,
         closeLabel: 'Close',
-        description: 'A colleague is an ordinary session, titled with the name below and added to the roster.',
+        description: 'A colleague is an ordinary session, titled with the name below and added to the roster. '
+          + 'Its role decides the office tools it holds and the session permission it runs under.',
         footer: h('div', { style: dialogActions },
           h('button', { type: 'button', style: smallButton, onClick: onClose }, 'Cancel'),
           h('button', { type: 'button', style: button, disabled: busy, onClick: () => { void hire() } }, busy ? 'Hiring…' : 'Hire')),
@@ -796,14 +995,7 @@ window.__ModuleLoader__.load({
         onChange: event => setName(event.target.value),
         onKeyDown: enter,
       }),
-      h('input', {
-        style: field,
-        value: role,
-        placeholder: 'Role (optional)',
-        'aria-label': 'New colleague role',
-        onChange: event => setRole(event.target.value),
-        onKeyDown: enter,
-      }),
+      colleagueFields({ roles, role, onRole: setRole, description, onDescription: setDescription, onEnter: enter }),
       h('select', {
         style: field,
         value: workspaceId,
@@ -835,6 +1027,73 @@ window.__ModuleLoader__.load({
         },
         entry.name,
       ))),
+      failure === undefined ? null : h('p', { style: dialogFailure }, failure))
+    }
+
+    /**
+     * The colleague dialog: the role and the description of one colleague already on the roster.
+     *
+     * The two fields are the ones the office lets a boss or a leader change without touching the
+     * colleague's membership, so this is how the user sets them from the panel. It opens on what
+     * the colleague is now, stays open with its error while the office refuses the change, and
+     * closes only once the office accepted it.
+     */
+    function ColleagueDialog(props) {
+      const { open, onClose, officeName, colleague, snapshot, onSaved } = props
+      const [role, setRole] = useState(DEFAULT_ROLE)
+      const [description, setDescription] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [failure, setFailure] = useState(undefined)
+
+      const roles = snapshot?.roles ?? FALLBACK_ROLES
+      const sessionId = colleague?.sessionId
+
+      // Seed the fields from the colleague the dialog was opened on, not from the polled snapshot:
+      // a roster refresh while the dialog is open must not type over what the user chose.
+      useEffect(() => {
+        if (!open) return
+        setRole(colleague?.role ?? DEFAULT_ROLE)
+        setDescription(colleague?.description ?? '')
+        setFailure(undefined)
+      }, [open, sessionId])
+
+      const save = async () => {
+        if (busy) return
+        setBusy(true)
+        try {
+          await submitJson(officeRoute('configure', officeName), {
+            name: colleague.name,
+            role,
+            description: description.trim(),
+          })
+          setFailure(undefined)
+          await onSaved()
+          onClose()
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const enter = (event) => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        void save()
+      }
+
+      return h(Modal, {
+        open,
+        onClose,
+        title: `Edit ${colleague?.name ?? 'colleague'}`,
+        closeLabel: 'Close',
+        description: 'The role decides the office tools this colleague holds and the session permission '
+          + 'the office row maps that role to. An empty description removes it.',
+        footer: h('div', { style: dialogActions },
+          h('button', { type: 'button', style: smallButton, onClick: onClose }, 'Cancel'),
+          h('button', { type: 'button', style: button, disabled: busy, onClick: () => { void save() } }, busy ? 'Saving…' : 'Save')),
+      },
+      colleagueFields({ roles, role, onRole: setRole, description, onDescription: setDescription, onEnter: enter }),
       failure === undefined ? null : h('p', { style: dialogFailure }, failure))
     }
 
@@ -1034,7 +1293,7 @@ window.__ModuleLoader__.load({
 
     /** One office: its roster rail, public channel, and composer. */
     function OfficeView(props) {
-      const { officeName, snapshot, error, refresh } = props
+      const { officeName, snapshot, error, refresh, onEdit } = props
       const [postError, setPostError] = useState(undefined)
       const [pendingDismiss, setPendingDismiss] = useState(undefined)
       const feedRef = useRef(null)
@@ -1044,6 +1303,8 @@ window.__ModuleLoader__.load({
       const sampleTimerRef = useRef(null)
       /** Whether this mount has already put the saved position, or the tail, back. */
       const restoredRef = useRef(false)
+      /** The feed's last content height, which is how a prepend is told from a reader's scroll. */
+      const heightRef = useRef(undefined)
       const scrollKey = `feed:${officeName}`
       if (followRef.current === null) {
         // A feed with no stored position has never been scrolled away from the tail, so it starts
@@ -1069,7 +1330,24 @@ window.__ModuleLoader__.load({
       }
 
       const colleagues = snapshot?.colleagues ?? []
-      const messages = snapshot?.messages ?? []
+      const userName = snapshot?.user?.name
+      const mailboxTotal = snapshot?.mailboxTotal ?? 0
+      // Collapsed by default, and remembered once the user opens it: the mailbox is a place to
+      // look, not a thing to read on every visit, so it must not push the channel down unasked.
+      const [mailboxShown, setMailboxShown] = useStoredState(MAILBOX_STATE_KEY, false)
+      const general = useFeedHistory({
+        officeName,
+        channel: 'general',
+        newest: snapshot?.messages ?? [],
+        total: snapshot?.messagesTotal ?? 0,
+      })
+      const mailbox = useFeedHistory({
+        officeName,
+        channel: 'mailbox',
+        newest: snapshot?.mailbox ?? [],
+        total: mailboxTotal,
+      })
+      const messages = general.messages
 
       /**
        * Write what the reader is doing: following the tail, or reading at this offset.
@@ -1134,6 +1412,28 @@ window.__ModuleLoader__.load({
         if (follow.following) follow.toBottom(node, follow.metrics(node))
       }, [scrollKey, snapshot, messages.length, rememberPosition])
 
+      /**
+       * Hold the reader's place while the feed's content height changes.
+       *
+       * Unfolding older messages grows the feed upward, and a poll can append, prepend, or shrink
+       * it; by scroll offset alone the reader would be dragged to different content each time. A
+       * reader who is following the tail is handled above, and reader input that has not settled
+       * owns the feed, so this only moves the offset by the height the content gained or lost.
+       */
+      useEffect(() => {
+        const node = feedRef.current
+        if (node === null) return
+        const previous = heightRef.current
+        heightRef.current = node.scrollHeight
+        if (previous === undefined || followRef.current.following) return
+        if (sampleTimerRef.current !== null) return
+        node.scrollTop += node.scrollHeight - previous
+        rememberPosition(node)
+      }, [messages.length, mailbox.messages.length, snapshot, rememberPosition])
+
+      /** Toggle the mailbox disclosure; the choice is remembered like the panel's other controls. */
+      const toggleMailbox = () => { setMailboxShown(!mailboxShown) }
+
       return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
         error === undefined ? null : h('p', { style: notice }, `Cannot reach office "${officeName}": ${error}`),
         h('div', { style: body },
@@ -1147,31 +1447,58 @@ window.__ModuleLoader__.load({
                   h('button', {
                     type: 'button',
                     style: dismissButton,
+                    title: "Change this colleague's role and description",
+                    onClick: () => { onEdit(colleague) },
+                  }, 'Edit'),
+                  h('button', {
+                    type: 'button',
+                    style: dismissButton,
                     title: 'Remove from the roster; the session itself is kept',
                     onClick: () => { void removeColleague(colleague.name) },
                   }, pendingDismiss === colleague.name ? 'Confirm' : 'Dismiss'),
                 ),
-                colleague.role === undefined ? null : h('div', { style: muted }, colleague.role),
+                h('div', { style: muted },
+                  `${colleague.role ?? 'member'} · ${colleague.status ?? 'unknown'}`
+                  + `${colleague.permission === undefined ? '' : ` · ${colleague.permission}`}`
+                  + `${colleague.pending === undefined || colleague.pending === 0
+                    ? ''
+                    : ` · ${String(colleague.pending)} held`}`),
+                colleague.description === undefined
+                  ? null
+                  : h('div', { style: personNote }, colleague.description),
               )),
           ),
           h('div', { style: channel },
+            h('div', { style: mailboxSection },
+              h('button', {
+                type: 'button',
+                style: mailboxHeader,
+                'aria-expanded': mailboxShown,
+                onClick: toggleMailbox,
+              }, `${mailboxShown ? '▾' : '▸'} Mailbox`
+                + `${mailboxTotal === 0 ? '' : ` · ${String(mailboxTotal)}`}`
+                + `${userName === undefined ? '' : ` · @${userName}`}`),
+              mailboxShown
+                ? h('div', { style: mailboxFeed },
+                  h(FoldedRow, { folded: mailbox.folded, onUnfold: () => { void mailbox.load() } }),
+                  mailbox.messages.length === 0
+                    ? h('p', { style: muted }, 'No message has been addressed to the user yet.')
+                    : mailbox.messages.map(message => messageNode(message, colleagues, userName)),
+                )
+                : null,
+            ),
             h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll },
+              h(FoldedRow, { folded: general.folded, onUnfold: () => { void general.load() } }),
               messages.length === 0
                 ? h('p', { style: muted }, '#general has no messages yet.')
-                : messages.map(message => h('div', {
-                  key: message.messageId,
-                  style: message.kind === 'summary' ? summaryBubble : bubble,
-                },
-                h('div', { style: bubbleHead }, message.kind === 'summary'
-                  ? `Summary of ${message.covers[0]}–${message.covers[1]} by ${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
-                  : `${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`),
-                h('div', null, renderMentions(message.text, colleagues.map(colleague => colleague.name), message.mentions)),
-                )),
+                : messages.map(message => messageNode(message, colleagues, userName)),
             ),
           ),
         ),
-        postError === undefined ? null : h('p', { style: notice }, postError),
-        h(Composer, { officeName, colleagues, onPosted: refresh }),
+        postError === undefined && general.failure === undefined && mailbox.failure === undefined
+          ? null
+          : h('p', { style: notice }, postError ?? general.failure ?? mailbox.failure),
+        h(Composer, { officeName, colleagues, userName, onPosted: refresh }),
       )
     }
 
@@ -1181,6 +1508,8 @@ window.__ModuleLoader__.load({
       // the page returns to the office the operator was working in.
       const [selected, setSelected] = useStoredState('office', undefined)
       const [dialog, setDialog] = useState(undefined)
+      /** The colleague the edit dialog was opened on, or undefined while it is closed. */
+      const [editing, setEditing] = useState(undefined)
       const active = offices.some(office => office.name === selected) ? selected : offices[0]?.name
       const { snapshot, error, refresh } = useOffice(active)
 
@@ -1211,6 +1540,11 @@ window.__ModuleLoader__.load({
         }
       }, [read])
 
+      // The edit dialog belongs to one colleague of one office, so switching offices closes it:
+      // its route takes the active office, and a colleague that office does not hold would be a
+      // refusal the user did not ask for.
+      useEffect(() => { setEditing(undefined) }, [active])
+
       return h('div', { style: page },
         h('div', { style: header },
           h('h1', { style: title }, 'Office'),
@@ -1232,7 +1566,7 @@ window.__ModuleLoader__.load({
         ),
         offices.length === 0
           ? h(OfficeEmptyState, { onManage: () => { setDialog('offices') } })
-          : h(OfficeView, { key: active, officeName: active, snapshot, error, refresh }),
+          : h(OfficeView, { key: active, officeName: active, snapshot, error, refresh, onEdit: setEditing }),
         offices.length === 0
           ? null
           : h(HireDialog, {
@@ -1241,6 +1575,16 @@ window.__ModuleLoader__.load({
             officeName: active,
             snapshot,
             onHired: refresh,
+          }),
+        offices.length === 0
+          ? null
+          : h(ColleagueDialog, {
+            open: editing !== undefined,
+            onClose: () => { setEditing(undefined) },
+            officeName: active,
+            colleague: editing,
+            snapshot,
+            onSaved: refresh,
           }),
         h(OfficesDialog, {
           open: dialog === 'offices',
