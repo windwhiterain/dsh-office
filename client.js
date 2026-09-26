@@ -59,6 +59,20 @@ window.__ModuleLoader__.load({
     ]
     const DEFAULT_ROLE = 'member'
     /**
+     * The wake levels the `#` trigger offers, narrowest first.
+     *
+     * The office owns the ladder and expands it: a level wakes its own rung and every rung above
+     * it, so the last entry reaches every colleague. The composer only has to spell the tokens and
+     * say what each one reaches; the server resolves them from the body it receives. The menu is
+     * ordered by reach rather than by rung, because its first row is what a bare `#` plus Enter
+     * accepts, and the cheapest mistake there is the smallest audience.
+     */
+    const WAKE_LEVELS = [
+      { token: '#leader', hint: 'leaders only' },
+      { token: '#member', hint: 'members and leaders' },
+      { token: '#consultant', hint: 'everyone' },
+    ]
+    /**
      * The `localStorage` key holding this panel's own UI state.
      *
      * The panel is registered in the `main` slot, so opening another page unmounts it and
@@ -168,8 +182,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The panel's persisted UI state: which office it was showing, the draft it had typed,
-     * and the wake toggle.
+     * The panel's persisted UI state: which office it was showing, and the draft it had typed.
      *
      * Every read goes through one in-memory record, so a remount inside the same page load
      * restores the panel without touching storage, and a reload restores it from storage.
@@ -497,7 +510,6 @@ window.__ModuleLoader__.load({
       cursor: 'pointer',
     }
     const notice = { margin: '0 20px 12px', fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' }
-    const toggle = { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-secondary)' }
     /**
      * The composer's text layers. The input renders the draft with transparent text and the
      * layer behind it paints the same characters, so a mention can carry the reference color
@@ -623,61 +635,72 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Resolve every `@name` token in one draft against the current roster.
+     * Resolve every wake token in one body against the current roster.
      *
-     * A token is a trigger at the draft start or after whitespace, then a colleague's exact
-     * name — longest first, so a title containing a space matches whole — ending at a
-     * boundary, so `@张三x` is prose rather than a mention. One derivation feeds the colored
-     * text, the feed's rendering, and the wake list, so what the operator sees named is
-     * exactly whom the post wakes.
+     * A token is a trigger at the body start or after whitespace, then a colleague's exact name
+     * — longest first, so a title containing a space matches whole — or one wake level, ending at
+     * a boundary, so `@张三x` is prose rather than a mention. One derivation feeds the colored
+     * text, the feed's rendering, and the level list, so what the operator sees named is exactly
+     * whom the post wakes.
      * @param text - the message body.
      * @param names - the roster's colleague names.
-     * @returns the matched spans, in draft order.
+     * @returns the matched spans, in draft order, each carrying the name or the level it resolved.
      */
-    function parseMentions(text, names) {
+    function parseWakeTokens(text, names) {
       const ordered = [...names].filter(name => typeof name === 'string' && name.length > 0)
         .sort((left, right) => right.length - left.length)
       const spans = []
       for (let index = 0; index < text.length; index += 1) {
-        if (text[index] !== '@') continue
+        const marker = text[index]
+        if (marker !== '@' && marker !== '#') continue
         if (index > 0 && !/\s/.test(text[index - 1])) continue
         const rest = text.slice(index + 1)
-        const found = ordered.find(name => rest.toLowerCase().startsWith(name.toLowerCase())
-          && (rest.length === name.length || !/[\p{L}\p{N}_]/u.test(rest[name.length])))
+        const ends = length => rest.length === length || !/[\p{L}\p{N}_]/u.test(rest[length])
+        const found = marker === '@'
+          ? ordered.find(name => rest.toLowerCase().startsWith(name.toLowerCase()) && ends(name.length))
+          : WAKE_LEVELS.map(entry => entry.token.slice(1))
+            .find(level => rest.toLowerCase().startsWith(level) && ends(level.length))
         if (found === undefined) continue
-        spans.push({ start: index, end: index + 1 + found.length, name: found })
+        spans.push(marker === '@'
+          ? { start: index, end: index + 1 + found.length, name: found }
+          : { start: index, end: index + 1 + found.length, level: `#${found}` })
         index += found.length
       }
       return spans
     }
 
     /**
-     * The mention spans one body shows.
+     * The wake spans one feed message shows.
      *
-     * The server decides who a post wakes and reports those names back with the stored
-     * message, so a feed message colors only the names the server resolved: a preview that
-     * over-matches can never color a colleague the post did not wake.
+     * The server decides who a post wakes and reports it with the stored message — the level it
+     * addressed, or the names it resolved — so a feed colors only what that wake covered: a
+     * preview that over-matches can never color a colleague the post did not wake, and prose that
+     * happens to spell a level never claims the post addressed one.
      * @param text - the message body.
      * @param names - the roster's colleague names.
      * @param woke - the names the server resolved for this body, when it reported them.
+     * @param audience - the level the server recorded for this body, when it addressed one.
      * @returns the spans to color.
      */
-    function mentionSpans(text, names, woke) {
-      const spans = parseMentions(text, names)
-      if (!Array.isArray(woke)) return spans
-      const allowed = new Set(woke)
-      return spans.filter(span => allowed.has(span.name))
+    function wakeSpans(text, names, woke, audience) {
+      const spans = parseWakeTokens(text, names)
+      if (typeof audience === 'string' && audience.length > 0) {
+        return spans.filter(span => span.level === audience)
+      }
+      const allowed = new Set(Array.isArray(woke) ? woke : [])
+      return spans.filter(span => span.name !== undefined && allowed.has(span.name))
     }
 
     /**
-     * Render one message body with its mentions colored.
+     * Render one message body with its wake tokens colored.
      * @param text - the stored message body.
      * @param names - the roster's colleague names.
      * @param woke - the names the server resolved for this body, when it reported them.
+     * @param audience - the level the server recorded for this body, when it addressed one.
      * @returns React children for the body.
      */
-    function renderMentions(text, names, woke) {
-      const spans = mentionSpans(text, names, woke)
+    function renderMentions(text, names, woke, audience) {
+      const spans = wakeSpans(text, names, woke, audience)
       if (spans.length === 0) return text
       const parts = []
       let cursor = 0
@@ -691,16 +714,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The open mention token before one caret position, when the operator is typing one.
+     * The open wake token before one caret position, when the operator is typing one.
+     *
+     * Both triggers are the same shape: `@` opens the roster, `#` opens the wake levels, and
+     * either one stops at whitespace — so `a@b` is prose rather than a trigger.
      * @param text - the composer draft.
      * @param caret - the caret offset.
-     * @returns the trigger's `@` offset and the partial name typed after it, or undefined.
+     * @returns the trigger's offset, its marker, and what was typed after it, or undefined.
      */
-    function openMention(text, caret) {
+    function openWake(text, caret) {
       for (let index = caret - 1; index >= 0; index -= 1) {
         const character = text[index]
-        if (character === '@') {
-          return index > 0 && !/\s/.test(text[index - 1]) ? undefined : { start: index, query: text.slice(index + 1, caret) }
+        if (character === '@' || character === '#') {
+          return index > 0 && !/\s/.test(text[index - 1])
+            ? undefined
+            : { start: index, marker: character, query: text.slice(index + 1, caret) }
         }
         if (/\s/.test(character)) return undefined
       }
@@ -710,20 +738,16 @@ window.__ModuleLoader__.load({
     /**
      * The public-channel composer.
      *
-     * `@` opens the roster the way the harness composer opens its own trigger menu: the arrow
-     * keys walk it, Enter or Tab accepts the highlighted name, Escape closes it, and the name
-     * stays in the draft as colored text. The wake list is derived from those same tokens, so
-     * a post wakes exactly the colleagues it names.
+     * `@` opens the roster and `#` opens the wake levels, the way the harness composer opens its
+     * own trigger menu: the arrow keys walk it, Enter or Tab accepts the highlighted entry,
+     * Escape closes it, and the token stays in the draft as colored text. The wake is derived
+     * from those same tokens, so a post wakes exactly what its body says.
      */
     function Composer(props) {
       const { officeName, channelId, colleagues, userName, onPosted } = props
       // The draft is stored per office: switching offices, leaving the page, and reloading the
       // browser all keep a post that was typed but not sent.
       const [draft, setDraft] = useStoredState(`draft:${officeName}`, '')
-      // A post notifies the whole office by default, matching `office_post`; unchecking it
-      // narrows the wake to the colleagues the body names with `@`. The choice is the
-      // operator's standing preference, so it is remembered across offices and reloads.
-      const [wakeAll, setWakeAll] = useStoredState('wakeAll', true)
       const [busy, setBusy] = useState(false)
       const [failure, setFailure] = useState(undefined)
       const [trigger, setTrigger] = useState(undefined)
@@ -732,15 +756,21 @@ window.__ModuleLoader__.load({
       const [composing, setComposing] = useState(false)
       const inputRef = useRef(null)
       const overlayRef = useRef(null)
-      /** Caret position to restore after an accepted mention rewrites the draft. */
+      /** Caret position to restore after an accepted token rewrites the draft. */
       const caretRef = useRef(undefined)
 
       const names = [...colleagues.map(colleague => colleague.name), userName]
         .filter(name => typeof name === 'string' && name.length > 0)
-      const spans = parseMentions(draft, names)
+      const spans = parseWakeTokens(draft, names)
+      const query = trigger === undefined ? '' : trigger.query.toLowerCase()
       const candidates = trigger === undefined
         ? []
-        : names.filter(name => name.toLowerCase().includes(trigger.query.toLowerCase())).slice(0, 8)
+        : trigger.marker === '#'
+          // Every level, because there are three of them: they are what a post addresses when it
+          // is not addressed to colleagues by name.
+          ? WAKE_LEVELS.filter(level => level.token.includes(query))
+          : names.filter(name => name.toLowerCase().includes(query)).slice(0, 8)
+            .map(name => ({ token: `@${name}` }))
       const highlighted = candidates.length === 0 ? 0 : Math.min(active, candidates.length - 1)
 
       useEffect(() => {
@@ -756,14 +786,14 @@ window.__ModuleLoader__.load({
         setDraft(next)
         // An input-method composition owns the text until it commits; opening the roster on a
         // half-composed name would offer candidates for a string the operator cannot see yet.
-        setTrigger(composing ? undefined : openMention(next, event.target.selectionStart ?? next.length))
+        setTrigger(composing ? undefined : openWake(next, event.target.selectionStart ?? next.length))
         setActive(0)
       }
 
-      const accept = (name) => {
+      const accept = (candidate) => {
         if (trigger === undefined) return
         const head = draft.slice(0, trigger.start)
-        const inserted = `@${name} `
+        const inserted = `${candidate.token} `
         caretRef.current = head.length + inserted.length
         setDraft(`${head}${inserted}${draft.slice(trigger.start + 1 + trigger.query.length)}`)
         setTrigger(undefined)
@@ -783,7 +813,7 @@ window.__ModuleLoader__.load({
           return
         }
         if (event.key === 'Enter' || event.key === 'Tab') {
-          // The menu owns Enter while it is open: accepting a name must not post the draft.
+          // The menu owns Enter while it is open: accepting a token must not post the draft.
           event.preventDefault()
           if (candidates.length > 0) accept(candidates[highlighted])
           else setTrigger(undefined)
@@ -801,10 +831,10 @@ window.__ModuleLoader__.load({
         if (text.length === 0 || busy) return
         setBusy(true)
         try {
-          // Only the body is sent: the server derives the audience from the names written in
-          // it and from the channel it is posted to, so what the composer colors and whom the
-          // post wakes are the same set.
-          await submitJson(withChannel(officeRoute('post', officeName), channelId), { text, mention_all: wakeAll })
+          // Only the body is sent: the server derives the wake from the tokens written in it and
+          // from the channel it is posted to, so what the composer colors and whom the post
+          // wakes are the same set.
+          await submitJson(withChannel(officeRoute('post', officeName), channelId), { text })
           setDraft('')
           setTrigger(undefined)
           setFailure(undefined)
@@ -847,27 +877,19 @@ window.__ModuleLoader__.load({
             style: { ...composerOverlay, zIndex: 1, visibility: composing ? 'hidden' : 'visible' },
             'aria-hidden': true,
           }, draft.length === 0
-            ? h('span', { style: placeholderText }, `Post to ${officeName} #${channelId} — type @ to wake a colleague`)
+            ? h('span', { style: placeholderText }, `Post to ${officeName} #${channelId} — type @ to wake a colleague, # for a level`)
             : segments),
           trigger === undefined || candidates.length === 0 ? null : h('div', { style: mentionMenu, role: 'listbox' },
-            candidates.map((name, index) => h('button', {
-              key: name,
+            candidates.map((candidate, index) => h('button', {
+              key: candidate.token,
               type: 'button',
               role: 'option',
               'aria-selected': index === highlighted,
               style: index === highlighted
                 ? { ...mentionRow, background: 'var(--dsw-alias-interactive-bg-hover)' }
                 : mentionRow,
-              onMouseDown: (event) => { event.preventDefault(); accept(name) },
-            }, name))),
-        ),
-        h('label', { style: toggle, title: 'Uncheck to wake only the colleagues the message names with @' },
-          h('input', {
-            type: 'checkbox',
-            checked: wakeAll,
-            onChange: event => setWakeAll(event.target.checked),
-          }),
-          'Wake everyone',
+              onMouseDown: (event) => { event.preventDefault(); accept(candidate) },
+            }, candidate.token, candidate.hint === undefined ? null : h('span', { style: muted }, ` · ${candidate.hint}`)))),
         ),
         h('button', { style: button, type: 'submit', disabled: busy }, busy ? 'Posting…' : 'Post'),
       )
@@ -1026,7 +1048,7 @@ window.__ModuleLoader__.load({
         ? `#${String(message.seq)} · Summary of ${String(message.covers[0])}–${String(message.covers[1])} by ${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
         : `#${String(message.seq)} · ${message.senderName} · ${new Date(message.createdAt).toLocaleString()}`
           + `${message.origin === undefined ? '' : ` · also in #${message.origin.channelId} as ${message.origin.messageId}`}`),
-      h('div', null, renderMentions(message.text, names, message.mentions)),
+      h('div', null, renderMentions(message.text, names, message.mentions, message.audience)),
       )
     }
 

@@ -100,38 +100,51 @@ colleague actually got, and the detail is why it was not the splice its sender a
 
 ## Who is woken
 
-`office_post` wakes the whole roster unless the caller narrows it:
+Every tool that writes a message takes a **required** `wake`, and nothing wakes anybody by
+default. It names colleagues, or one level, and the two spellings are never mixed:
 
 | call | audience |
 |---|---|
-| `office_post` to `#general` with no `mentions` | every colleague except the sender |
-| `office_post` to a group channel with no `mentions` | exactly that channel's members except the sender |
-| `office_post` with `mentions` | exactly the named colleagues |
-| `office_post` with `mention_all: false` | nobody; the message is written to the channel |
-| `office_post` naming the user | the named colleagues, and a copy in the mailbox |
-| `office_dm` to a colleague | that colleague alone, at the timing its `notify` asks for |
-| `office_dm` to the user | the mailbox; no session is woken, and `notify` means nothing to a user with no session |
-| the office's own idle notice | exactly the colleagues whose stored role is `leader` |
+| `office_post` with `wake: ["@alice", "@bob"]` | exactly the named colleagues, whether or not the channel holds them |
+| `office_post` with `wake: ["#leader"]` to `#general` | every colleague at the leader rung or above, except the sender |
+| `office_post` with `wake: ["#member"]` to a group channel | that channel's members among the member rung and above, except the sender |
+| `office_post` with `wake: []` | nobody; the message is written to the channel |
+| `office_post` naming the user (`"@user"`) | the other names it was given, and a copy in the mailbox |
+| `office_dm` with `wake: ["@alice"]` | that colleague alone, at the timing its `notify` asks for |
+| `office_dm` with `wake: ["@user"]` | the mailbox; no session is woken, and `notify` means nothing to a user with no session |
+| the office's own idle notice | whoever the row's `idleNotice.wake` names: `["#leader"]` unless it says otherwise |
 
-Every `office_post` row carries the same timing choice as `office_dm`: a post and a dm differ in
-who they reach, never in when a recipient that is mid-turn reads them.
+A level is the **lowest rung it may reach**: it wakes its own privilege and every rung above it, so
+`#consultant` reaches the whole office, `#member` reaches the members and the leaders, and
+`#leader` reaches the leaders alone. The rung is the session permission a role runs under, which
+is why the read-only `consultant` is the bottom one; the ladder and its table are in
+[README.md](../README.md#who-a-message-wakes).
 
-`mention_all` defaults to true when `mentions` is absent and to false when it is present, so
-naming colleagues narrows the audience rather than adding to it, and `mentions: []` posts a notice
-nobody is woken for. A session never receives its own message.
+Two rules narrow a level and never a name. A level is **scoped to the channel** it is posted to —
+the whole roster in `#general`, that channel's members in a group one — because its members decide
+who a post there wakes; naming a colleague addresses that colleague, so the channel does not
+intervene. And a session never receives its own message, whichever spelling was used.
+
+`office_dm` names exactly one colleague and refuses a level: a private message is one
+conversation, and a rung is reached with `office_post`. Every `office_post` row carries the same
+timing choice as `office_dm`: a post and a dm differ in who they reach, never in when a recipient
+that is mid-turn reads them.
 
 The office is the one sender that is not a session, and it has one message to send: when the whole
 roster has stopped and something was written since the office last asked, it posts `idleNotice.text`
-to `idleNotice.channel` and notifies the leaders alone. That is the only wake in the office no
-session asked for; [design.md](design.md) says why it exists and what stops it from repeating.
+to `idleNotice.channel`, addressed to `idleNotice.wake` — the leaders alone unless the row says
+otherwise — and it asks nothing at all when that audience would be empty. That is the only wake in
+the office no session asked for; [design.md](design.md) says why it exists and what stops it from
+repeating.
 
-The panel sends the same shape and makes the same choice: its **Wake everyone** box starts
-checked, and unchecking it narrows the wake to the names the stored body carries with `@`. The
-audience is derived from the **stored body** by the same mention rule the panel colors, so no
-client can wake a colleague the message does not name.
+The panel carries no audience of its own: it sends the body, and the office derives the wake from
+the **stored body** by the same token rule the panel colors — `@` names and `#` levels. So no
+client can wake a colleague the message does not name, and the composer has no switch to keep in
+step with the server.
 
 Waking is not the same as reading. A message nobody is notified for still sits in its channel,
-where `office_read` finds it. That is the point of the option: a notice that is not worth a turn.
+where `office_read` finds it. That is the point of the empty wake: a notice that is not worth a
+turn.
 
 ## Cold resume
 
@@ -240,8 +253,8 @@ notified about, which keeps a turn's cost proportional to the messages in it.
 
 ## The answering rule
 
-The office's tools default to waking the whole roster, and a colleague that answers every wake in
-public multiplies that default: one post wakes every colleague, each woken colleague posts an
+Any caller can address the whole office with one level, and a colleague that answers every wake in
+public multiplies that reach: one post wakes every colleague, each woken colleague posts an
 answer, and the answers wake the office again. So every frame ends with the same rule, stated
 where the choice is made — the default answer to a delivered message is silence — and a public
 message adds where an answer belongs when there is one.
@@ -266,7 +279,7 @@ that contains a direct message is framed as the public case.
 
 Two consequences follow, and both are deliberate:
 
-- **A message nobody is notified for reaches nobody's context.** A `mention_all: false` post sits
+- **A message nobody is notified for reaches nobody's context.** A post with `wake: []` sits
   in its channel until someone reads it with `office_read`.
 - **A held message waits for the turn to end.** Its sender asked for `turn-end`, is told `queued`
   rather than `delivered`, and the message is in the next turn that colleague takes. A message

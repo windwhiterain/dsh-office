@@ -1,8 +1,8 @@
 # Design
 
 Why `dsh-office` is shaped this way: the row kinds, the host/office split, the boss preset's
-mask, how the profile patch is edited, the role model, why a wake can be timed, and what the one
-message the office writes itself is for. Read this
+mask, how the profile patch is edited, the role model, who a wake reaches, why a wake can be
+timed, and what the one message the office writes itself is for. Read this
 before changing `index.js`; the storage and identity contract is in
 [data-model.md](data-model.md), and what happens when something is posted is in
 [delivery.md](delivery.md).
@@ -37,7 +37,7 @@ Overriding any office value therefore means restating `officeName`.
 | | the host | an office |
 |---|---|---|
 | how many | exactly one per process | any number |
-| config | `readLimit`, `readLimitMax`, `bossPreset`, `profilePatch` | `officeName` (required), `officeId`, `bossPreset`, `userName`, `rolePermissions`, `maxMessageChars`, `wakesEnabled` |
+| config | `readLimit`, `readLimitMax`, `bossPreset`, `profilePatch` | `officeName` (required), `officeId`, `bossPreset`, `userName`, `rolePermissions`, `maxMessageChars`, `wakesEnabled`, `idleNotice` |
 | owns | the agent tool set, the Web panel, `/dsh-office/*` | its storage domain, its roster, its channels |
 | registers tools | yes, once per agent that holds an office role | **no** |
 | registers routes | yes, one table for every office | **no** |
@@ -222,6 +222,52 @@ turn, and the refusal is invisible until the model tries. Every roster event —
 configured, dismissed — and every office mount or unmount therefore only asks the host to resync
 the affected agents; only the host installs or withdraws.
 
+## One required wake, and the ladder a level climbs
+
+Three surfaces used to answer "who hears this?" three different ways: `office_post` took
+`mentions` plus a `mention_all` flag whose default flipped depending on whether `mentions` was
+present, `office_dm` took a single `to`, the panel derived an audience from the body's `@` names
+and a **Wake everyone** checkbox, and the idle notice hardcoded the `leader` role in code. The
+audience is one question and it now has one answer: a **required** `wake` argument, on every tool
+that stores a message and in the row config of the notice. Required, not defaulted, because every
+default that was tried here was wrong — waking the whole office by omission spends a turn of every
+colleague, and waking nobody by omission hides the message from the people it was written for.
+
+`wake` names colleagues (`["@alice", "@bob"]`) or one level (`["#consultant"]`, `["#member"]`,
+`["#leader"]`), never both. Two spellings, one meaning: a **level is the lowest rung it may
+reach**, so it wakes its own privilege and every rung above it. That direction is the point. A
+level is not "the members", it is "at least the members", which is what makes it an escalation
+ladder rather than three more names for the three roles: `#consultant` therefore reaches the whole
+office.
+
+The rungs are ordered by the **session permission** a role runs under, not by its office
+capabilities, and that is the one place the two axes of the role model disagree: `member` and
+`consultant` hold exactly the same tools, while the default map runs the consultant's session
+`read-only`. The consultant is therefore the bottom rung — the least authority reaches the most
+colleagues — and `#member` stops below it. Reading the ladder off the capability table instead
+would make `#member` and `#consultant` equal, which is a ladder that cannot be climbed.
+
+Two rules narrow a level and neither narrows a name. A level is scoped to the channel it is posted
+to, because a group channel's members already decide who a post there wakes; naming a colleague is
+addressing that colleague, and the channel does not get between them. And no session is ever in its
+own audience, which the old `mention_all` path enforced and the named path did not. `office_dm`
+accepts names only: a private message is one conversation, and a rung is reached with
+`office_post`, so a level there is refused with a message that says where to go instead.
+
+`wake: []` is a decision rather than an omission — it writes the message to the record and wakes
+nobody. It replaces `mention_all: false` and `mentions: []`, which is what kept the office's own
+history from being a side effect of its notifications: a note worth storing but not worth a turn
+still needs a spelling.
+
+The panel keeps deriving its audience from the **stored body** and sends no audience of its own,
+because that invariant is what stops a client from waking a colleague the message does not address.
+It had to grow the same vocabulary to do it: `#` opens the three levels where `@` opens the roster,
+`levelsIn` resolves them by the boundary rule `mentionsIn` uses, and the **Wake everyone** checkbox
+went away rather than being kept in step with the server — a check box cannot express "at least the
+members", and a token in the body can. The message record carries the level it addressed in
+`audience`, which is how the panel colors a level token only where it actually decided the wake
+(see [data-model.md](data-model.md)).
+
 ## Group channels and the `channels` capability
 
 Beside the standing `#general` and the mailbox, the boss and the leaders can build **group**
@@ -343,8 +389,9 @@ say. The one message the office writes itself exists for a case it is otherwise 
 whole roster has stopped, and nothing in the record says what comes next. No colleague can notice
 that on its own: the ones who would notice are idle, and an idle session has no turn to notice
 anything in. `idleNotice`, off by default on every office row, is the office taking that turn for
-them: it posts one question to `idleNotice.channel`, addressed to the colleagues that hold the
-`leader` role, and asks them to decide what happens next.
+them: it posts one question to `idleNotice.channel`, addressed to `idleNotice.wake` — the colleagues
+at the `#leader` rung and above, unless the row asks somebody else — and asks them to decide what
+happens next.
 
 Three properties decide its shape.
 
@@ -354,22 +401,24 @@ Three properties decide its shape.
   turn to be in either state of. Nothing polls, so an office nothing happens in costs nothing, and
   there is no interval for a deployment to tune. The office also asks once at activation, which is
   what makes switching the feature on take effect without waiting for work that may never come.
-- **It cannot repeat on its own, and that is deliberately not configurable.** The notice wakes the
-  leaders, their turns end, and the office is idle again with the record it had before — so "ask
-  whenever everyone is idle" would ask for ever, spending a leader turn every turn-latency to be
-  told there is nothing to do. The office therefore asks only when something was written since it
-  last asked, which makes work the thing that arms the next question: a colleague's post, the
-  user's next request, a compaction, anything that lands in `messages`. What it compares is a
-  message identity rather than a timestamp, for the reason in
+- **It cannot repeat on its own, and that is deliberately not configurable.** The notice wakes its
+  audience, their turns end, and the office is idle again with the record it had before — so "ask
+  whenever everyone is idle" would ask for ever, spending a turn of every colleague it addresses
+  every turn-latency to be told there is nothing to do. The office therefore asks only when
+  something was written since it last asked, which makes work the thing that arms the next
+  question: a colleague's post, the user's next request, a compaction, anything that lands in
+  `messages`. What it compares is a message identity rather than a timestamp, for the reason in
   [data-model.md](data-model.md): the work that arms a notice and the notice itself can be written
   in the same millisecond, and a clock cannot tell those two apart — it would either repeat the
   question for work the leaders were already told about, or hide work from them for ever.
-- **It is an ordinary stored message, authored by the office.** It is written to a channel, so it is
-  in the record where `office_read` finds it and where the panel shows it, and the leaders answer it
-  the way they answer anything else. Its audience is the leaders alone, because the decision is
-  theirs and a wake costs every colleague that receives one a turn. Its sender is `office`, with no
-  session id: naming the user would read as the user speaking, and naming a colleague would
-  attribute the office's question to that colleague.
+- **It is an ordinary stored message, authored by the office, addressed like any other.** It is
+  written to a channel, so it is in the record where `office_read` finds it and where the panel
+  shows it, and its audience answers it the way they answer anything else. Its audience is the
+  row's own `wake`, so asking a different rung is a config change rather than a second mechanism;
+  a `wake` that could reach nobody is refused when the row loads, because an enabled notice nobody
+  receives asks nothing. Its sender is `office`, with no session id: naming the user would read as
+  the user speaking, and naming a colleague would attribute the office's question to that
+  colleague.
 
 Two conditions are refusals rather than defaults. `wakesEnabled: false` is a promise that no session
 is ever woken, and a question nobody is woken for is not a question, so such an office writes

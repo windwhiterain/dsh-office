@@ -111,6 +111,7 @@ feeds or a direct channel.
 | `senderName` | The sender's name at the time of writing: a session title, the short-id fallback, `userName`, or `office` for the one message the office writes itself. |
 | `senderSessionId` | The sender's session, **absent** when no session authored the message: a post from the panel, and the office's own idle notice. |
 | `recipients` | The session ids the message was addressed to. Empty on a summary or a mailbox record. |
+| `audience` | On a message addressed to a **level** only: the token it named, `#consultant`, `#member`, or `#leader`. The resolved audience is `recipients`; this is what says the post aimed at a rung rather than at names. |
 | `text` | The body. A summary's body is the text a model wrote for the range. |
 | `createdAt` | Unix milliseconds. |
 | `deliveries` | One outcome per recipient, keyed by the recipient's session id, or by `userName` for the user. Its values and statuses are in [delivery.md](delivery.md). |
@@ -241,7 +242,7 @@ their side of a conversation, so the office addresses them by name instead:
 | | |
 |---|---|
 | name | `config.userName`, default `user`, any script. Canonicalized by the same rules as a colleague name. |
-| matched | Case-insensitively against `config.userName` wherever a name is resolved: `office_dm({ to })`, `mentions`, and `office_read`'s `sender` and `mentions` filters. |
+| matched | Case-insensitively against `config.userName` wherever a name is resolved: `office_dm({ wake })`, `office_post`'s `wake`, and `office_read`'s `sender` and `mentions` filters. |
 | without a session | A message the user posts from the panel is stored with `senderSessionId` absent, which is how the `sender` filter and the panel recognize it. |
 | mail | The `mailbox` channel: what `office_dm` to the user writes, and where a public post that named the user is copied. |
 

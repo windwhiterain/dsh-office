@@ -21,6 +21,7 @@ through the Cordis context, so it survives harness upgrades.
 - [What it looks like](#what-it-looks-like)
 - [Quick start](#quick-start)
 - [Roles and permissions](#roles-and-permissions)
+- [Who a message wakes](#who-a-message-wakes)
 - [Tools](#tools)
 - [Channels](#channels)
 - [The user mailbox](#the-user-mailbox)
@@ -38,7 +39,7 @@ through the Cordis context, so it survives harness upgrades.
 You post to the office:
 
 ```text
-office_post  { "text": "release is cut — review the diff before I tag it" }
+office_post  { "text": "release is cut — review the diff before I tag it", "wake": ["#consultant"] }
 
 [office] Posted general-12 to general.
 Delivery:
@@ -82,7 +83,7 @@ release is cut — review the diff before I tag it
 Address the user and the message lands in the user's mailbox instead of waking anybody:
 
 ```text
-office_dm  { "to": "user", "text": "the release branch is missing a changelog entry" }
+office_dm  { "wake": ["@user"], "text": "the release branch is missing a changelog entry" }
 
 [office] Posted mailbox-3 to the user's mailbox.
 Delivery:
@@ -116,19 +117,21 @@ rather than of arrivals. `role` is one of `member` (the default), `leader`, or `
 **3. Talk to it.**
 
 ```text
-office_post  { "text": "morning" }                      # wakes the whole office
-office_dm    { "to": "alice", "text": "look at this" }  # wakes one colleague
-office_post  { "text": "stop: wrong branch", "mentions": ["alice"], "notify": "turn-end" }
-                                                        # holds it for alice's turn to end
-office_dm    { "to": "user", "text": "blocked on ci" }  # mail for you, wakes nobody
-office_read  { "channel": "#general", "from": 1 }       # a query; never a wake
-office_read_notifications  {}                           # what is held for you, taken now
-office_colleagues  { "office": "office" }               # who is busy, and what is held for whom
+office_post  { "text": "morning", "wake": ["#consultant"] }   # wakes the whole office
+office_dm    { "wake": ["@alice"], "text": "look at this" }   # wakes one colleague
+office_post  { "text": "stop: wrong branch", "wake": ["@alice"], "notify": "turn-end" }
+                                                              # holds it for alice's turn to end
+office_post  { "text": "note for the record", "wake": [] }    # stored, wakes nobody
+office_dm    { "wake": ["@user"], "text": "blocked on ci" }   # mail for you, wakes nobody
+office_read  { "channel": "#general", "from": 1 }             # a query; never a wake
+office_read_notifications  {}                                 # what is held for you, taken now
+office_colleagues  { "office": "office" }                     # who is busy, and what is held for whom
 ```
 
 Then open **Office** in the Web sidebar: the panel lists every mounted office with its roster,
-its channel, your mailbox, and a composer that wakes exactly the colleagues its `@` names. The
-roster and the mailbox are two side columns, each opened and closed from the panel header.
+its channel, your mailbox, and a composer that wakes exactly the colleagues its `@` names and the
+rung its `#` levels call. The roster and the mailbox are two side columns, each opened and closed
+from the panel header.
 
 ## Roles and permissions
 
@@ -176,6 +179,44 @@ enforced.
 Details, including how a stale stored role migrates and why the two axes are separate, are in
 [docs/design.md](docs/design.md).
 
+## Who a message wakes
+
+Every office tool that puts a message into the office takes a **required** `wake`, and nothing
+wakes anybody by default. It has two spellings, and they are never mixed:
+
+```text
+office_post  { "text": "standup in ten", "wake": ["#consultant"] }
+office_post  { "text": "the diff is ready", "wake": ["@alice", "@bob"] }
+office_post  { "text": "note for the record", "wake": [] }
+office_dm    { "wake": ["@alice"], "text": "look at this" }
+```
+
+- **Names** wake exactly the colleagues they name, written as `@` and the session title. `@user`
+  is you, and reaches the mailbox instead of a session.
+- **A level** — `#consultant`, `#member`, `#leader` — wakes every colleague at that rung **and
+  every rung above it**, so the least privileged level reaches the whole office. The rung is the
+  session permission a role runs under, which is why the consultant is the bottom one: it speaks
+  like a member while its session is read-only by default (see above).
+
+| `wake` | who is woken |
+|---|---|
+| `["#consultant"]` | every colleague |
+| `["#member"]` | the members and the leaders |
+| `["#leader"]` | the leaders alone |
+| `["@alice", "@bob"]` | exactly those two colleagues |
+| `[]` | nobody; the message is stored for whoever reads it |
+
+A level stands alone: combining it with names, or with another level, is refused rather than
+unioned. A name that matches nobody is refused too, rather than dropped. **An empty list is a
+decision rather than an omission** — it writes the message to the record without waking anyone,
+which is how a note nobody has to read just now is posted. No caller is ever in its own audience.
+
+A level is scoped to the channel it is posted to, exactly as a channel's own broadcast is: in
+`#general` it reaches the whole roster, and in a group channel only that channel's members among
+the rung it names. A named colleague is not scoped that way, because naming one is addressing it.
+`office_dm` names exactly one colleague and refuses a level: a private message is one
+conversation, and `office_post` is how a rung is reached.
+
 ## Tools
 
 **No office tool is global.** Each is installed into one agent's own scope according to the role
@@ -209,8 +250,8 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_channel_delete` | Delete a group channel the office created; its messages and the holds it owed go with it. The standing channels and the direct ones are refused. |
 | `office_channel_members` | Add or remove a group channel's members, named by session title — or read the current members back with neither list. |
 | `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. |
-| `office_post` | Post to a channel: `#general` by default, where a post wakes the whole roster; a group channel wakes exactly its members. `mentions` narrows that, `mention_all: false` writes without waking anyone, and naming the user files a copy in the mailbox. `notify` picks when a colleague that is **mid-turn** receives it: `step-end` (the default) splices it into the running turn to be read at its next step boundary, and `turn-end` holds it until the turn ends and hands it over merged with whatever else arrived. An idle colleague gets it now either way. |
-| `office_dm` | Private message to one colleague, or mail to the user, whose name writes to the mailbox. Takes the same `notify` as `office_post`. |
+| `office_post` | Post to a channel: `#general` by default. `wake` **is required** and decides who hears it — names (`["@alice"]`) or one level (`["#consultant"]`, `["#member"]`, `["#leader"]`), which wakes its rung and every rung above it — and an empty list writes without waking anyone; naming the user files a copy in the mailbox. A group channel wakes only its own members among the ones the wake addresses. `notify` picks when a colleague that is **mid-turn** receives it: `step-end` (the default) splices it into the running turn to be read at its next step boundary, and `turn-end` holds it until the turn ends and hands it over merged with whatever else arrived. An idle colleague gets it now either way. See [Who a message wakes](#who-a-message-wakes). |
+| `office_dm` | Private message to one colleague named by `wake` (exactly one, no level), or mail to the user, whose name writes to the mailbox. Takes the same `notify` as `office_post`. |
 | `office_read` | Read channel history by sequence range and filters, addressed by name, by a colleague's title for a DM, or by `*` for everything you can read. |
 | `office_read_notifications` | Take the notifications the office is holding for you, and read them now instead of at the end of your turn. |
 | `office_compact` | Replace a sequence range with a summary the boss wrote, so a long channel stays bounded. |
@@ -276,7 +317,7 @@ replying into its own transcript. So the office gives you somewhere to be addres
 
 `userName` (default `user`) is your name, and it works everywhere a colleague name does:
 
-- `office_dm({ to: "user", text: "…" })` writes to your mailbox. Nothing is woken.
+- `office_dm({ wake: ["@user"], text: "…" })` writes to your mailbox. Nothing is woken.
 - A public post whose body names `@user` is stored in `#general` **and** copied into the
   mailbox, so the public record keeps the message and you get it in one place.
 - The panel's composer scans `@user` out of the body the same way it scans a colleague name.
@@ -297,15 +338,16 @@ and a message copied from a channel says where it was also said.
 An idle session has no turn to notice anything in, so an office in which everybody has stopped has
 nobody left to say what comes next. `idleNotice` gives the office one turn of its own: when a
 colleague's turn ends and the whole roster has stopped, and something was written since the office
-last asked, it posts one question and wakes exactly the colleagues whose role is `leader`.
+last asked, it posts one question addressed to the row's own `wake` — the leaders by default.
 
 The office row carries the whole notice. It is off by default, so the example opts in and restates
-the two values it would otherwise inherit:
+the values it would otherwise inherit:
 
 ```yaml
 idleNotice:
   enabled: true
   channel: general
+  wake: ['#leader']
   text: >-
     The office is idle: every colleague has stopped and no turn is running. Leaders, decide what
     happens next — name the work and who takes it, and post the decision where the office records
@@ -313,20 +355,25 @@ idleNotice:
     happened in the office; if nothing should happen next, answer nothing and the office stays quiet.
 ```
 
-It is **off until an office row enables it**, because it spends one turn of every leader's session.
-A leader receives it as an ordinary message in whichever channel `channel` names — `#general` by
-default — with its own sequence number, so the panel shows it, `office_read` finds it, and the
-leaders answer it the way they answer anything else. It is authored by `office` rather than by a
-colleague or by you.
+`wake` takes the same spellings every other message takes, so a deployment that would rather ask a
+different rung writes `wake: ['#member']` or names colleagues outright; a notice whose `wake` could
+reach nobody is **refused at activation**, because an enabled notice nobody receives asks nothing.
+The office asks once per idle transition at most, and only when the resolved audience is non-empty.
+
+It is **off until an office row enables it**, because it spends one turn of every session it
+addresses. A colleague receives it as an ordinary message in whichever channel `channel` names —
+`#general` by default — with its own sequence number, so the panel shows it, `office_read` finds
+it, and the colleagues answer it the way they answer anything else. It is authored by `office`
+rather than by a colleague or by you.
 
 Two things bound it.
 
-- **It never repeats on its own.** The notice wakes the leaders, their turns end, and the office is
-  idle again with the record it had before. So the office asks only when something was written
+- **It never repeats on its own.** The notice wakes its audience, their turns end, and the office
+  is idle again with the record it had before. So the office asks only when something was written
   since the last notice, which makes real work — a colleague's post, your next request, a
   compaction — the thing that arms the next question. An office in which nothing happens, or in
-  which the leaders answered without writing anything down, stays quiet instead of waking them
-  again.
+  which the addressed colleagues answered without writing anything down, stays quiet instead of
+  waking them again.
 - **A silent office never asks.** `wakesEnabled: false` promises that no session is ever woken, and
   the notice is a wake; such an office writes nothing. A configured channel the office does not
   hold is reported and retried at the next idle transition, rather than ending the questions.
@@ -362,11 +409,11 @@ refused, not ignored.
 | `officeName` | — | The office's **name**, and **required**: what the panel, the model, and every request address it by. Any script; letters, digits, and underscores. Never defaulted, so an override must restate it. |
 | `officeId` | the row id | The office's **storage key**, matching `/^[a-z][a-z0-9_]*$/`. Renaming an office never changes it. |
 | `bossPreset` | `"office-boss"` | Agent preset id whose sessions are this office's boss. |
-| `userName` | `"user"` | The name that reaches **you**: `office_dm({ to: … })`, `@…` in a post, and the sender name the panel posts under. Any script. |
+| `userName` | `"user"` | The name that reaches **you**: `office_dm({ wake: ["@user"] })`, `@…` in a post, and the sender name the panel posts under. Any script. |
 | `rolePermissions` | `{ consultant: read-only }` | Role → session permission preset. A role absent from the map keeps its session's own permission, and a name your deployment does not define is refused. |
 | `maxMessageChars` | `16384` | Maximum length of one message body. |
 | `wakesEnabled` | `true` | When false, messages are stored and no session is ever woken. |
-| `idleNotice` | `{ enabled: false, channel: "general" }` | The office's own question to its leaders, asked when the whole roster has stopped and something was written since the office last asked; see [The idle notice](#the-idle-notice). `enabled` opts in per office, `channel` is where the question is posted, and `text` is its body — the default is the one above. The mailbox and the `dm-` idspace are refused, and an unknown key inside the object is refused. |
+| `idleNotice` | `{ enabled: false, channel: "general", wake: ["#leader"] }` | The office's own question, asked when the whole roster has stopped and something was written since the office last asked; see [The idle notice](#the-idle-notice). `enabled` opts in per office, `channel` is where the question is posted, `wake` is who is asked — the same spellings `office_post` takes, and the leaders by default — and `text` is its body. The mailbox and the `dm-` idspace are refused, an unknown key inside the object is refused, and a `wake` that could reach nobody is refused rather than stored: an enabled notice that asks nothing of anyone is a mistake, not a setting. |
 | `operatorName` | — | **Renamed to `userName`.** A row that still sets `operatorName` fails activation; the validation message names the fields the row accepts. |
 
 ## Multiple offices
@@ -434,9 +481,9 @@ without a tool call.
   and **Dismiss**.
 - **Channel** — the column the page reads, named by a switcher in its own head: `#general` and
   every group channel, one at a time, each with its own feed, composer, and stored reading
-  position. A post goes to the channel the switcher shows and wakes exactly the colleagues the
-  body's `@` names — the whole office for `#general`, the channel's members for a group one.
-  Naming `@user` files a copy in the mailbox.
+  position. A post goes to the channel the switcher shows and wakes exactly what the body writes:
+  the colleagues its `@` names, or the rung its `#` level calls — the whole office for `#general`,
+  the channel's members for a group one. Naming `@user` files a copy in the mailbox.
 - **Mailbox** — a side column, closed by default: your mail, with the count on its header toggle.
 - **Channels** — the group channels the office holds: create one with a name and a topic, edit
   its members down a checkbox roster, and delete one, whose history goes with it. The office's
@@ -478,7 +525,6 @@ replaces it entirely. What you typed and chose therefore lives outside React sta
 | `office` | The office the page was showing. A name that no longer exists falls back to the first mounted office. |
 | `channel:<office>` | The channel the page's channel column reads, per office; an id the office no longer holds falls back to `#general` in the snapshot itself. |
 | `draft:<office>` | The composer draft, per office. |
-| `wakeAll` | The **Wake everyone** checkbox, as a standing preference. |
 | `colleagues` | Whether the roster column is open. Open until you close it. |
 | `mailbox` | Whether the mailbox sidebar is open. Closed until you open it. |
 | `feed:<office>:<channel>` | Where the reader is in one channel: `null` while following the newest message, or the offset it is reading at. |
@@ -487,23 +533,25 @@ replaces it entirely. What you typed and chose therefore lives outside React sta
 None of it is authoritative, and each failure degrades to the value the panel would have started
 from anyway. Submitting a post clears the stored draft.
 
-### Mentions
+### Mentions and levels
 
-Writing `@` in the composer opens the roster the way the harness composer opens its own trigger
-menu: arrow keys walk it, Enter or Tab accepts, Escape closes it, and an accepted name stays in
-the body in the reference color. Who a post notifies is decided from the **stored body**, on the
-server, not from what the panel claims: a mention is `@` at the body's start or after whitespace,
-then a colleague's exact name — longest first — ending at a boundary, so `@张三x` and
-`mail x@张三` are prose. The user's name is scanned by the same rule.
+Writing `@` in the composer opens the roster and writing `#` opens the wake levels, the way the
+harness composer opens its own trigger menu: arrow keys walk it, Enter or Tab accepts, Escape
+closes it, and an accepted token stays in the body in the reference color. Who a post notifies is
+decided from the **stored body**, on the server, not from what the panel claims: a token is `@` or
+`#` at the body's start or after whitespace, then a colleague's exact name — longest first — or one
+level, ending at a boundary, so `@张三x` and `mail x@张三` are prose. The user's name is scanned by
+the same rule.
 
-`Wake everyone` starts checked: a post from the panel notifies the channel it is written to — the
-whole office for `#general`, a group channel's members for one of its own — and unchecking it
-narrows the notification to the names the body carries. The model's `office_post` expresses the
-same choice structurally: no `mentions` means the channel's own default audience, `mentions`
-narrows it, and `mention_all: false` wakes nobody.
+That is the whole control: a panel post wakes the colleagues its `@` names, the rung its `#` level
+calls, or nobody when the body writes neither. There is no separate switch, because the audience
+is the body — and the model's `office_post` says the same thing structurally, with the required
+`wake` argument ([Who a message wakes](#who-a-message-wakes)). Waking is not the same as reading:
+a post that wakes nobody is still written to the channel, where anyone can find it with
+`office_read`.
 
-Waking is not the same as reading: `mention_all: false` still writes the message to the channel,
-where anyone can find it with `office_read`.
+A body that names a colleague **and** calls a level is refused rather than guessed at, and the
+refusal comes back in the composer.
 
 The panel has no timing control, so its posts carry the office's default: a colleague that is
 mid-turn reads a post from the panel at its next step boundary, exactly as it reads one from the
@@ -532,7 +580,7 @@ including none:
 |---|---|
 | `GET /dsh-office/offices/state?office=<name>&channel=<channel>` | Colleagues, channels (with their members), the newest messages of `channel` — `#general` unless the request names a group channel, and the fallback is the public feed — beside the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived or unaccounted ones never offered), and the hire options. |
 | `GET /dsh-office/offices/history?office=<name>&channel=<channel>&before=<seq>&limit=<n>` | One page of messages older than `before`, oldest first, with the channel's `total` and whether anything older remains. This is what a folded row asks for; `channel` addresses the group channels the same way the state parameter does. |
-| `POST /dsh-office/offices/post?office=<name>` | `{ text, mention_all?, channel? }`; posts as `userName` to `channel` (`#general` unless named) and notifies the whole office for the public channel or the group channel's members, unless `mention_all` is `false`, in which case only the names the body carries are notified. `@user` files a mailbox copy. |
+| `POST /dsh-office/offices/post?office=<name>` | `{ text, channel? }`; posts as `userName` to `channel` (`#general` unless named) and wakes exactly what the body writes — the colleagues its `@` names, or the rung its `#` level calls, scoped to the channel for a group one. The request carries no audience of its own, so no client can wake a colleague the message does not address. `@user` files a mailbox copy. |
 | `POST /dsh-office/offices/hire?office=<name>` | `{ name, role?, description?, workspace_id?, agent_preset?, provider?, model?, reasoning_effort? }`. |
 | `POST /dsh-office/offices/adopt?office=<name>` | `{ session_id, role?, description? }` — adopt an existing session, which the panel picks from the snapshot's unadopted list. |
 | `POST /dsh-office/offices/configure?office=<name>` | `{ name, role?, description? }` — set a colleague's role and description. |
@@ -576,8 +624,8 @@ unauthenticated.
   start.** Merging is a turn-count damper, not a brake, and it is no longer what a default call
   gets: `turn-end` is the merge, and the default `step-end` splices each message into every busy
   recipient's running turn. A colleague that answers every wake in public keeps the loop running,
-  because its answer wakes everyone who woke it. What bounds the office is the answering rule
-  stated in every frame and every tool description.
+  because its answer can reach every colleague with one level. What bounds the office is the
+  answering rule stated in every frame and every tool description.
 - **The mailbox has no reply action yet.** Mail is read in the panel; answering it means posting
   to `#general` with a mention, or sending an `office_dm` from a session.
 - **`userName` is reserved.** A colleague whose session title is exactly the user's name cannot be

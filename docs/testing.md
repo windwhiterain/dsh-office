@@ -25,6 +25,13 @@ What it covers, by area:
   per-call capability check that narrows it, a role change withdrawing tools from the live
   session, the `rolePermissions` map and its fail-closed refusal, and the migration of a stored
   role that is no longer predefined.
+- **The wake** — the required `wake` argument and its two spellings: each level reaching its own
+  rung and every rung above it, a named wake staying exactly the colleagues it names, the sender
+  never woken by its own post, an empty list waking nobody, and the refusals: an omitted or
+  non-array `wake`, a name without its `@`, a level nobody predefined, a level combined with
+  anything else, and a name that matches no session title. `office_dm` naming exactly one colleague
+  and refusing a level, and the panel route deriving the same tokens from the body it stores are
+  covered beside it.
 - **Delivery** — the default timing steering a post and a dm into a running turn and the refusal of
   an unknown timing, `turn-end` merging a burst into one turn, a durable hold surviving a simulated
   restart, cold resume on the route the session last logged, delivery statuses, and the frames,
@@ -46,12 +53,12 @@ What it covers, by area:
   audience a post to a group channel wakes, membership edits, the panel routes that mirror them,
   and a deletion taking its messages and its holds with it.
 - **The idle notice** — the office asking its leaders once the last colleague stops, the audience it
-  wakes (the leaders alone, never a member), the brake: a second idle transition with nothing new
-  written sends nothing, and any new message re-arms it; a colleague that is still working, an
-  office with no leader, a session outside the roster going idle, `wakesEnabled: false`, a
-  configured channel the office does not hold being reported rather than swallowed, the record of
-  the last notice surviving a restart, and the row validation that refuses a notice it could never
-  send.
+  wakes (the row's `wake`: the leaders alone by default, and the rung it configures otherwise), the
+  brake: a second idle transition with nothing new written sends nothing, and any new message
+  re-arms it; a colleague that is still working, an office whose `wake` reaches nobody, a session
+  outside the roster going idle, `wakesEnabled: false`, a configured channel the office does not
+  hold being reported rather than swallowed, the record of the last notice surviving a restart, and
+  the row validation that refuses a notice it could never send.
 - **The panel routes** — the state snapshot (roster, roles, mailbox, totals, the channel the feed
   asked for), the history page a folded row asks for, hire, configure, dismiss, and the connection
   policy each one applies.

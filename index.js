@@ -96,6 +96,27 @@ const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interr
 /** Role a colleague holds when its stored role is absent or no longer predefined. */
 const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
 
+/**
+ * The ladder a `#` wake level climbs.
+ *
+ * A level addresses its own rung and every rung above it, so the lowest-privilege level reaches
+ * the whole office: `#consultant` wakes everybody, `#member` wakes the members and the leaders,
+ * and `#leader` wakes the leaders alone. The rung is the authority a role's session runs under,
+ * which is why the consultant sits below the member even though the two hold the same office
+ * tools — a consultant session is read-only by default; see {@link DEFAULT_ROLE_PERMISSIONS}.
+ */
+const ROLE_PRIVILEGE = {
+  [ROLE_CONSULTANT]: 1,
+  [ROLE_MEMBER]: 2,
+  [ROLE_LEADER]: 3,
+}
+
+/** The levels a `#` wake token may name, lowest rung first. */
+const WAKE_LEVELS = [ROLE_CONSULTANT, ROLE_MEMBER, ROLE_LEADER]
+
+/** The `#` spellings of {@link WAKE_LEVELS}, as a caller writes them. */
+const WAKE_LEVEL_TOKENS = WAKE_LEVELS.map(level => `#${level}`)
+
 /** Longest description one colleague may carry. It reaches the roster, the greeting, and the panel. */
 const DESCRIPTION_MAX_CHARS = 2000
 
@@ -160,6 +181,7 @@ const OFFICE_SENDER_NAME = 'office'
 const DEFAULT_IDLE_NOTICE = {
   enabled: false,
   channel: GENERAL_CHANNEL,
+  wake: ['#leader'],
   text: 'The office is idle: every colleague has stopped and no turn is running. Leaders, decide '
     + 'what happens next — name the work and who takes it, and post the decision where the office '
     + 'records it, so the colleagues it concerns are woken. This notice arrives only when something '
@@ -440,7 +462,7 @@ let officeHost
  */
 const officeToolInstalls = new Map()
 
-/** What may not follow a mentioned name: a longer word is prose, not a mention. */
+/** What may not follow a mentioned name or a wake level: a longer word is prose, not a token. */
 const MENTION_BOUNDARY_RE = /[\p{L}\p{N}_]/u
 
 /**
@@ -471,6 +493,117 @@ function mentionsIn(text, names) {
     index += name.length
   }
   return found
+}
+
+/**
+ * Resolve the `#` wake levels one message addresses in its text.
+ *
+ * A level token has the shape a mention has — a trigger at the message start or after whitespace,
+ * the level's exact name, and a boundary — so a body posted from the panel derives its audience
+ * the same way whichever kind of token it carries. `#general` is a channel, not a level, and no
+ * level is a prefix of another, so the two spellings never resolve into each other.
+ * @param text - the message body.
+ * @returns the levels the text addresses, in the order they appear, without duplicates.
+ */
+function levelsIn(text) {
+  const found = []
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '#') continue
+    if (index > 0 && !/\s/.test(text[index - 1])) continue
+    const rest = text.slice(index + 1)
+    const level = WAKE_LEVELS.find(candidate => rest.toLowerCase().startsWith(candidate)
+      && (rest.length === candidate.length || !MENTION_BOUNDARY_RE.test(rest[candidate.length])))
+    if (level === undefined) continue
+    if (!found.includes(level)) found.push(level)
+    index += level.length
+  }
+  return found
+}
+
+/**
+ * The wake tokens one message body carries.
+ *
+ * The panel sends the body alone and the office derives the audience from it, so this is the one
+ * place where what was written becomes what a `wake` argument would have said.
+ * @param text - the message body.
+ * @param names - the roster's colleague names, plus the user's name.
+ * @returns the tokens, names first, as `wake` spells them.
+ */
+function wakeTokensIn(text, names) {
+  return [
+    ...mentionsIn(text, names).map(name => `@${name}`),
+    ...levelsIn(text).map(level => `#${level}`),
+  ]
+}
+
+/**
+ * Parse one `wake` argument into the audience it asks for.
+ *
+ * A wake is either the colleagues it names — `@alice`, `@bob` — or exactly one level,
+ * {@link WAKE_LEVEL_TOKENS}; the two spellings are never mixed, because a level already decides
+ * the whole audience. An empty list is the caller stating that nobody is woken, which is a
+ * decision rather than an omission: `wake` is required precisely so that no message wakes the
+ * office by default.
+ * @param value - the caller's wake argument: a tool call, a request body, or a row's config.
+ * @param tool - the name a refusal is prefixed with: a registered tool, or a config key.
+ * @returns the level the argument names, if any, and the colleague names it lists.
+ * @throws {TypeError} when the argument is absent, is not an array, or names something unusable.
+ */
+function parseWake(value, tool) {
+  const spelled = WAKE_LEVEL_TOKENS.join(', ')
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      `${tool}: wake is required and must be an array of "@name" entries or one level (${spelled}), `
+      + `got ${JSON.stringify(value)}`,
+    )
+  }
+  let level
+  const names = []
+  for (const raw of value) {
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      throw new TypeError(`${tool}: every wake entry must be a non-empty string, got ${JSON.stringify(raw)}`)
+    }
+    const token = raw.trim()
+    if (token.startsWith('#')) {
+      const candidate = token.slice(1).toLowerCase()
+      if (!WAKE_LEVELS.includes(candidate)) {
+        throw new TypeError(`${tool}: "${token}" is not a wake level; wake takes ${spelled}`)
+      }
+      if (value.length > 1) {
+        throw new TypeError(
+          `${tool}: a level stands alone, because it already decides the whole audience; "${token}" `
+          + `cannot be combined with the other ${String(value.length - 1)} wake entries`,
+        )
+      }
+      level = candidate
+      continue
+    }
+    if (!token.startsWith('@') || token.length === 1) {
+      throw new TypeError(`${tool}: wake addresses colleagues as "@name" and levels as ${spelled}, got ${JSON.stringify(token)}`)
+    }
+    names.push(token.slice(1))
+  }
+  return { level, names }
+}
+
+/**
+ * The colleagues one wake level addresses.
+ *
+ * The level is the lowest rung it may reach, so it wakes its own privilege and every rung above
+ * it. Two colleagues never receive it: the sender, because a session is not woken by its own
+ * message, and — in a group channel — everyone the channel does not hold, because its members
+ * decide who a post there wakes.
+ * @param roster - the office's colleagues.
+ * @param level - a level of {@link WAKE_LEVELS}.
+ * @param members - the channel's member session ids, or undefined for the standing public channel.
+ * @param senderSessionId - the sending session.
+ * @returns the colleagues to wake, in roster order.
+ */
+function levelAudience(roster, level, members, senderSessionId) {
+  const floor = ROLE_PRIVILEGE[level]
+  return roster.filter(colleague => ROLE_PRIVILEGE[canonicalRole(colleague.role)] >= floor
+    && (members === undefined || members.includes(colleague.sessionId))
+    && colleague.sessionId !== senderSessionId)
 }
 
 /**
@@ -609,7 +742,23 @@ function resolveRowConfig(raw, defaults, label, rowId) {
   if (typeof notice.text !== 'string' || notice.text.trim().length === 0) {
     throw new TypeError('dsh-office: config.idleNotice.text must be a non-empty message body')
   }
-  config.idleNotice = { enabled: notice.enabled, channel: noticeChannel, text: notice.text.trim() }
+  // The notice's audience is validated here and resolved at every idle transition, because who a
+  // level reaches follows from the roster of the moment, not from the row.
+  const noticeWake = parseWake(notice.wake, 'config.idleNotice.wake')
+  if (noticeWake.level === undefined && noticeWake.names.length === 0) {
+    throw new TypeError(
+      'dsh-office: config.idleNotice.wake must address somebody; an enabled notice that wakes '
+      + 'nobody would ask nothing of anyone',
+    )
+  }
+  config.idleNotice = {
+    enabled: notice.enabled,
+    channel: noticeChannel,
+    wake: noticeWake.level === undefined
+      ? noticeWake.names.map(colleagueName => `@${colleagueName}`)
+      : [`#${noticeWake.level}`],
+    text: notice.text.trim(),
+  }
   return config
 }
 
@@ -1717,13 +1866,13 @@ function createOffice(ctx, domain, config, hooks) {
    *
    * A name the office cannot resolve is refused rather than dropped: a wake nobody receives is
    * worse than a call that fails, and the user's name is a recipient like any other.
-   * @param names - the caller's names, from `mentions` or `to`.
+   * @param names - the colleague names a parsed wake listed.
    * @param tool - the registered tool name, prefixed onto a refusal.
    * @returns the resolved colleagues, and whether the user was addressed.
    */
   const resolveRecipients = async (names, tool) => {
     const list = names ?? []
-    if (!Array.isArray(list)) throw new TypeError(`${tool}: mentions must be an array of colleague names`)
+    if (!Array.isArray(list)) throw new TypeError(`${tool}: the wake names must be an array`)
     const colleagues = []
     let toUser = false
     for (const raw of list) {
@@ -1735,12 +1884,31 @@ function createOffice(ctx, domain, config, hooks) {
       const colleague = await colleagueByName(raw)
       if (colleague === undefined) {
         throw new Error(
-          `${tool}: "${raw}" does not match any colleague's session title or the user "${config.userName}"`,
+          `${tool}: "@${raw}" does not match any colleague's session title or the user "${config.userName}"`,
         )
       }
       if (!colleagues.some(entry => entry.sessionId === colleague.sessionId)) colleagues.push(colleague)
     }
     return { colleagues, toUser }
+  }
+
+  /**
+   * Resolve one `wake` argument into the audience it addresses.
+   *
+   * A level is returned unresolved: who it reaches follows from the roster and from the channel
+   * the message is written to, which is what {@link post} already reads, so resolving it here
+   * would be a second answer to the same question. The names are resolved now, because a name
+   * that matches nobody is a refusal rather than a wake nobody receives.
+   * @param value - the caller's wake argument.
+   * @param tool - the registered tool name, prefixed onto a refusal.
+   * @returns the level, when the argument named one, the resolved colleagues, and whether the
+   *   user was addressed.
+   */
+  const resolveWake = async (value, tool) => {
+    const { level, names } = parseWake(value, tool)
+    if (level !== undefined) return { level, colleagues: [], toUser: false }
+    const { colleagues, toUser } = await resolveRecipients(names, tool)
+    return { level: undefined, colleagues, toUser }
   }
 
   /**
@@ -1793,9 +1961,10 @@ function createOffice(ctx, domain, config, hooks) {
    * A message that also addresses the user is copied into the user mailbox. The public record is
    * written first and the copy second, so the office's own history never depends on the mailbox
    * being writable, and a failure to copy is reported instead of losing the message.
-   * @param request - the destination, the sender identity, the body, the named recipients, and
-   *   when those recipients should receive it if they are mid-turn. `notify` is ignored for a
-   *   message that only addresses the user: the user has no session to steer.
+   * @param request - the destination, the sender identity, the body, the audience the caller's
+   *   wake resolved to, and when those recipients should receive it if they are mid-turn.
+   *   `notify` is ignored for a message that only addresses the user: the user has no session to
+   *   steer.
    * @returns the stored message and one delivery outcome per recipient.
    */
   const post = async ({
@@ -1804,7 +1973,7 @@ function createOffice(ctx, domain, config, hooks) {
     text,
     recipients,
     kind,
-    mentionAll,
+    wakeLevel,
     toUser = false,
     notify = DEFAULT_NOTIFY,
   }) => {
@@ -1831,17 +2000,21 @@ function createOffice(ctx, domain, config, hooks) {
         throw new Error(`dsh-office: unknown channel "${channelId}"; it is not a channel of office "${name()}"`)
       }
     }
-    // A broadcast addresses every other member of the channel it is written to: the whole
-    // roster for the standing public channel — which records no members of its own — and
-    // exactly the subscribed colleagues for a group one. Either way a session never
-    // receives its own message.
+    // A named wake addresses exactly the colleagues it names; a level addresses every colleague
+    // at its rung or above, scoped to the channel the message is written to — the whole roster
+    // for the standing public channel, which records no members of its own, and exactly the
+    // subscribed colleagues for a group one. Either way a session never receives its own message.
     const roster = await listColleagues()
-    const audience = mentionAll === true
-      ? (channelId === undefined || channelId === GENERAL_CHANNEL
-        ? roster
-        : roster.filter(colleague => validateChannel(channelRecord).members.includes(colleague.sessionId))
-      ).filter(colleague => colleague.sessionId !== sender.sessionId)
-      : recipients
+    const audience = wakeLevel === undefined
+      ? recipients
+      : levelAudience(
+        roster,
+        wakeLevel,
+        channelId === undefined || channelId === GENERAL_CHANNEL
+          ? undefined
+          : validateChannel(channelRecord).members,
+        sender.sessionId,
+      )
     if (kind === 'dm' && audience[0] === undefined) {
       throw new Error('dsh-office: a direct message needs exactly one recipient colleague')
     }
@@ -1863,6 +2036,9 @@ function createOffice(ctx, domain, config, hooks) {
       senderName: sender.name,
       senderSessionId: sender.sessionId,
       recipients: audience.map(colleague => colleague.sessionId),
+      // The level a post addressed, when it addressed one: the audience itself is stored as
+      // session ids, and this is what says the post was aimed at a rung rather than at names.
+      ...(wakeLevel === undefined ? {} : { audience: `#${wakeLevel}` }),
       text,
       createdAt: Date.now(),
       deliveries: {},
@@ -2122,18 +2298,19 @@ function createOffice(ctx, domain, config, hooks) {
    * waiting for work that may never come.
    *
    * Three conditions must hold together, and each of them is a fact about the office rather than
-   * a preference: nobody is mid-turn, at least one colleague holds the leader role, and something
-   * was written since the last notice. The last one is what bounds the feature — the notice wakes
-   * the leaders, their turns end, and the office is idle again; without it the office would wake
+   * a preference: nobody is mid-turn, the row's wake would reach somebody, and something was
+   * written since the last notice. The last one is what bounds the feature — the notice wakes
+   * its audience, their turns end, and the office is idle again; without it the office would wake
    * them once more, for ever, having learned nothing in between. The notice is therefore a
    * question asked *after* something happened, never a heartbeat.
    *
-   * The notice is a message in a channel rather than a private word to each leader, because the
-   * leaders are meant to decide together and the office's record is where a decision belongs. It
-   * is addressed to the leaders by name, so only they are woken, and it is authored by the office
-   * itself, which no colleague's name or the user's name would describe.
+   * The notice is a message in a channel rather than a private word to each colleague, because
+   * the audience is meant to decide together and the office's record is where a decision belongs.
+   * It carries the row's own wake, which is `#leader` by default, so only those colleagues are
+   * woken, and it is authored by the office itself, which no colleague's name or the user's name
+   * would describe.
    * @param sessionId - the colleague whose turn just ended, or undefined for the activation check.
-   * @returns the notice as `{ channelId, messageId, leaders, deliveries }`, or undefined when the
+   * @returns the notice as `{ channelId, messageId, addressed, deliveries }`, or undefined when the
    *   office had nothing to ask.
    */
   const noteIdle = async (sessionId) => {
@@ -2148,10 +2325,25 @@ function createOffice(ctx, domain, config, hooks) {
     try {
       const roster = await listColleagues()
       if (roster.some(colleague => liveAgent(colleague.sessionId)?.status === 'running')) return undefined
-      // Only the predefined `leader` role counts. A role is a permission set rather than a job
-      // title, and choosing which colleague decides is exactly a permission.
-      const waiting = roster.filter(colleague => canonicalRole(colleague.role) === ROLE_LEADER)
-      if (waiting.length === 0) return undefined
+      // Who hears the question is the row's own wake — the leaders, by default. It is resolved
+      // here as well as in `post` because an audience nobody is in is a question not worth
+      // asking: the notice spends a turn, so it is sent only when it would reach somebody.
+      const { level, names } = parseWake(settings.wake, 'config.idleNotice.wake')
+      const noticeChannel = channels.get(settings.channel)
+      const waiting = level === undefined
+        ? await resolveRecipients(names, 'config.idleNotice.wake')
+        : {
+          colleagues: levelAudience(
+            roster,
+            level,
+            noticeChannel === undefined || settings.channel === GENERAL_CHANNEL
+              ? undefined
+              : validateChannel(noticeChannel).members,
+            undefined,
+          ),
+          toUser: false,
+        }
+      if (waiting.colleagues.length === 0 && !waiting.toUser) return undefined
       const stored = notices.get(IDLE_NOTICE_KEY)
       if (!activitySince(stored === undefined ? undefined : requireRecord('notice', stored))) return undefined
       // The message is stored before the notice is recorded, so what the record describes is a
@@ -2161,15 +2353,16 @@ function createOffice(ctx, domain, config, hooks) {
         channel: settings.channel,
         sender: { name: OFFICE_SENDER_NAME },
         text: settings.text,
-        recipients: waiting,
+        recipients: waiting.colleagues,
         kind: 'public',
-        mentionAll: false,
+        wakeLevel: level,
+        toUser: waiting.toUser,
       })
       await notices.put(IDLE_NOTICE_KEY, { messageId: posted.message.messageId })
       return {
         channelId: posted.message.channelId,
         messageId: posted.message.messageId,
-        leaders: waiting.map(colleague => colleague.name),
+        addressed: waiting.colleagues.map(colleague => colleague.name),
         deliveries: posted.deliveries,
       }
     } finally {
@@ -2472,7 +2665,7 @@ function createOffice(ctx, domain, config, hooks) {
     updateChannelMembers,
     updateChannelTopic,
     readMessages,
-    resolveRecipients,
+    resolveWake,
     isUser,
     mail,
     adopt,
@@ -4151,32 +4344,33 @@ function createCommunicationTools(agent, tool) {
     definitions.push({
       name: 'office_post',
       description:
-        'Post to a channel of the office. Without a channel argument it is "#general", the public record: '
-        + 'a post there wakes every colleague, and each of them spends a turn reading it, so post only what '
-        + 'every colleague should learn from, and never to acknowledge a message, to agree with one, or to '
-        + 'announce that you are working. Pass a channel name to post to one you are a member of instead — '
-        + 'a group channel wakes its own members, so only those subscribed read a turn of it. Name the '
-        + 'colleagues who need to read it in mentions to wake only them, or pass mention_all:false to write '
-        + 'to the record without waking anyone. notify decides what a colleague that is mid-turn gets, and '
-        + 'defaults to step-end — read at its next step boundary — so a post reaches the busy colleagues who '
-        + 'are working rather than waiting for them to stop; pass notify:"turn-end" for a message that can '
-        + 'wait and should be merged with whatever else arrives before the turn ends. Use office_dm for '
-        + 'short or private exchanges, and office_channels for the channels you hold.',
-      parameters: tool.parameters(['channel', 'text'], {
+        'Post to a channel of the office. Without a channel argument it is "#general", the public record. '
+        + 'wake is required and decides who is woken: name the colleagues who need to read this, "@alice", '
+        + '"@bob", or pass one level — "#consultant" wakes every colleague, "#member" wakes the members and '
+        + 'the leaders, and "#leader" wakes the leaders alone — or pass an empty list to write to the record '
+        + 'without waking anyone, who can still read it with office_read. A post to "#general" spends a turn '
+        + 'of everyone it wakes, so post only what those colleagues should learn from, and never to '
+        + 'acknowledge a message, to agree with one, or to announce that you are working. Pass a channel name '
+        + 'to post to one you are a member of instead — a group channel wakes its own members among the ones '
+        + 'the wake addresses, so only those subscribed read a turn of it. notify decides what a colleague '
+        + 'that is mid-turn gets, and defaults to step-end — read at its next step boundary — so a post '
+        + 'reaches the busy colleagues who are working rather than waiting for them to stop; pass '
+        + 'notify:"turn-end" for a message that can wait and should be merged with whatever else arrives '
+        + 'before the turn ends. Use office_dm for short or private exchanges, and office_channels for the '
+        + 'channels you hold.',
+      parameters: tool.parameters(['wake', 'text'], {
         channel: {
           type: 'string',
           description: 'The channel to write to: "#general" (the default), or a channel you are a member of.',
         },
-        text: { type: 'string', description: 'The message body.' },
-        mentions: {
+        wake: {
           type: 'array',
-          description: 'Session titles to wake instead of the whole office; name the colleagues who need to read this. Waking is explicit and never inferred from the text.',
+          description: 'Required. Who this post wakes: colleague session titles as "@alice", or exactly one '
+            + 'level — "#consultant" (every colleague), "#member" (members and leaders), "#leader" (leaders '
+            + 'only). An empty list wakes nobody. Waking is explicit and never inferred from the text.',
           items: { type: 'string' },
         },
-        mention_all: {
-          type: 'boolean',
-          description: 'Wake the whole office. Defaults to true unless mentions names who to wake; false writes to the channel without waking anyone, who can still read it with office_read.',
-        },
+        text: { type: 'string', description: 'The message body.' },
         notify: {
           type: 'string',
           enum: NOTIFY_TIMINGS,
@@ -4194,6 +4388,9 @@ function createCommunicationTools(agent, tool) {
         const { office, name: officeName } = resolved
         tool.require(resolved, 'post', 'office_post')
         const body = requireText(args, 'office_post')
+        // The arguments are settled before the destination is: a call that names no audience is
+        // refused as such, whatever channel it was aimed at.
+        const audience = await office.resolveWake(args?.wake, 'office_post')
         const sender = await office.senderOf(agent)
         // The standing public channel keeps its spellings; anything else must name a channel the
         // caller belongs to. Direct channels are office_dm's business, not a spelling of this.
@@ -4209,21 +4406,13 @@ function createCommunicationTools(agent, tool) {
           && !office.visibleChannels(sender.sessionId, isBoss).some(channel => channel.channelId === channelId)) {
           throw new Error('office_post: this session is not a member of that channel; the members decide who it holds')
         }
-        const audience = await office.resolveRecipients(args?.mentions, 'office_post')
-        if (args?.mention_all !== undefined && typeof args.mention_all !== 'boolean') {
-          throw new TypeError('office_post: mention_all must be a boolean')
-        }
-        // A public post notifies the whole office unless the caller said otherwise: naming
-        // colleagues narrows it to them, and an explicit `mentions: []` or `mention_all: false`
-        // posts a notice that nobody is woken for.
-        const mentionAll = args?.mention_all ?? args?.mentions === undefined
         return toPostResult(await office.post({
           channel: channelId,
           sender,
           text: body,
           recipients: audience.colleagues,
           kind: 'public',
-          mentionAll,
+          wakeLevel: audience.level,
           toUser: audience.toUser,
           notify: requireNotify(args?.notify, 'office_post'),
         }), officeName)
@@ -4235,15 +4424,22 @@ function createCommunicationTools(agent, tool) {
       name: 'office_dm',
       description:
         'Send a private message to one colleague, for short exchanges that do not need the whole '
-        + 'office. The message is stored in the office and delivered into that colleague\'s session as '
-        + 'a user turn, waking it if it is inactive. A colleague that is mid-turn is not interrupted, '
-        + 'and by default it reads this at the end of the step it is running, so the message reaches it '
-        + 'while it works; pass notify:"turn-end" to hold it instead, and have it handed over as one '
-        + 'turn when that turn ends. Every delivery outcome is reported: a wake that could not happen is '
-        + 'reported rather than silently dropped. Addressing the user writes to the user mailbox instead: '
-        + 'the user has no session, so nothing is woken and the message waits there.',
-      parameters: tool.parameters(['to', 'text'], {
-        to: { type: 'string', description: "The colleague's session title, or the user's name for the user mailbox." },
+        + 'office. wake is required and names exactly one colleague, "@alice", or the user; a level is '
+        + 'refused here, because a private message is one conversation rather than a way to reach a rung of '
+        + 'the office — post to a channel with office_post for that. The message is stored in the office and '
+        + 'delivered into that colleague\'s session as a user turn, waking it if it is inactive. A colleague '
+        + 'that is mid-turn is not interrupted, and by default it reads this at the end of the step it is '
+        + 'running, so the message reaches it while it works; pass notify:"turn-end" to hold it instead, and '
+        + 'have it handed over as one turn when that turn ends. Every delivery outcome is reported: a wake '
+        + 'that could not happen is reported rather than silently dropped. Addressing the user writes to the '
+        + 'user mailbox instead: the user has no session, so nothing is woken and the message waits there.',
+      parameters: tool.parameters(['wake', 'text'], {
+        wake: {
+          type: 'array',
+          description: 'Required. The one colleague this reaches: the session title as "@alice", or "@" and '
+            + 'the user\'s name for the user mailbox.',
+          items: { type: 'string' },
+        },
         text: { type: 'string', description: 'The message body.' },
         notify: {
           type: 'string',
@@ -4263,11 +4459,17 @@ function createCommunicationTools(agent, tool) {
         tool.require(resolved, 'dm', 'office_dm')
         const body = requireText(args, 'office_dm')
         const notify = requireNotify(args?.notify, 'office_dm')
-        if (typeof args?.to !== 'string' || args.to.length === 0) {
-          throw new TypeError('office_dm: to must be a non-empty colleague name or the user name')
-        }
         const sender = await office.senderOf(agent)
-        const audience = await office.resolveRecipients([args.to], 'office_dm')
+        const audience = await office.resolveWake(args?.wake, 'office_dm')
+        if (audience.level !== undefined) {
+          throw new Error(
+            `office_dm: wake names one colleague, and "#${audience.level}" is a level; a private message `
+            + 'cannot address a rung of the office — use office_post to wake a level',
+          )
+        }
+        if (audience.colleagues.length + (audience.toUser ? 1 : 0) !== 1) {
+          throw new TypeError('office_dm: wake must name exactly one colleague, or the user')
+        }
         return toPostResult(await office.post({
           sender,
           text: body,
@@ -4486,6 +4688,9 @@ function panelMessage(message, names) {
     text: message.text,
     covers: Array.isArray(message.covers) ? message.covers : undefined,
     recipients: message.recipients,
+    // The level the post addressed, when it addressed one, so the panel colors a level token only
+    // where it decided the wake rather than wherever one appears in prose.
+    audience: message.audience,
     // Where a mailbox copy came from, so the panel can say it was also said in a channel.
     origin: message.origin,
     mentions: mentionsIn(message.text, names),
@@ -4815,12 +5020,12 @@ function registerHostRoutes(ctx, config) {
           if (typeof body.text !== 'string' || body.text.length === 0) {
             return respondJson(res, 400, { error: 'text must be a non-empty string' })
           }
-          // The panel sends the body alone: who is woken follows from the names written in it,
-          // so nothing a client claims can wake a colleague the message does not address. The
-          // user's name is scanned the same way, which is what collects `@user` into the mailbox.
+          // The panel sends the body alone: who is woken follows from the names and levels written
+          // in it, so nothing a client claims can wake a colleague the message does not address.
+          // The user's name is scanned the same way, which is what collects `@user` into the mailbox.
           const roster = await mounted.office.listColleagues()
-          const audience = await mounted.office.resolveRecipients(
-            mentionsIn(body.text, [...roster.map(entry => entry.name), mounted.config.userName]),
+          const audience = await mounted.office.resolveWake(
+            wakeTokensIn(body.text, [...roster.map(entry => entry.name), mounted.config.userName]),
             'office',
           )
           // The panel may write to any channel the office holds for reading: the standing public
@@ -4835,9 +5040,7 @@ function registerHostRoutes(ctx, config) {
             text: body.text,
             recipients: audience.colleagues,
             kind: 'public',
-            // The panel notifies the whole office by default, exactly as `office_post` does;
-            // unchecking the box narrows the wake to the colleagues the body names.
-            mentionAll: body.mention_all !== false,
+            wakeLevel: audience.level,
             toUser: audience.toUser,
             // The panel carries no timing control, so it sends none and gets the office's own
             // default: a colleague that is mid-turn reads a post from the panel at its next step

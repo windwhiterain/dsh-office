@@ -943,7 +943,7 @@ await check('renaming a session renames the colleague, with no office-side renam
   titles.set('session-bob', 'Robert')
   const roster = await callBoss(boss, 'office', 'office_roster', {})
   assert.ok(roster.colleagues.some(entry => entry.name === 'Robert' && entry.sessionId === 'session-bob'))
-  const addressed = await call(alice, 'office_dm', { to: 'Robert', text: 'addressed by the new title' })
+  const addressed = await call(alice, 'office_dm', { wake: ['@Robert'], text: 'addressed by the new title' })
   assert.equal(addressed.message.channelId, 'dm-sessionalice+sessionbob')
   assert.deepEqual(addressed.deliveries, [{ colleague: 'Robert', status: 'delivered' }])
   titles.set('session-bob', 'bob')
@@ -953,20 +953,20 @@ await check('an ambiguous session title fails loud instead of addressing one col
   titles.set('session-alice', 'same')
   titles.set('session-bob', 'same')
   await assert.rejects(
-    () => call(alice, 'office_post', { text: 'who?', mentions: ['same'] }),
+    () => call(alice, 'office_post', { text: 'who?', wake: ['@same'] }),
     /matches 2 colleagues/,
   )
   titles.set('session-alice', 'Alice Smith')
   titles.set('session-bob', 'bob')
 })
 
-await check('office_post notifies the whole office by default and can be narrowed', async () => {
+await check('office_post wakes the level it is given, and an empty wake writes without waking', async () => {
   const before = resumed.length
-  const posted = await call(alice, 'office_post', { text: 'standup in 10' })
+  const posted = await call(alice, 'office_post', { text: 'standup in 10', wake: ['#consultant'] })
   assert.deepEqual(
     posted.deliveries,
     [{ colleague: 'bob', status: 'delivered' }],
-    'a public post notifies the office without being asked to',
+    'the lowest level reaches every colleague, which is the whole office here',
   )
   assert.equal(posted.message.channelId, 'general')
   assert.equal(resumed.length, before, 'a colleague that is already live is not resumed to be notified')
@@ -974,19 +974,18 @@ await check('office_post notifies the whole office by default and can be narrowe
   assert.equal(read.messages.at(-1).text, 'standup in 10')
   assert.equal(read.messages.at(-1).senderName, 'Alice Smith', 'the sender is named by its session title')
 
-  const quiet = await call(alice, 'office_post', { text: 'quiet notice', mention_all: false })
-  assert.deepEqual(quiet.deliveries, [], 'mention_all:false posts without waking anyone')
-  const unnamed = await call(alice, 'office_post', { text: 'also quiet', mentions: [] })
-  assert.deepEqual(unnamed.deliveries, [], 'an explicit empty mentions list also wakes nobody')
+  const quiet = await call(alice, 'office_post', { text: 'quiet notice', wake: [] })
+  assert.deepEqual(quiet.deliveries, [], 'an empty wake is a post that wakes nobody')
   await assert.rejects(
-    () => call(alice, 'office_post', { text: 'x', mention_all: 'yes' }),
-    /mention_all must be a boolean/,
+    () => call(alice, 'office_post', { text: 'x' }),
+    /wake is required/,
+    'a post that names no audience is refused rather than waking the office by default',
   )
 })
 
 await check('office_post with a mention cold-resumes the colleague and delivers a user turn', async () => {
   const before = bob.sent.length
-  const posted = await call(alice, 'office_post', { text: 'please review the diff', mentions: ['bob'] })
+  const posted = await call(alice, 'office_post', { text: 'please review the diff', wake: ['@bob'] })
   assert.deepEqual(posted.deliveries, [{ colleague: 'bob', status: 'delivered' }])
   assert.equal(bob.sent.length, before + 1)
   const { via, message } = bob.sent.at(-1)
@@ -999,7 +998,7 @@ await check('office_post with a mention cold-resumes the colleague and delivers 
 
 await check('a mention that matches no session title fails loud', async () => {
   await assert.rejects(
-    () => call(alice, 'office_post', { text: 'hello', mentions: ['nobody'] }),
+    () => call(alice, 'office_post', { text: 'hello', wake: ['@nobody'] }),
     /does not match any colleague's session title/,
   )
 })
@@ -1007,14 +1006,14 @@ await check('a mention that matches no session title fails loud', async () => {
 await check('notify:turn-end holds a burst and hands over one merged turn when the colleague is idle', async () => {
   const before = bob.sent.length
   bob.status = 'running'
-  const dm = await call(alice, 'office_dm', { to: 'bob', text: 'private note', notify: 'turn-end' })
+  const dm = await call(alice, 'office_dm', { wake: ['@bob'], text: 'private note', notify: 'turn-end' })
   assert.equal(dm.message.channelId, 'dm-sessionalice+sessionbob')
   assert.deepEqual(dm.deliveries, [{ colleague: 'bob', status: 'queued' }], 'a busy colleague is not interrupted')
   assert.equal(bob.sent.length, before, 'and nothing is spliced into the turn it is running')
 
   const second = await call(alice, 'office_post', {
     text: 'public note, same burst',
-    mentions: ['bob'],
+    wake: ['@bob'],
     notify: 'turn-end',
   })
   assert.deepEqual(second.deliveries, [{ colleague: 'bob', status: 'queued' }])
@@ -1053,17 +1052,17 @@ await check('the default timing steers into a running turn, for a post and for a
   }
 
   rosa.status = 'running'
-  const post = await callBoss(chief, 'timing', 'office_post', { text: 'release is cut', mentions: ['rosa'] })
+  const post = await callBoss(chief, 'timing', 'office_post', { text: 'release is cut', wake: ['@rosa'] })
   assert.deepEqual(post.deliveries, [{ colleague: 'rosa', status: 'steered' }], 'a post steers by default')
   assert.equal(rosa.sent[0].via, 'steer')
   assert.equal(rosa.inbox.nextStep.length, 1, 'and the hold is what the office keeps until a step claims it')
 
-  const dm = await callBoss(chief, 'timing', 'office_dm', { to: 'rosa', text: 'and a private one' })
+  const dm = await callBoss(chief, 'timing', 'office_dm', { wake: ['@rosa'], text: 'and a private one' })
   assert.deepEqual(dm.deliveries, [{ colleague: 'rosa', status: 'steered' }], 'so does a dm')
 
   // A broadcast steers every colleague it reaches, not only a named one.
   sam.status = 'running'
-  const broadcast = await callBoss(chief, 'timing', 'office_post', { text: 'standup in five' })
+  const broadcast = await callBoss(chief, 'timing', 'office_post', { text: 'standup in five', wake: ['#consultant'] })
   assert.deepEqual(
     broadcast.deliveries.map(entry => entry.status),
     ['steered', 'steered'],
@@ -1071,17 +1070,17 @@ await check('the default timing steers into a running turn, for a post and for a
   )
 
   // turn-end is what a caller asks for when the message can wait for the merge.
-  const held = await callBoss(chief, 'timing', 'office_dm', { to: 'rosa', text: 'this one can wait', notify: 'turn-end' })
+  const held = await callBoss(chief, 'timing', 'office_dm', { wake: ['@rosa'], text: 'this one can wait', notify: 'turn-end' })
   assert.deepEqual(held.deliveries, [{ colleague: 'rosa', status: 'queued' }])
   await assert.rejects(
-    () => callBoss(chief, 'timing', 'office_post', { text: 'x', notify: 'later' }),
+    () => callBoss(chief, 'timing', 'office_post', { text: 'x', wake: [], notify: 'later' }),
     /office_post: notify must be one of step-end, turn-end/,
     'a timing nobody defined is refused rather than quietly defaulted',
   )
 
   // The idle case has no timing to choose between, so both spellings reach it now.
   rosa.status = 'idle'
-  const idle = await callBoss(chief, 'timing', 'office_dm', { to: 'rosa', text: 'no turn to steer' })
+  const idle = await callBoss(chief, 'timing', 'office_dm', { wake: ['@rosa'], text: 'no turn to steer' })
   assert.equal(idle.deliveries[0].status, 'delivered')
   assert.equal(rosa.sent.at(-1).via, 'followup')
 })
@@ -1097,7 +1096,7 @@ await check('office_dm notify:step-end steers into the running turn, and the cla
 
   nina.status = 'running'
   const steered = await callBoss(chief, 'steering', 'office_dm', {
-    to: 'nina',
+    wake: ['@nina'],
     text: 'stop: wrong branch',
     notify: 'step-end',
   })
@@ -1121,7 +1120,7 @@ await check('office_dm notify:step-end steers into the running turn, and the cla
 
   // An idle colleague has no turn to steer, so the timing has nothing to choose between.
   const idleDm = await callBoss(chief, 'steering', 'office_dm', {
-    to: 'nina',
+    wake: ['@nina'],
     text: 'no turn to steer',
     notify: 'step-end',
   })
@@ -1129,7 +1128,7 @@ await check('office_dm notify:step-end steers into the running turn, and the cla
   assert.equal(nina.sent.at(-1).via, 'followup', 'an idle colleague is handed the message now either way')
 
   await assert.rejects(
-    () => callBoss(chief, 'steering', 'office_dm', { to: 'nina', text: 'x', notify: 'turn' }),
+    () => callBoss(chief, 'steering', 'office_dm', { wake: ['@nina'], text: 'x', notify: 'turn' }),
     /notify must be one of step-end, turn-end/,
   )
 })
@@ -1146,7 +1145,7 @@ await check('a step-end wake the running turn never took is recovered as the off
   // The turn ends before it reaches another step, so the message is still pending input.
   otto.status = 'running'
   const stranded = await callBoss(chief, 'recovering', 'office_dm', {
-    to: 'otto',
+    wake: ['@otto'],
     text: 'this one waited',
     notify: 'step-end',
   })
@@ -1164,7 +1163,7 @@ await check('a step-end wake the running turn never took is recovered as the off
   // the message is nowhere but in the office's hold — which is what that hold is for.
   otto.status = 'running'
   const discarded = await callBoss(chief, 'recovering', 'office_dm', {
-    to: 'otto',
+    wake: ['@otto'],
     text: 'cancelled away',
     notify: 'step-end',
   })
@@ -1202,11 +1201,11 @@ await check('office_read_notifications takes what is held for its own caller, mi
   // so its own copy stays held for it to read or receive later.
   ada.status = 'running'
   ben.status = 'running'
-  const steered = await callBoss(chief, 'reading', 'office_dm', { to: 'ada', text: 'the step-boundary one' })
+  const steered = await callBoss(chief, 'reading', 'office_dm', { wake: ['@ada'], text: 'the step-boundary one' })
   assert.equal(steered.deliveries[0].status, 'steered')
   const held = await callBoss(chief, 'reading', 'office_post', {
     text: 'ben and ada, this can wait',
-    mentions: ['ada', 'ben'],
+    wake: ['@ada', '@ben'],
     notify: 'turn-end',
   })
   assert.deepEqual(held.deliveries.map(entry => entry.status), ['queued', 'queued'])
@@ -1272,7 +1271,7 @@ await check('office_read_notifications takes what is held for its own caller, mi
   // and the session log disagree only while the office's own deletion is in flight, which is the
   // state a claim and the read that follows it race into.
   ada.status = 'running'
-  const raced = await callBoss(chief, 'reading', 'office_dm', { to: 'ada', text: 'already in the turn' })
+  const raced = await callBoss(chief, 'reading', 'office_dm', { wake: ['@ada'], text: 'already in the turn' })
   assert.equal(raced.deliveries[0].status, 'steered')
   reading.discardInbox('session-ada')
   reading.carryInLog('session-ada', raced.message.messageId)
@@ -1297,7 +1296,7 @@ await check('a step-end wake held when the process stops is recovered after it r
 
   otto.status = 'running'
   const steered = await callBoss(chief, 'stepping', 'office_dm', {
-    to: 'otto',
+    wake: ['@otto'],
     text: 'before you go',
     notify: 'step-end',
   })
@@ -1330,7 +1329,7 @@ await check('a wake held when the process stops is delivered after it restarts',
   ivy.status = 'running'
   const posted = await callBoss(chief, 'stopping', 'office_post', {
     text: 'ivy, please take this',
-    mentions: ['ivy'],
+    wake: ['@ivy'],
     notify: 'turn-end',
   })
   assert.deepEqual(posted.deliveries, [{ colleague: 'ivy', status: 'queued' }])
@@ -1361,7 +1360,7 @@ await check('a dismissed colleague does not leave the office holding its wake', 
   dana.status = 'running'
   const posted = await callBoss(chief, 'leaving', 'office_post', {
     text: 'dana, before you go',
-    mentions: ['dana'],
+    wake: ['@dana'],
     notify: 'turn-end',
   })
   assert.deepEqual(posted.deliveries, [{ colleague: 'dana', status: 'queued' }])
@@ -1387,7 +1386,7 @@ await check('a cold resume runs on the route the session itself last logged', as
   const poster = withLog.publish('session-poster')
   withLog.titles.set('session-poster', 'poster')
   await callBoss(withBoss, 'resume', 'office_adopt', { session_id: 'session-poster' })
-  const posted = await call(poster, 'office_dm', { to: 'gina', text: 'resume on your own route' })
+  const posted = await call(poster, 'office_dm', { wake: ['@gina'], text: 'resume on your own route' })
   assert.deepEqual(posted.deliveries, [{ colleague: 'gina', status: 'delivered' }])
   assert.deepEqual(withLog.resumed[0].agentOptions, {
     provider: 'logged-provider',
@@ -1408,7 +1407,7 @@ await check('no burst is ever refused: every message that names a colleague wake
   await callBoss(burstBoss, 'burst', 'office_adopt', { session_id: 'session-dave' })
   const statuses = []
   for (let round = 0; round < 6; round++) {
-    const posted = await call(poster, 'office_post', { text: `ping ${round}`, mentions: ['dave'] })
+    const posted = await call(poster, 'office_post', { text: `ping ${round}`, wake: ['@dave'] })
     statuses.push(posted.deliveries[0].status)
   }
   assert.deepEqual(statuses, Array.from({ length: 6 }, () => 'delivered'), 'a burst is delivered, not throttled')
@@ -1426,13 +1425,13 @@ await check('a colleague cascade is not truncated', async () => {
   for (const sessionId of ['session-user', 'session-eve', 'session-frank']) {
     await callBoss(chainedBoss, 'chained', 'office_adopt', { session_id: sessionId })
   }
-  const first = await call(user, 'office_post', { text: 'kick off', mentions: ['eve'] })
+  const first = await call(user, 'office_post', { text: 'kick off', wake: ['@eve'] })
   assert.deepEqual(first.deliveries, [{ colleague: 'eve', status: 'delivered' }])
   const eve = chained.liveAgents.get('session-eve')
-  const second = await call(eve, 'office_post', { text: 'your turn', mentions: ['frank'] })
+  const second = await call(eve, 'office_post', { text: 'your turn', wake: ['@frank'] })
   assert.deepEqual(second.deliveries, [{ colleague: 'frank', status: 'delivered' }])
   const frank = chained.liveAgents.get('session-frank')
-  const third = await call(frank, 'office_post', { text: 'back to you', mentions: ['eve'] })
+  const third = await call(frank, 'office_post', { text: 'back to you', wake: ['@eve'] })
   assert.deepEqual(
     third.deliveries,
     [{ colleague: 'eve', status: 'delivered' }],
@@ -1450,7 +1449,7 @@ await check('wakesEnabled:false records the message without any delivery', async
   const poster = muted.publish('session-poster')
   await callBoss(mutedBoss, 'muted', 'office_adopt', { session_id: 'session-poster' })
   await callBoss(mutedBoss, 'muted', 'office_adopt', { session_id: 'session-carol' })
-  const posted = await call(poster, 'office_post', { text: 'quiet', mentions: ['carol'] })
+  const posted = await call(poster, 'office_post', { text: 'quiet', wake: ['@carol'] })
   assert.deepEqual(posted.deliveries, [{ colleague: 'carol', status: 'wakes-disabled' }])
   assert.equal(muted.resumed.length, 0)
 })
@@ -1516,15 +1515,15 @@ await check('a colleague whose title has no ASCII form is still addressable by n
   const member = named.publish('session-zhang')
   await callBoss(namedBoss, 'namedcn', 'office_adopt', { session_id: 'session-zhang' })
   assert.equal(
-    (await call(member, 'office_dm', { to: '张三', text: '到' })).deliveries[0].colleague,
+    (await call(member, 'office_dm', { wake: ['@张三'], text: '到' })).deliveries[0].colleague,
     '张三',
     'a title that is entirely non-ASCII still resolves, which a slug normalization would erase',
   )
-  const mentioned = await callBoss(namedBoss, 'namedcn', 'office_post', { text: '@张三 请报到', mentions: ['张三'] })
+  const mentioned = await callBoss(namedBoss, 'namedcn', 'office_post', { text: '@张三 请报到', wake: ['@张三'] })
   assert.deepEqual(mentioned.deliveries, [{ colleague: '张三', status: 'delivered' }])
   await assert.rejects(
-    () => callBoss(namedBoss, 'namedcn', 'office_post', { text: 'x', mentions: ['张'] }),
-    /"张" does not match any colleague/,
+    () => callBoss(namedBoss, 'namedcn', 'office_post', { text: 'x', wake: ['@张'] }),
+    /"@张" does not match any colleague/,
   )
 })
 
@@ -1575,7 +1574,7 @@ await check('office_hire passes the agent preset and model route through', async
 
 await check('a broadcast wakes every colleague except the sender', async () => {
   const roster = (await callBoss(boss, 'office', 'office_roster', {})).colleagues
-  const all = await call(alice, 'office_post', { text: 'all hands', mention_all: true })
+  const all = await call(alice, 'office_post', { text: 'all hands', wake: ['#consultant'] })
   assert.deepEqual(
     all.deliveries.map(entry => entry.colleague).sort(),
     roster.map(entry => entry.name).filter(name => name !== 'Alice Smith').sort(),
@@ -1585,12 +1584,12 @@ await check('a broadcast wakes every colleague except the sender', async () => {
 })
 
 await check('the delivery frame states where a reply does and does not surface', async () => {
-  await call(alice, 'office_dm', { to: 'bob', text: 'private note' })
+  await call(alice, 'office_dm', { wake: ['@bob'], text: 'private note' })
   const dmText = bob.sent.at(-1).message.content[0].text
   assert.match(dmText, /Your reply stays in this session and reaches nobody/)
   assert.match(dmText, /Most messages need no answer, and silence is a normal one/)
   assert.ok(!dmText.includes('a public post wakes every colleague'), 'a private message must not invite a public reply')
-  await call(alice, 'office_post', { text: 'public note', mentions: ['bob'] })
+  await call(alice, 'office_post', { text: 'public note', wake: ['@bob'] })
   const publicText = bob.sent.at(-1).message.content[0].text
   assert.match(publicText, /Post important information to #general so everyone can learn from it/)
   assert.match(
@@ -1613,10 +1612,10 @@ await check('the panel routes read state and post to the public channel', async 
 
   const posted = await callRoute(routes, officeRoute('post', 'office'), {
     method: 'POST',
-    body: { text: 'from the panel' },
+    body: { text: '#consultant from the panel' },
   })
   assert.equal(posted.status, 200)
-  assert.ok(posted.payload.deliveries.length > 0, 'a panel post notifies the office by default')
+  assert.ok(posted.payload.deliveries.length > 0, 'a level the panel body writes wakes the rung it names')
   assert.deepEqual(
     posted.payload.deliveries.filter(entry => entry.status !== 'delivered'),
     [],
@@ -1624,6 +1623,7 @@ await check('the panel routes read state and post to the public channel', async 
   )
   const after = await callRoute(routes, officeRoute('state', 'office'))
   assert.equal(after.payload.messages.at(-1).senderName, 'user')
+  assert.equal(after.payload.messages.at(-1).audience, '#consultant', 'the panel reads back the level the post addressed')
 })
 
 await check('the panel can hire, and can post without waking anyone', async () => {
@@ -1641,17 +1641,17 @@ await check('the panel can hire, and can post without waking anyone', async () =
 
   const quiet = await callRoute(routes, officeRoute('post', 'office'), {
     method: 'POST',
-    body: { text: 'all hands from the panel', mention_all: false },
+    body: { text: 'all hands from the panel' },
   })
   assert.equal(quiet.status, 200)
   assert.deepEqual(
     quiet.payload.deliveries,
     [],
-    'unchecking Wake everyone notifies only the colleagues the text names, and this text names none',
+    'a panel body that names nobody and calls no level wakes nobody',
   )
 })
 
-await check('a panel post with Wake everyone unchecked notifies exactly the colleagues its text names', async () => {
+await check('a panel post wakes exactly the colleagues and levels its text writes', async () => {
   const hall = makeHarness({ officeName: 'hall' }, undefined, { rowId: 'office_hall' })
   await hall.ready
   const hallBoss = hall.publish('session-hall-boss', { preset: 'office-boss' })
@@ -1664,7 +1664,7 @@ await check('a panel post with Wake everyone unchecked notifies exactly the coll
 
   const post = (text, extra = {}) => callRoute(routes, officeRoute('post', 'hall'), {
     method: 'POST',
-    body: { text, mention_all: false, ...extra },
+    body: { text, ...extra },
   })
   assert.deepEqual(
     (await post('@Alice Smith 请报到')).payload.deliveries,
@@ -1685,11 +1685,29 @@ await check('a panel post with Wake everyone unchecked notifies exactly the coll
     'both mentions wake, once each',
   )
   assert.deepEqual(
-    (await callRoute(routes, officeRoute('post', 'hall'), { method: 'POST', body: { text: 'everyone?' } }))
+    (await callRoute(routes, officeRoute('post', 'hall'), { method: 'POST', body: { text: '#consultant everyone?' } }))
       .payload.deliveries.map(entry => entry.colleague).sort(),
     ['Alice', 'Alice Smith'],
-    'a request that omits mention_all notifies the whole roster, which is what the panel sends by default',
+    'a level the body writes reaches its own rung and every rung above it',
   )
+  assert.deepEqual(
+    (await callRoute(routes, officeRoute('post', 'hall'), { method: 'POST', body: { text: '#leader everyone?' } }))
+      .payload.deliveries,
+    [],
+    'and a level nobody holds in this office wakes nobody rather than falling back on the roster',
+  )
+  assert.deepEqual(
+    (await callRoute(routes, officeRoute('post', 'hall'), { method: 'POST', body: { text: 'everyone?' } }))
+      .payload.deliveries,
+    [],
+    'a body that names nobody and calls no level wakes nobody',
+  )
+  const mixed = await callRoute(routes, officeRoute('post', 'hall'), {
+    method: 'POST',
+    body: { text: '@Alice #leader now' },
+  })
+  assert.equal(mixed.status, 400, 'a body that names a colleague and a level is refused rather than guessed at')
+  assert.match(mixed.payload.error, /a level stands alone/)
 
   // The panel colors what the server resolved rather than its own guess, so the feed cannot
   // show a mention that woke nobody.
@@ -1746,7 +1764,7 @@ await check('office_dismiss removes a colleague and withdraws its channel tools'
 
 await check('a dismissed session is no longer an addressable colleague', async () => {
   await assert.rejects(
-    () => call(alice, 'office_dm', { to: 'temp', text: 'still there?' }),
+    () => call(alice, 'office_dm', { wake: ['@temp'], text: 'still there?' }),
     /does not match any colleague's session title/,
   )
 })
@@ -1803,8 +1821,8 @@ await check('one shared boss preset gives a boss every office it supervises', as
     'office_list reports every office the boss runs, including the ones mounted by another instance',
   )
 
-  await callBoss(commander, 'alpha', 'office_post', { text: 'in alpha' })
-  await callBoss(commander, 'beta', 'office_post', { text: 'in beta' })
+  await callBoss(commander, 'alpha', 'office_post', { text: 'in alpha', wake: [] })
+  await callBoss(commander, 'beta', 'office_post', { text: 'in beta', wake: [] })
   const alphaFeed = await callBoss(commander, 'alpha', 'office_read', { channel: '#general' })
   const betaFeed = await callBoss(commander, 'beta', 'office_read', { channel: '#general' })
   assert.equal(alphaFeed.messages.at(-1).text, 'in alpha')
@@ -1851,15 +1869,15 @@ await check('a colleague is routed to the office that adopted it', async () => {
   const member = alpha.publish('session-member')
   await callBoss(alphaBoss, 'alpha', 'office_adopt', { session_id: 'session-member' })
 
-  const posted = await call(member, 'office_post', { text: 'hello from the member' })
+  const posted = await call(member, 'office_post', { text: 'hello from the member', wake: [] })
   assert.equal(posted.office, 'alpha', 'the colleague is routed without naming an office')
   const feed = await callBoss(alphaBoss, 'alpha', 'office_read', { channel: '#general' })
   assert.ok(feed.messages.some(entry => entry.text === 'hello from the member'))
 
-  const explicit = await call(member, 'office_post', { office: 'alpha', text: 'names its own office' })
+  const explicit = await call(member, 'office_post', { office: 'alpha', text: 'names its own office', wake: [] })
   assert.equal(explicit.office, 'alpha', 'naming its own office is accepted')
   await assert.rejects(
-    () => call(member, 'office_post', { office: 'beta', text: 'leak' }),
+    () => call(member, 'office_post', { office: 'beta', text: 'leak', wake: [] }),
     /"beta" is not an office this session acts on/,
     'a colleague may not address an office it does not belong to',
   )
@@ -1882,11 +1900,11 @@ await check('a colleague held by two offices chooses with the office argument', 
   await callBoss(betaBoss, 'beta', 'office_adopt', { session_id: 'session-dual' })
 
   await assert.rejects(
-    () => call(dual, 'office_post', { text: 'ambiguous' }),
+    () => call(dual, 'office_post', { text: 'ambiguous', wake: [] }),
     /belongs to 2 offices — pass office to choose one of/,
     'an ambiguous colleague is refused rather than routed to an arbitrary office',
   )
-  assert.equal((await call(dual, 'office_post', { office: 'beta', text: 'to beta' })).office, 'beta')
+  assert.equal((await call(dual, 'office_post', { office: 'beta', text: 'to beta', wake: [] })).office, 'beta')
   const betaFeed = await callBoss(betaBoss, 'beta', 'office_read', { channel: '#general' })
   assert.ok(betaFeed.messages.some(entry => entry.text === 'to beta'))
   const alphaFeed = await callBoss(alphaBoss, 'alpha', 'office_read', { channel: '#general' })
@@ -1910,7 +1928,7 @@ await check('unmounting one office leaves the other office tools intact', async 
     'the set is released only when the last office unmounts, not when any one does',
   )
   assert.equal(
-    (await call(commander, 'office_post', { office: 'beta', text: 'still here' })).office,
+    (await call(commander, 'office_post', { office: 'beta', text: 'still here', wake: [] })).office,
     'beta',
     'the surviving office is still reachable',
   )
@@ -1957,7 +1975,7 @@ await check('every tool result names the office it acted on', async () => {
   assert.equal(roster.office, '总部', 'a result carries the office name, in whatever script it is written')
   assert.match(namedBoss.tools.get('office_roster').output.render({}, roster)[0].text, /^Office "总部"/)
 
-  const posted = await callBoss(namedBoss, '总部', 'office_post', { text: 'hello' })
+  const posted = await callBoss(namedBoss, '总部', 'office_post', { text: 'hello', wake: [] })
   assert.match(posted.message.text, /hello/)
 
   // A presenter is a pure function of the result it is handed, so it can be rendered
@@ -2346,10 +2364,10 @@ await check('a wake that cannot be delivered is reported on the message', async 
   failing.titles.set('session-gil', 'gil')
   await callBoss(chief, 'failing', 'office_adopt', { session_id: 'session-gil' })
 
-  const first = await callBoss(chief, 'failing', 'office_post', { text: 'gil, are you there?', mentions: ['gil'] })
+  const first = await callBoss(chief, 'failing', 'office_post', { text: 'gil, are you there?', wake: ['@gil'] })
   assert.equal(first.deliveries[0].status, 'failed', 'a wake that could not happen is reported, not hidden')
   assert.match(first.deliveries[0].detail, /resume failed for session-gil/)
-  const again = await callBoss(chief, 'failing', 'office_post', { text: 'gil, again', mentions: ['gil'] })
+  const again = await callBoss(chief, 'failing', 'office_post', { text: 'gil, again', wake: ['@gil'] })
   assert.deepEqual(again.deliveries, [{ colleague: 'gil', status: 'delivered' }], 'the next wake is unaffected')
   assert.equal(failing.liveAgents.get('session-gil').sent.length, 1, 'only the delivered wake became a turn')
 })
@@ -2359,7 +2377,7 @@ await check('a hired colleague is greeted without the office history being repla
   await joining.ready
   const chief = joining.publish('session-joining-boss', { preset: 'office-boss' })
   joining.titles.set('session-joining-boss', 'chief')
-  await callBoss(chief, 'joining', 'office_post', { text: 'old decision one', mention_all: false })
+  await callBoss(chief, 'joining', 'office_post', { text: 'old decision one', wake: [] })
   const hired = await callBoss(chief, 'joining', 'office_hire', { name: 'Newcomer' })
   assert.equal(hired.greeting, 'delivered')
   const newcomer = joining.liveAgents.get(hired.colleague.sessionId)
@@ -2381,9 +2399,9 @@ await check('a wake says how far the channel had moved when the turn was queued'
 
   // zed is cold and its resume takes a moment, so the office posts again while that is in
   // flight: the message zed is finally woken for is no longer the newest one in the channel.
-  const first = callBoss(chief, 'lagging', 'office_post', { text: 'zed, first', mentions: ['zed'] })
+  const first = callBoss(chief, 'lagging', 'office_post', { text: 'zed, first', wake: ['@zed'] })
   await new Promise(resolve => setTimeout(resolve, 5))
-  await callBoss(chief, 'lagging', 'office_post', { text: 'a second message', mentions: [] })
+  await callBoss(chief, 'lagging', 'office_post', { text: 'a second message', wake: [] })
   const posted = await first
   assert.deepEqual(posted.deliveries, [{ colleague: 'zed', status: 'delivered' }])
 
@@ -2394,7 +2412,7 @@ await check('a wake says how far the channel had moved when the turn was queued'
 
   // A wake that was never overtaken carries no such line: a live message and a stale one must
   // not look the same in the opposite direction either.
-  const live = await callBoss(chief, 'lagging', 'office_post', { text: 'zed, live', mentions: ['zed'] })
+  const live = await callBoss(chief, 'lagging', 'office_post', { text: 'zed, live', wake: ['@zed'] })
   assert.equal(live.deliveries[0].status, 'delivered')
   assert.ok(
     !lagging.liveAgents.get('session-zed').sent.at(-1).message.content[0].text.includes('when this turn was queued'),
@@ -2417,10 +2435,10 @@ await check('office_read answers a sequence range and every filter', async () =>
   const ben = library.publish('session-ben')
   await callBoss(chief, 'library', 'office_adopt', { session_id: 'session-ann' })
   await callBoss(chief, 'library', 'office_adopt', { session_id: 'session-ben' })
-  await callBoss(chief, 'library', 'office_post', { text: 'kickoff at nine', mentions: [] })
-  await call(ann, 'office_post', { text: 'I am on the DOCS' })
-  await callBoss(chief, 'library', 'office_post', { text: '@ann please review', mentions: ['ann'] })
-  await call(ben, 'office_post', { text: 'unrelated' })
+  await callBoss(chief, 'library', 'office_post', { text: 'kickoff at nine', wake: [] })
+  await call(ann, 'office_post', { text: 'I am on the DOCS', wake: ['#consultant'] })
+  await callBoss(chief, 'library', 'office_post', { text: '@ann please review', wake: ['@ann'] })
+  await call(ben, 'office_post', { text: 'unrelated', wake: ['#consultant'] })
   const fromPanel = await callRoute(routes, officeRoute('post', 'library'), {
     method: 'POST',
     body: { text: 'from the panel' },
@@ -2525,7 +2543,7 @@ await check('office_compact replaces a range in place, and reads back as one sum
   const iris = archive.publish('session-iris')
   await callBoss(chief, 'archive', 'office_adopt', { session_id: 'session-iris' })
   for (const text of ['plan a', 'plan b', 'plan c']) {
-    await callBoss(chief, 'archive', 'office_post', { text, mentions: [] })
+    await callBoss(chief, 'archive', 'office_post', { text, wake: [] })
   }
 
   const compacted = await callBoss(chief, 'archive', 'office_compact', {
@@ -2555,7 +2573,7 @@ await check('office_compact replaces a range in place, and reads back as one sum
     /has no messages in 90\.\.99/,
   )
 
-  const woke = await callBoss(chief, 'archive', 'office_post', { text: 'iris, standup', mentions: ['iris'] })
+  const woke = await callBoss(chief, 'archive', 'office_post', { text: 'iris, standup', wake: ['@iris'] })
   assert.deepEqual(woke.deliveries, [{ colleague: 'iris', status: 'delivered' }])
   const body = iris.sent.at(-1).message.content[0].text
   assert.ok(!body.includes('plan a'), 'a wake carries its own message and never replays the channel')
@@ -2705,7 +2723,7 @@ await check('office_colleagues reports the roster with each colleague live statu
   // Reading the roster delivers nothing, and a wake the office holds for a busy colleague is
   // reported as pending rather than delivered behind its back.
   const before = ann.sent.length
-  await callBoss(chief, 'board', 'office_post', { text: 'status please', mentions: ['ann'], notify: 'turn-end' })
+  await callBoss(chief, 'board', 'office_post', { text: 'status please', wake: ['@ann'], notify: 'turn-end' })
   const after = await call(ann, 'office_colleagues', {})
   assert.equal(ann.sent.length, before, 'office_colleagues is a query and wakes nobody')
   assert.equal(after.colleagues[0].pending, 1, 'the held wake is reported')
@@ -2886,12 +2904,12 @@ await check('a consultant speaks into the office while its session runs read-onl
 
   // The frame answers with the tools the role holds, so a consultant is told where a public
   // answer belongs rather than being pointed at its own transcript.
-  await callBoss(chief, 'quiet', 'office_post', { text: 'any advice? mention me if so', mentions: ['rose'] })
+  await callBoss(chief, 'quiet', 'office_post', { text: 'any advice? mention me if so', wake: ['@rose'] })
   const frame = rose.sent.at(-1).message.content[0].text
   assert.match(frame, /Post important information to #general so everyone can learn from it/, 'the frame names what the role holds')
   assert.match(frame, /send short exchanges privately with office_dm/)
 
-  const spoken = await call(rose, 'office_post', { text: 'advice: the summary is settled', mention_all: false })
+  const spoken = await call(rose, 'office_post', { text: 'advice: the summary is settled', wake: [] })
   assert.equal(spoken.message.channelId, 'general', 'a consultant writes into the office like a member')
   const read = await callBoss(chief, 'quiet', 'office_read', { channel: '#general' })
   assert.equal(read.messages.at(-1).text, 'advice: the summary is settled')
@@ -3031,8 +3049,7 @@ await check('a message addressed to the user lands in the user mailbox', async (
   // copy in the mailbox, which is the one feed that collects everything addressed to them.
   const posted = await call(nia, 'office_post', {
     text: '@user the release is blocked',
-    mentions: ['user'],
-    mention_all: false,
+    wake: ['@user'],
   })
   assert.equal(posted.message.channelId, 'general', 'the public record keeps the message')
   assert.deepEqual(
@@ -3056,7 +3073,7 @@ await check('a message addressed to the user lands in the user mailbox', async (
 
   // A direct message to the user is mail and nothing else: no colleague is woken, and the
   // message does not land in a two-party channel that no user session could ever read.
-  const dm = await call(nia, 'office_dm', { to: 'user', text: 'and the build is red' })
+  const dm = await call(nia, 'office_dm', { wake: ['@user'], text: 'and the build is red' })
   assert.equal(dm.message.channelId, 'mailbox')
   assert.equal(dm.message.messageId, 'mailbox-2')
   assert.deepEqual(dm.deliveries.map(entry => entry.status), ['mailbox'])
@@ -3087,7 +3104,7 @@ await check('a message addressed to the user lands in the user mailbox', async (
   // The panel's own post path scans the user name out of the body exactly as it scans colleagues.
   const fromPanel = await callRoute(routes, officeRoute('post', 'mailroom'), {
     method: 'POST',
-    body: { text: 'please look at @user', mention_all: false },
+    body: { text: 'please look at @user' },
   })
   assert.equal(fromPanel.status, 200)
   assert.deepEqual(fromPanel.payload.deliveries.map(entry => entry.status), ['mailbox'])
@@ -3104,7 +3121,7 @@ await check('the history route pages the older messages a feed folds away', asyn
   await deep.ready
   const chief = deep.publish('session-deepfeed-boss', { preset: 'office-boss' })
   for (const text of ['one', 'two', 'three', 'four', 'five']) {
-    await callBoss(chief, 'deepfeed', 'office_post', { text, mentions: [] })
+    await callBoss(chief, 'deepfeed', 'office_post', { text, wake: [] })
   }
   const snapshot = await callRoute(routes, officeRoute('state', 'deepfeed'))
   assert.equal(snapshot.payload.messagesTotal, 5, 'the snapshot reports what the feed is not showing')
@@ -3247,7 +3264,7 @@ await check('the boss and the leaders manage channels, whose members decide who 
   // The audience of a post is the channel's own members; the boss may write anywhere.
   await callBoss(chief, 'teams', 'office_channel_create', { name: 'wakecheck', members: ['mia'] })
   const before = [lea.sent.length, mia.sent.length]
-  const broadcast = await callBoss(chief, 'teams', 'office_post', { channel: '#wakecheck', text: 'the release notes are ready' })
+  const broadcast = await callBoss(chief, 'teams', 'office_post', { channel: '#wakecheck', text: 'the release notes are ready', wake: ['#consultant'] })
   assert.deepEqual(
     broadcast.deliveries.map(entry => entry.colleague),
     ['mia'],
@@ -3267,7 +3284,7 @@ await check('the boss and the leaders manage channels, whose members decide who 
     'a non-member is refused through any spelling it guesses',
   )
   await assert.rejects(
-    () => call(lea, 'office_post', { office: 'teams', channel: 'wakecheck', text: 'sneak post' }),
+    () => call(lea, 'office_post', { office: 'teams', channel: 'wakecheck', text: 'sneak post', wake: ['#consultant'] }),
     /not a member of that channel/,
     'and cannot reach the channel through writing either',
   )
@@ -3313,6 +3330,7 @@ await check('office_channel_members edits the roster, the routes mirror the tool
   await callBoss(chief, 'cleanup', 'office_post', {
     channel: 'shortlived',
     text: 'held while nia works',
+    wake: ['#consultant'],
     notify: 'turn-end',
   })
   await callBoss(chief, 'cleanup', 'office_channel_delete', { channel: 'shortlived' })
@@ -3395,7 +3413,7 @@ await check('an idle office asks its leaders what comes next, and only when some
 
   // Work happened, and the last colleague to stop leaves the office idle with a question to ask.
   // The post wakes nobody, so every delivery below belongs to the notice itself.
-  await callBoss(chief, 'idle', 'office_post', { text: 'the release is cut', mention_all: false })
+  await callBoss(chief, 'idle', 'office_post', { text: 'the release is cut', wake: [] })
   await idle.setStatus('session-idle-lead', 'running')
   await idle.setStatus('session-idle-lead', 'idle')
   const asked = notices()
@@ -3416,13 +3434,13 @@ await check('an idle office asks its leaders what comes next, and only when some
   assert.equal(lead.sent.length, 1, 'and nobody is woken a second time')
 
   // A colleague's post is work, so the next time the office stops there is something to decide.
-  await call(hand, 'office_post', { office: 'idle', text: 'the migration notes are done', mentions: ['lead'] })
+  await call(hand, 'office_post', { office: 'idle', text: 'the migration notes are done', wake: ['@lead'] })
   await idle.setStatus('session-idle-lead', 'running')
   await idle.setStatus('session-idle-lead', 'idle')
   assert.equal(notices().length, 2, 'new work arms the next notice')
 
   // The office is not idle while one colleague is still working, which is the whole condition.
-  await call(hand, 'office_dm', { office: 'idle', to: 'lead', text: 'one more thing' })
+  await call(hand, 'office_dm', { office: 'idle', wake: ['@lead'], text: 'one more thing' })
   await idle.setStatus('session-idle-hand', 'running')
   await idle.setStatus('session-idle-lead', 'idle')
   assert.equal(notices().length, 2, 'a colleague that is still working means the office has not stopped')
@@ -3433,7 +3451,7 @@ await check('an idle office asks its leaders what comes next, and only when some
   // for one. The stranger's turn asks nothing, and the colleague that follows it proves the
   // office was armed to ask and simply was not asked by a stranger's transition.
   idle.publish('session-idle-stranger')
-  await call(hand, 'office_dm', { office: 'idle', to: 'lead', text: 'and one more' })
+  await call(hand, 'office_dm', { office: 'idle', wake: ['@lead'], text: 'and one more' })
   await idle.setStatus('session-idle-stranger', 'running')
   await idle.setStatus('session-idle-stranger', 'idle')
   assert.equal(notices().length, 3, 'a session outside the roster asks nothing')
@@ -3453,8 +3471,8 @@ await check('an idle office asks its leaders what comes next, and only when some
   assert.equal(notices().length, 4, 'a restart with nothing new to decide asks nothing')
 })
 
-await check('the idle notice needs a leader, a colleague, and a channel that exists', async () => {
-  // An office of members only has nobody to ask, and must not guess at a substitute.
+await check('the idle notice needs an audience it can reach, a colleague, and a channel that exists', async () => {
+  // An office of members only has nobody its default wake reaches, and must not guess at a substitute.
   const headless = makeHarness({ officeName: 'headless', idleNotice: { enabled: true } }, undefined, {
     rowId: 'office_headless',
   })
@@ -3464,7 +3482,7 @@ await check('the idle notice needs a leader, a colleague, and a channel that exi
   const headlessChief = headless.publish('session-headless-boss', { preset: 'office-boss' })
   const headlessHand = headless.publish('session-headless-hand')
   await callBoss(headlessChief, 'headless', 'office_adopt', { session_id: 'session-headless-hand' })
-  await callBoss(headlessChief, 'headless', 'office_post', { text: 'nobody leads this office', mention_all: false })
+  await callBoss(headlessChief, 'headless', 'office_post', { text: 'nobody leads this office', wake: [] })
   await headless.setStatus('session-headless-hand', 'running')
   await headless.setStatus('session-headless-hand', 'idle')
   assert.equal(
@@ -3484,7 +3502,7 @@ await check('the idle notice needs a leader, a colleague, and a channel that exi
   const muteChief = mute.publish('session-mute-boss', { preset: 'office-boss' })
   const muteLead = mute.publish('session-mute-lead')
   await callBoss(muteChief, 'mute', 'office_adopt', { session_id: 'session-mute-lead', role: 'leader' })
-  await callBoss(muteChief, 'mute', 'office_post', { text: 'stored, never delivered', mention_all: false })
+  await callBoss(muteChief, 'mute', 'office_post', { text: 'stored, never delivered', wake: [] })
   await mute.setStatus('session-mute-lead', 'running')
   await mute.setStatus('session-mute-lead', 'idle')
   assert.equal(muteLead.sent.length, 0, 'a silent office wakes nobody')
@@ -3505,7 +3523,7 @@ await check('the idle notice needs a leader, a colleague, and a channel that exi
   const lostChief = lost.publish('session-lost-boss', { preset: 'office-boss' })
   lost.publish('session-lost-lead')
   await callBoss(lostChief, 'lost', 'office_adopt', { session_id: 'session-lost-lead', role: 'leader' })
-  await callBoss(lostChief, 'lost', 'office_post', { text: 'somewhere to ask', mention_all: false })
+  await callBoss(lostChief, 'lost', 'office_post', { text: 'somewhere to ask', wake: [] })
   await lost.setStatus('session-lost-lead', 'running')
   await lost.setStatus('session-lost-lead', 'idle')
   assert.match(lost.warnings.join('\n'), /the idle notice failed: .*unknown channel "nowhere"/)
@@ -3540,10 +3558,136 @@ await check('an office row refuses an idleNotice it could never send', async () 
   const quietChief = quiet.publish('session-quiet-boss', { preset: 'office-boss' })
   const quietLead = quiet.publish('session-quiet-lead')
   await callBoss(quietChief, 'quiet', 'office_adopt', { session_id: 'session-quiet-lead', role: 'leader' })
-  await callBoss(quietChief, 'quiet', 'office_post', { text: 'work, unasked', mention_all: false })
+  await callBoss(quietChief, 'quiet', 'office_post', { text: 'work, unasked', wake: [] })
   await quiet.setStatus('session-quiet-lead', 'running')
   await quiet.setStatus('session-quiet-lead', 'idle')
   assert.equal(quietLead.sent.length, 0, 'a row that never opts in never asks')
+})
+
+await check('a wake level reaches its own rung and every rung above it', async () => {
+  const ranks = makeHarness({ officeName: 'ranks' }, undefined, { rowId: 'office_ranks' })
+  await ranks.ready
+  const chief = ranks.publish('session-ranks-boss', { preset: 'office-boss' })
+  const seated = new Map()
+  for (const [sessionId, title] of [
+    ['session-ranks-member', 'minnie'],
+    ['session-ranks-consultant', 'connie'],
+    ['session-ranks-leader', 'lead'],
+  ]) {
+    ranks.titles.set(sessionId, title)
+    seated.set(sessionId, ranks.publish(sessionId))
+  }
+  await callBoss(chief, 'ranks', 'office_adopt', { session_id: 'session-ranks-member', role: 'member' })
+  await callBoss(chief, 'ranks', 'office_adopt', { session_id: 'session-ranks-consultant', role: 'consultant' })
+  await callBoss(chief, 'ranks', 'office_adopt', { session_id: 'session-ranks-leader', role: 'leader' })
+
+  const asked = async (level) => {
+    const posted = await callBoss(chief, 'ranks', 'office_post', { text: `asking ${level}`, wake: [level] })
+    return { woke: posted.deliveries.map(entry => entry.colleague).sort(), audience: storedMessage(ranks, posted.message.messageId).audience }
+  }
+
+  assert.deepEqual(await asked('#leader'), { woke: ['lead'], audience: '#leader' }, 'the top rung reaches the leaders alone')
+  assert.deepEqual(
+    await asked('#member'),
+    { woke: ['lead', 'minnie'], audience: '#member' },
+    'the member rung reaches the leaders above it, and not the consultant below',
+  )
+  assert.deepEqual(
+    await asked('#consultant'),
+    { woke: ['connie', 'lead', 'minnie'], audience: '#consultant' },
+    'the consultant rung is the least privileged, so it reaches the whole office',
+  )
+
+  // A colleague is not woken by its own post, however wide the rung it names.
+  const own = await call(seated.get('session-ranks-leader'), 'office_post', {
+    office: 'ranks',
+    text: 'leaders only',
+    wake: ['#leader'],
+  })
+  assert.deepEqual(own.deliveries, [], 'the sender is never in its own audience')
+  assert.deepEqual(storedMessage(ranks, own.message.messageId).recipients, [])
+
+  // A named wake stays what it was: exactly the colleagues it names, whatever rung they hold.
+  const named = await callBoss(chief, 'ranks', 'office_post', { text: 'minnie only', wake: ['@minnie'] })
+  assert.deepEqual(named.deliveries.map(entry => entry.colleague), ['minnie'])
+  assert.equal(storedMessage(ranks, named.message.messageId).audience, undefined, 'a named wake records no level')
+})
+
+await check('a wake that is not understood is refused rather than guessed at', async () => {
+  const strict = makeHarness({ officeName: 'strict' }, undefined, { rowId: 'office_strict' })
+  await strict.ready
+  const chief = strict.publish('session-strict-boss', { preset: 'office-boss' })
+  for (const [sessionId, title] of [['session-strict-hand', 'hand'], ['session-strict-other', 'other']]) {
+    strict.titles.set(sessionId, title)
+    strict.publish(sessionId)
+  }
+  await callBoss(chief, 'strict', 'office_adopt', { session_id: 'session-strict-hand' })
+  await callBoss(chief, 'strict', 'office_adopt', { session_id: 'session-strict-other' })
+
+  const post = wake => callBoss(chief, 'strict', 'office_post', { text: 'hello', wake })
+  await assert.rejects(() => post(undefined), /wake is required/, 'an omitted wake is not a default audience')
+  await assert.rejects(() => post('hand'), /wake is required and must be an array/, 'a bare name is not a wake array')
+  await assert.rejects(() => post(['hand']), /wake addresses colleagues as "@name"/, 'a name without its marker is refused')
+  await assert.rejects(() => post(['#everyone']), /is not a wake level/, 'a level nobody defined is refused')
+  await assert.rejects(() => post(['#leader', '#member']), /a level stands alone/, 'two levels are refused rather than unioned')
+  await assert.rejects(() => post(['@hand', '#leader']), /a level stands alone/, 'a level and a name are refused rather than unioned')
+  await assert.rejects(() => post(['  ']), /must be a non-empty string/)
+  await assert.rejects(() => post(['@nobody']), /does not match any colleague/, 'a name nobody answers to fails loud')
+
+  // A private message is one conversation: it names one colleague and refuses a rung.
+  const dm = wake => callBoss(chief, 'strict', 'office_dm', { text: 'psst', wake })
+  await assert.rejects(() => dm(['#leader']), /a private message cannot address a rung of the office/)
+  await assert.rejects(() => dm([]), /wake must name exactly one colleague/, 'a private message needs a recipient')
+  await assert.rejects(() => dm(['@hand', '@other']), /wake must name exactly one colleague/)
+  assert.equal((await dm(['@hand'])).deliveries[0].colleague, 'hand', 'and one colleague is what it delivers to')
+})
+
+await check('an idle notice wakes the level its row configures', async () => {
+  const wide = makeHarness(
+    { officeName: 'wide', idleNotice: { enabled: true, wake: ['#member'], text: 'the office stopped' } },
+    undefined,
+    { rowId: 'office_wide' },
+  )
+  await wide.ready
+  wide.titles.set('session-wide-boss', 'chief')
+  wide.titles.set('session-wide-lead', 'lead')
+  wide.titles.set('session-wide-hand', 'hand')
+  const chief = wide.publish('session-wide-boss', { preset: 'office-boss' })
+  wide.publish('session-wide-lead')
+  wide.publish('session-wide-hand')
+  await callBoss(chief, 'wide', 'office_adopt', { session_id: 'session-wide-lead', role: 'leader' })
+  await callBoss(chief, 'wide', 'office_adopt', { session_id: 'session-wide-hand' })
+  await callBoss(chief, 'wide', 'office_post', { text: 'the release is cut', wake: [] })
+  await wide.setStatus('session-wide-hand', 'running')
+  await wide.setStatus('session-wide-hand', 'idle')
+  const asked = [...wide.tables.get('messages').entries()]
+    .map(([, message]) => message)
+    .filter(message => message.senderName === 'office')
+  assert.equal(asked.length, 1, 'the office asks once the last colleague stops')
+  assert.deepEqual(
+    [...asked[0].recipients].sort(),
+    ['session-wide-hand', 'session-wide-lead'],
+    'the configured rung reaches the member and the leader above it, not the consultant below',
+  )
+  assert.equal(asked[0].audience, '#member', 'and the record says which level asked the question')
+  await wide.close()
+})
+
+await check('an idle notice that could not reach anybody is refused with the row', async () => {
+  await assert.rejects(
+    () => makeHarness({ idleNotice: { enabled: true, wake: [] } }).ready,
+    /idleNotice\.wake must address somebody/,
+    'a notice that wakes nobody would ask nothing of anyone',
+  )
+  await assert.rejects(
+    () => makeHarness({ idleNotice: { enabled: true, wake: ['#boss'] } }).ready,
+    /is not a wake level/,
+    'a level nobody predefined is refused rather than stored and never resolved',
+  )
+  await assert.rejects(
+    () => makeHarness({ idleNotice: { enabled: true, wake: ['boss'] } }).ready,
+    /wake addresses colleagues as "@name"/,
+  )
 })
 
 for (const label of checks) console.log(`  ok  ${label}`)
