@@ -4555,7 +4555,9 @@ function installOfficeTools(agent) {
     signature,
     dispose: () => {
       for (const dispose of disposers) dispose()
-      void promptFiber.dispose()
+      // Cordis contains a fiber's own cleanup failures; this catch only stops one from surfacing
+      // as an unhandled rejection, which would take the host down with it.
+      void promptFiber.dispose().catch(() => {})
     },
   })
 }
