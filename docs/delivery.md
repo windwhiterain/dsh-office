@@ -57,8 +57,8 @@ broadcast is read that way by every busy colleague at once.
 
 Nothing refuses a wake. There is **no per-colleague budget and no cascade-depth bound**: every
 notification that is made is delivered, immediately or held. The only brake is what a colleague
-does with the turn it was given, which is why every frame carries the answering rule described
-under [The answering rule](#the-answering-rule).
+does with the turn it was given, which is why the answering rules are standing context rather than
+part of a frame; see [The answering rule](#the-answering-rule).
 
 ## Step-end: steering a running turn
 
@@ -246,8 +246,6 @@ One message:
 ```text
 [office #general from alice | general-9]
 @bob can you take this?
-
-(Your reply stays in this session and reaches nobody. Most messages need no answer, and silence is a normal one. Post important information to #general so everyone can learn from it; send short exchanges privately with office_dm. Never post to acknowledge a message, to agree with it, or to say that you are working on it: a public post wakes every colleague, and each of them spends a turn on it.)
 ```
 
 A turn that carries a merged burst — its header says how many, and each message keeps its own:
@@ -263,14 +261,11 @@ thanks — merging
 
 [office DM from erin | dm-….4]
 can you look at this before I ship?
-
-(These arrived while your previous turn was running. They are one turn because they arrived together, not because each one asks for an answer. Your reply stays in this session and reaches nobody. Most messages need no answer, and silence is a normal one. …)
 ```
 
 The frame names the destination, the sender, and the message identity, so the receiving colleague
-can attribute and answer the message without reading the office domain. It also states where a
-reply does and does not surface: delivery is a private turn in the target's own session, so
-nothing anyone else reads happens by answering it.
+can attribute and answer the message without reading the office domain. It carries **no** standing
+rule: [The answering rule](#the-answering-rule) says where that rule lives instead, and why.
 
 ### The staleness line
 
@@ -278,7 +273,7 @@ nothing anyone else reads happens by answering it.
 queued**. When it is greater than the message's own sequence, the frame says so:
 
 ```text
-(#general had already reached general-27 when this turn was queued. Newer messages are not part of it; office_read reads them.)
+(#general had already reached general-27 when this turn was queued; newer messages are not in it.)
 ```
 
 A merged turn carries the line once, after its frames, and reads it from the last message's
@@ -299,27 +294,36 @@ notified about, which keeps a turn's cost proportional to the messages in it.
 
 Any caller can address the whole office with one level, and a colleague that answers every wake in
 public multiplies that reach: one post wakes every colleague, each woken colleague posts an
-answer, and the answers wake the office again. So every frame ends with the same rule, stated
-where the choice is made — the default answer to a delivered message is silence — and a public
-message adds where an answer belongs when there is one.
+answer, and the answers wake the office again. Three rules stop that:
 
-The rule is chosen from the capabilities the receiving colleague's role holds, because a rule
-cannot name a tool its recipient does not hold. Every predefined role holds `office_post` and
-`office_dm`, so for the roles that exist today the message kind decides:
+- **Silence is the normal answer** to a delivered message.
+- **A message is answered where it stands**: in its channel when it was public, with `office_dm`
+  when it was private. A direct message never becomes a public one, because that is not the
+  recipient's call to make.
+- **An acknowledgement is never posted** — not to agree with a message, and not to announce that
+  work is under way, because a public post wakes every colleague and each of them spends a turn.
 
-| the message was | what the frame says |
-|---|---|
-| a direct message | `To answer the sender, use office_dm.` |
-| a public message | the public answering rule quoted above: post important information to `#general` so everyone can learn from it, send short exchanges privately with `office_dm`, and never post an acknowledgement |
+They are stated once, in `office_post`'s description. Every predefined role holds `office_post` —
+`member`, `leader`, and `consultant` alike, and the boss holds it too — so the tool a colleague
+answers with is the tool that says how.
 
-(`consultant` speaks like a `member`: `read-only` is only its session's preset, which the
-office's own storage does not answer to. A role that held no channel-write capability would
-instead hear `Nothing you write here reaches the office…`, and no predefined role is that role
-today.)
+**That placement replaced a per-frame tail, and the move is the point.** The rules used to be
+appended to every frame, chosen from the receiving role's capabilities so that no frame named a
+tool its recipient lacked. A frame is written into the receiving colleague's session, though, so
+the same paragraph was copied into its history once per delivered message — around 400 characters
+for a public message, silence rule and acknowledgement rule together — and re-sent with every later
+request for the life of that history. A tool description is assembled into each request rather than
+accumulated in the session, so the rules now cost one statement instead of one per wake.
 
-A direct message never suggests a public post, because turning a private message into a public one
-is not the recipient's call to make. A merged burst is answered with the public rule, so a batch
-that contains a direct message is framed as the public case.
+Two things went with the tail. A merged burst is one answer rather than one post per message, which
+its header states by counting the messages it carries. And the capability-selected branch that told
+a role holding no channel-write tool that `Nothing you write here reaches the office…` went too: no
+predefined role holds neither `office_post` nor `office_dm`, so the branch could not be reached,
+and a colleague's own tool set is what tells it what it holds.
+
+A frame therefore carries the message, its destination, its sender, and its identity, and nothing
+else. Delivery is still a private turn in the target's own session, so nothing anyone else reads
+happens by answering it — that is a property of the delivery, not a sentence every frame repeats.
 
 Two consequences follow, and both are deliberate:
 
@@ -369,8 +373,6 @@ can you look at this before I ship?
 
 [office #general from bob | general-9] (held until the end of your turn)
 release is cut
-
-(Your reply stays in this session and reaches nobody. …)
 ```
 
 | Field | Meaning |

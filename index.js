@@ -1079,69 +1079,40 @@ function channelLabel(message) {
 }
 
 /**
- * What a delivered message asks of the colleague that receives it.
+ * A delivery frame carries the message it names, and nothing else.
  *
- * The office's tools default to waking the whole roster, and a colleague that answers every
- * wake in public multiplies that default: one post wakes every colleague, each woken colleague
- * posts an answer, and the answers wake the office again. Every frame therefore ends with the
- * same rule, stated where the choice is made — the default answer to a delivered message is
- * silence — and a public message adds where an answer belongs when there is one.
- */
-const OFFICE_SILENCE_RULE = 'Your reply stays in this session and reaches nobody. Most messages '
-  + 'need no answer, and silence is a normal one.'
-
-/** The shared tail of the rule that keeps an answer from waking the office again. */
-const OFFICE_ACKNOWLEDGE_RULE = 'Never post to acknowledge a message, to agree '
-  + 'with it, or to say that you are working on it: a public post wakes every colleague, and '
-  + 'each of them spends a turn on it.'
-
-/**
- * Where an answer belongs, for the message kind that arrived and the role that received it.
+ * The office's tools default to waking a whole roster, and a colleague that answers every wake in
+ * public multiplies that reach: one post wakes every colleague, each woken colleague posts an
+ * answer, and the answers wake the office again. The rules that stop that — silence is the normal
+ * answer, answer where the message stands, never post an acknowledgement — are stated once, in
+ * `office_post`'s description.
  *
- * Two rules meet here. A direct message never suggests a public post, because turning a private
- * message into a public one is not the recipient's call to make. And the rule cannot name a tool
- * the recipient does not hold: it is read off the role's own capabilities, so a role that held
- * no channel-write tool would be told instead that whoever needs its answer reads this session.
- * @param kind - the delivered message's kind: `dm` or `public`.
- * @param role - the receiving colleague's predefined role.
- * @param channelName - the channel the public message arrived on; a colleague answers where
- *   the message stands, not somewhere else.
- * @returns the sentence appended to the frame that colleague receives.
+ * They are deliberately NOT appended to a frame. A frame is written into the receiving colleague's
+ * session, so the same paragraph would be copied into its history once per delivered message and
+ * re-sent with every later request for the life of that history. The rules belong to standing
+ * context instead: every predefined role holds `office_post`, and a tool description is assembled
+ * into each request rather than accumulated in the session.
  */
-function answerRule(kind, role, channelName = GENERAL_CHANNEL) {
-  const capabilities = ROLE_CAPABILITIES[canonicalRole(role)]
-  if (!capabilities.includes('post') && !capabilities.includes('dm')) {
-    return 'Nothing you write here reaches the office: your role holds no tool that writes to a channel, '
-      + 'so whoever needs your answer reads this session.'
-  }
-  if (kind === 'dm') return 'To answer the sender, use office_dm.'
-  return `Post important information to #${channelName} so everyone can learn from it; `
-    + `send short exchanges privately with office_dm. ${OFFICE_ACKNOWLEDGE_RULE}`
-}
 
 /**
  * Compose the model-visible framing of one delivered office message.
  *
  * The frame names the destination, the sender, and the message identity so the
- * receiving colleague can attribute and answer it without reading the office domain.
- * It also states where a reply does and does not surface: delivery is a private turn
- * in the target's own session, so nothing anyone else reads happens by answering it.
+ * receiving colleague can attribute and answer it without reading the office domain. It carries
+ * the message and nothing else; the rule comment above says why no answering guidance is appended.
  *
  * `newestSeq` is how far past this message the channel had already moved when the turn was
  * queued. Without it, a message from ten minutes ago is indistinguishable from a live one,
  * and answering it reads as engaging with something already settled.
  * @param message - the stored message record that triggered the wake.
  * @param newestSeq - the channel's newest sequence when this turn was queued, when known.
- * @param role - the receiving colleague's predefined role, which decides what an answer may use.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameDelivery(message, newestSeq, role) {
-  const answer = `${OFFICE_SILENCE_RULE} ${answerRule(message.kind, role, message.channelName)}`
+function frameDelivery(message, newestSeq) {
   const freshness = newestSeq === undefined || newestSeq <= message.seq
     ? undefined
-    : `(${channelLabel(message)} had already reached ${message.channelId}-${String(newestSeq)} when this turn was queued. `
-      + 'Newer messages are not part of it; office_read reads them.)'
-  return [ `[office ${whereOf(message)} | ${message.messageId}]`, message.text, freshness, `(${answer})` ]
+    : `(${channelLabel(message)} had already reached ${message.channelId}-${String(newestSeq)} when this turn was queued; newer messages are not in it.)`
+  return [ `[office ${whereOf(message)} | ${message.messageId}]`, message.text, freshness ]
     .filter(line => line !== undefined)
     .join('\n\n')
 }
@@ -1157,43 +1128,35 @@ function frameDelivery(message, newestSeq, role) {
  * @param officeName - the office the wakes came from.
  * @param messages - the batched messages, oldest first.
  * @param newestSeq - the newest sequence of the last message's channel, when known.
- * @param role - the receiving colleague's predefined role, which decides what an answer may use.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameBatch(officeName, messages, newestSeq, role) {
-  if (messages.length === 1) return frameDelivery(messages[0], newestSeq, role)
+function frameBatch(officeName, messages, newestSeq) {
+  if (messages.length === 1) return frameDelivery(messages[0], newestSeq)
   const last = messages.at(-1)
   const freshness = newestSeq === undefined || newestSeq <= last.seq
     ? undefined
     : `(${channelLabel(last)} had already reached ${last.channelId}-${String(newestSeq)} when this turn was queued.)`
-  const guidance = 'These arrived while your previous turn was running. They are one turn because '
-    + 'they arrived together, not because each one asks for an answer. '
-    + `${OFFICE_SILENCE_RULE} ${answerRule(last.kind, role, last.channelName)}`
   return [
     `[office ${officeName} | ${String(messages.length)} messages arrived while you were working]`,
     ...messages.map(message => `[office ${whereOf(message)} | ${message.messageId}]\n${message.text}`),
     freshness,
-    `(${guidance})`,
   ].filter(line => line !== undefined).join('\n\n')
 }
 
 /**
  * Compose the model-visible framing of the notifications one colleague read for itself.
  *
- * It is the frame a delivery would have carried — destination, sender, identity, body, and the
- * answering rule — because what a colleague reads must not depend on whether it waited for its
- * turn to end or asked for its mail in the middle of one. Only the header differs: this is the
- * colleague's own read, so it does not claim the messages arrived while it worked. A notification
- * held under the non-default timing says so, because a colleague that asked for its mail is
- * otherwise unable to tell an announcement from a message somebody wanted it to act on now.
+ * It is the frame a delivery would have carried — destination, sender, identity, and body —
+ * because what a colleague reads must not depend on whether it waited for its turn to end or
+ * asked for its mail in the middle of one. Only the header differs: this is the colleague's own
+ * read, so it does not claim the messages arrived while it worked. A notification held under the
+ * non-default timing says so, because a colleague that asked for its mail is otherwise unable to
+ * tell an announcement from a message somebody wanted it to act on now.
  * @param officeName - the office the notifications came from.
  * @param notifications - the read notifications, oldest first, as the tool reported them.
- * @param role - the reading colleague's predefined role, which decides what an answer may use.
  * @returns the framed text of the tool result.
  */
-function frameNotifications(officeName, notifications, role) {
-  const last = notifications.at(-1)
-  const rule = `${OFFICE_SILENCE_RULE} ${answerRule(last.kind, role, last.channelName)}`
+function frameNotifications(officeName, notifications) {
   const headline = notifications.length === 1
     ? '1 notification was held for you, read here on request:'
     : `${String(notifications.length)} notifications were held for you, read here on request:`
@@ -1203,7 +1166,7 @@ function frameNotifications(officeName, notifications, role) {
       : ''
     return `[office ${whereOf(notification)} | ${notification.messageId}]${held}\n${notification.text}`
   })
-  return [ `[office ${officeName}] ${headline}`, ...frames, `(${rule})` ].join('\n\n')
+  return [ `[office ${officeName}] ${headline}`, ...frames ].join('\n\n')
 }
 
 /** Distinguishing short form of a session id, for an unnamed sender in a transcript. */
@@ -1620,17 +1583,16 @@ function createOffice(ctx, domain, config, hooks) {
    * single delivery; every message keeps its own header inside the body.
    * @param batch - the batched messages, oldest first.
    * @param newestSeq - the newest sequence of the last message's channel, when known.
-   * @param role - the receiving colleague's predefined role, which decides what the frame may suggest.
    * @param sourceKind - the kind the payload's source claims: {@link OFFICE_MESSAGE_KIND} for a
    *   delivery that opens a turn, {@link STEERED_MESSAGE_KIND} for a splice into a running one.
    * @returns the message payload to hand to the colleague's session.
    */
-  const batchPayload = (batch, newestSeq, role, sourceKind = OFFICE_MESSAGE_KIND) => {
+  const batchPayload = (batch, newestSeq, sourceKind = OFFICE_MESSAGE_KIND) => {
     const newest = batch.at(-1)
     return {
       id: wakeIdOf(newest),
       role: 'user',
-      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, role) }],
+      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq) }],
       // Every field here reaches the session log, which is JSON, and the harness rejects a
       // value JSON cannot round-trip — `undefined` among them. A message the user posted
       // from the panel has no sender session, so that field must be absent rather than present
@@ -1672,7 +1634,7 @@ function createOffice(ctx, domain, config, hooks) {
   /** Release one colleague's held wakes: the records go only after their turn is queued. */
   const releaseWakes = async (sessionId, held, agent) => {
     const colleague = colleagueBySession(sessionId)
-    agent.followup(batchPayload(held.map(entry => entry.message), undefined, canonicalRole(colleague?.role)))
+    agent.followup(batchPayload(held.map(entry => entry.message), undefined))
     for (const entry of held) await recordReleased(entry, sessionId, held.length)
   }
 
@@ -1854,7 +1816,7 @@ function createOffice(ctx, domain, config, hooks) {
     const agent = await ensureAgent(colleague.sessionId)
     if (agent.status !== 'idle' && notify === NOTIFY_STEP_END) {
       await holdWake(colleague.sessionId, message, NOTIFY_STEP_END)
-      agent.steer(batchPayload([message], undefined, canonicalRole(colleague.role), STEERED_MESSAGE_KIND))
+      agent.steer(batchPayload([message], undefined, STEERED_MESSAGE_KIND))
       await recordDelivery(key, colleague.sessionId, {
         status: 'steered',
         at: Date.now(),
@@ -1874,7 +1836,7 @@ function createOffice(ctx, domain, config, hooks) {
     const held = await recoverStepEndWakes(colleague.sessionId, heldWakes(colleague.sessionId), agent)
     const batch = [...held.map(entry => entry.message), message]
     const newest = readMessages(message.channelId, 1).at(-1)
-    agent.followup(batchPayload(batch, newest?.seq, canonicalRole(colleague.role)))
+    agent.followup(batchPayload(batch, newest?.seq))
     for (const entry of held) await recordReleased(entry, colleague.sessionId, batch.length)
     await recordDelivery(key, colleague.sessionId, {
       status: 'delivered',
@@ -2438,11 +2400,12 @@ function createOffice(ctx, domain, config, hooks) {
    * colleague, the office, and its role, and says how it takes part. A leader is told one thing
    * more: where {@link LEADER_GUIDE_PATH} sits, because the seat it was hired into has notes.
    *
-   * The greeting deliberately does NOT enumerate the tools the role holds. Those are already in
-   * the scope's own schema, and this turn stays in the colleague's history for the life of the
-   * session, so a copied catalog would be paid on every later request. What it states instead is
-   * the part a schema cannot say: that the colleague writes into a shared record rather than
-   * answering in private, and which of those two it is.
+   * The greeting deliberately states nothing the scope's own schema already says. It does not
+   * enumerate the tools the role holds, and it does not restate the answering rules: this turn
+   * stays in the colleague's history for the life of the session, so a copied catalog or a copied
+   * rule is paid on every later request. What it states instead is what a schema cannot — that the
+   * colleague writes into a shared record rather than answering in private, and where the notes
+   * for its seat are.
    *
    * Onboarding is a private turn and nothing else: it is not written to `#general` or to any
    * other channel, so the office's public history stays a record of work rather than of
@@ -2473,17 +2436,10 @@ function createOffice(ctx, domain, config, hooks) {
           + ' Chinese): how to dispatch work, how a reading can lie, and what to keep when someone'
           + ' leaves. Read them before you dispatch your first piece of work.'
         : undefined,
-      'The office has a history from before you joined, and nothing replays it. Read the range you'
-      + ' need with office_read; a long channel holds summaries where older messages were compacted.',
-      'A message delivered to you is a private turn in your own session, and your answer reaches'
-      + ' nobody. Most messages need no answer, and silence is a normal one.',
-      held.includes('post')
-        ? '#general is the office\'s shared record. Post important information there so everyone can'
-          + ' learn from it; send short exchanges privately with office_dm. Never post to acknowledge'
-          + ' a message, to agree with it, or to announce that you are working.'
-        : undefined,
-      'You do not need to announce yourself in #general, and nobody is waiting on you yet. Answer'
-      + ' this message briefly, then wait for real work.',
+      'The office has a history from before you joined, and nothing replays it; a long channel holds'
+      + ' summaries where older messages were compacted.',
+      'You do not need to announce yourself, and nobody is waiting on you yet. Answer this message'
+      + ' briefly, then wait for real work.',
     ].filter(line => line !== undefined).join('\n')
     const payload = {
       id: `office-hire-${colleague.sessionId}`,
@@ -2491,9 +2447,7 @@ function createOffice(ctx, domain, config, hooks) {
       content: [{
         type: 'text',
         text: `[office ${name()} | you were hired]\n${body}\n\n`
-          + '(This is a private note from the office; nothing here was posted to a channel. '
-          + 'Your reply stays in this session and reaches nobody, and it does not need to be posted'
-          + ' anywhere.)',
+          + '(This is a private note from the office; nothing here was posted to a channel.)',
       }],
       // A source kind and identity are required on every delivered turn; this one belongs to no
       // channel, and says so rather than naming a channel it was never written to.
@@ -4285,12 +4239,9 @@ function createNotificationsTool(agent, tool) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        required: ['office', 'role', 'notifications'],
+        required: ['office', 'notifications'],
         properties: {
           office: { type: 'string' },
-          // The reading colleague's own role, which decides what the frame the reader receives may
-          // suggest as an answer; the presenter must not have to re-resolve the office to know it.
-          role: { type: 'string' },
           notifications: {
             type: 'array',
             items: {
@@ -4315,7 +4266,7 @@ function createNotificationsTool(agent, tool) {
       },
       render: (_args, value) => (value.notifications.length === 0
         ? text(`[office ${value.office}] Nothing was held for you.`)
-        : text(frameNotifications(value.office, value.notifications, value.role))),
+        : text(frameNotifications(value.office, value.notifications))),
     },
     async execute(args) {
       const resolved = tool.entry(args, name)
@@ -4326,7 +4277,6 @@ function createNotificationsTool(agent, tool) {
       const taken = await office.takeWakes(sender.sessionId, office.liveAgent(sender.sessionId))
       return {
         office: officeName,
-        role: tool.roleIn(resolved) ?? DEFAULT_COLLEAGUE_ROLE,
         notifications: taken.map(({ message, stepEnd }) => compact({
           messageId: message.messageId,
           channelId: message.channelId,
@@ -4363,10 +4313,12 @@ function createCommunicationTools(agent, tool) {
       description:
         'Post to "#general" (the default) or to a group channel you are a member of. wake is required and '
         + 'decides who is woken; an empty list writes to the record without waking anyone, who can still read '
-        + 'it with office_read. A post spends a turn of everyone it wakes, so post only what those colleagues '
-        + 'should learn from — never to acknowledge a message, to agree with one, or to announce that you are '
-        + 'working. A group channel wakes its own members among the ones the wake addresses. Use office_dm for '
-        + 'short or private exchanges.',
+        + 'it with office_read. A group channel wakes its own members among the ones the wake addresses. '
+        + 'A post spends a turn of everyone it wakes, so post only what those colleagues should learn from — '
+        + 'and answer a message where it stands: in its channel when it was public, with office_dm when it was '
+        + 'private. Silence is the normal answer to a delivered message, and a burst of them is one answer '
+        + 'rather than one post each. Never post to acknowledge a message, to agree with one, or to announce '
+        + 'that you are working.',
       parameters: tool.parameters(['wake', 'text'], {
         channel: {
           type: 'string',

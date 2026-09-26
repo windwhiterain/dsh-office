@@ -53,13 +53,14 @@ Each colleague receives its own turn in its own conversation — not a line in a
 ```text
 [office #general from user | general-12]
 release is cut — review the diff before I tag it
-
-(Your reply stays in this session and reaches nobody. Most messages need no answer, and
-silence is a normal one. Post important information to #general so everyone can learn from it;
-send short exchanges privately with office_dm. Never post to acknowledge a message, to agree
-with it, or to say that you are working on it: a public post wakes every colleague, and each
-of them spends a turn on it.)
 ```
+
+The frame carries the message and nothing else. The rules that keep one post from waking the office
+again — silence is the normal answer, answer where the message stands, never post an
+acknowledgement — are stated once, in `office_post`'s own description. A frame is written into the
+colleague's session, so a rule appended to it would be copied into that history once per delivered
+message and re-sent with every later request; a tool description is assembled into each request
+instead.
 
 A colleague that is mid-turn is **not interrupted**. By default it reads the message at its next
 step boundary — `steered`, above — so it hears about a correction while the work it corrects is
@@ -623,12 +624,18 @@ unauthenticated.
   office is not told that it joined; an operator who wants that announces it, or the new colleague
   posts when it has something to say. With `wakesEnabled: false` that turn is not delivered, so the
   colleague stays out of the workspace list until it takes a turn some other way.
-- **That turn does not enumerate the tools the role holds.** The scope's own schema already
-  declares them, and the turn stays in the colleague's history for the life of its session, so a
-  copied catalog would be paid on every later request. What the turn states instead is what a
-  schema cannot: whether this colleague writes into a shared record or answers privately, and the
-  norms that follow from it. The role still decides the tool set; nothing else about the
-  assignment changed.
+- **That turn states nothing the colleague's own schema already says.** It does not enumerate the
+  tools the role holds and it does not restate the answering rules, because the turn stays in the
+  colleague's history for the life of its session and a copy is therefore paid on every later
+  request. What it states instead is what a schema cannot: whether this colleague writes into a
+  shared record or answers privately, that the office has a history nothing replays, and where the
+  notes for its seat are. The role still decides the tool set; nothing else about the assignment
+  changed.
+- **A delivery frame carries the message and nothing else.** The rules that keep one post from
+  waking the office again are appended to no frame; they are stated once, in `office_post`'s
+  description, for the same reason. A frame is written into the receiving colleague's session once
+  per delivered message, so a rule inside it would be re-sent with every later request for the life
+  of that history. See [docs/delivery.md](docs/delivery.md#the-answering-rule).
 - **Only a hire carries the leader's guide.** A session that is *adopted* as a leader, or promoted
   by `office_configure`, takes no onboarding turn, so nothing ever tells it where the notes are;
   it learns the path from the office's own record or from the operator. The path is resolved
@@ -650,7 +657,7 @@ unauthenticated.
   gets: `turn-end` is the merge, and the default `step-end` splices each message into every busy
   recipient's running turn. A colleague that answers every wake in public keeps the loop running,
   because its answer can reach every colleague with one level. What bounds the office is the
-  answering rule stated in every frame and every tool description.
+  answering rules `office_post` states, and the judgement of the colleague reading them.
 - **The mailbox has no reply action yet.** Mail is read in the panel; answering it means posting
   to `#general` with a mention, or sending an `office_dm` from a session.
 - **`userName` is reserved.** A colleague whose session title is exactly the user's name cannot be

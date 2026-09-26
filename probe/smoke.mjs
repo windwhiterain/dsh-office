@@ -1038,7 +1038,10 @@ await check('notify:turn-end holds a burst and hands over one merged turn when t
   assert.match(frames[1], /^\[office #general from Alice Smith \| general-\d+\]$/)
   assert.match(text, /private note/)
   assert.match(text, /public note, same burst/)
-  assert.match(text, /These arrived while your previous turn was running\./)
+  assert.ok(
+    !text.includes('not because each one asks for an answer'),
+    'the batch frame carries the messages, not the answering rules',
+  )
 
   const read = await call(alice, 'office_read', { channel: 'bob' })
   assert.equal(read.channelId, 'dm-sessionalice+sessionbob')
@@ -1202,7 +1205,7 @@ await check('office_read_notifications takes what is held for its own caller, mi
   // Nothing held reads as nothing, and reading never wakes anybody.
   const empty = await call(ada, 'office_read_notifications', {})
   assert.deepEqual(empty.notifications, [])
-  assert.equal(empty.role, 'member')
+  assert.deepEqual(Object.keys(empty).sort(), ['notifications', 'office'], 'the result names the office and the mail')
   assert.equal(ada.sent.length, 0)
   assert.equal(
     ada.tools.get('office_read_notifications').output.render({}, empty)[0].text,
@@ -1245,10 +1248,9 @@ await check('office_read_notifications takes what is held for its own caller, mi
     /\[office #general from chief \| general-\d+\] \(held until the end of your turn\)/,
     'a notification held under the non-default timing says so',
   )
-  assert.match(
-    rendered,
-    /Most messages need no answer, and silence is a normal one\./,
-    'the frame carries the answering rule',
+  assert.ok(
+    !rendered.includes('Most messages need no answer'),
+    'the frame carries the notification, not an answering rule',
   )
 
   // Taking is what makes it a delivery, and it is only ever the caller's own mail.
@@ -1614,19 +1616,30 @@ await check('a broadcast wakes every colleague except the sender', async () => {
   assert.ok(all.deliveries.every(entry => entry.status === 'delivered'))
 })
 
-await check('the delivery frame states where a reply does and does not surface', async () => {
+await check('a delivery frame carries the message, not the answering rules', async () => {
   await call(alice, 'office_dm', { wake: ['@bob'], text: 'private note' })
   const dmText = bob.sent.at(-1).message.content[0].text
-  assert.match(dmText, /Your reply stays in this session and reaches nobody/)
-  assert.match(dmText, /Most messages need no answer, and silence is a normal one/)
-  assert.ok(!dmText.includes('a public post wakes every colleague'), 'a private message must not invite a public reply')
+  assert.match(
+    dmText,
+    /^\[office DM from Alice Smith \| dm-\S+\]\n\nprivate note$/,
+    'the frame is the destination, the identity, and the body, and nothing else',
+  )
   await call(alice, 'office_post', { text: 'public note', wake: ['@bob'] })
   const publicText = bob.sent.at(-1).message.content[0].text
-  assert.match(publicText, /Post important information to #general so everyone can learn from it/)
+  assert.match(publicText, /^\[office #general from Alice Smith \| general-\d+\]\n\npublic note$/)
+  // The rule a wake used to carry is not lost: it moved to the tool that states it, because a
+  // frame is written into the colleague's session and re-sent with every later request for the
+  // life of that history, while a tool description is assembled into each request instead.
+  for (const [kind, text] of [['dm', dmText], ['public', publicText]]) {
+    assert.ok(
+      !/stays in this session|need no answer|everyone can learn from it|acknowledge a message/.test(text),
+      `the ${kind} frame appends no standing rule`,
+    )
+  }
   assert.match(
-    publicText,
-    /Never post to acknowledge a message, to agree with it, or to say that you are working on it/,
-    'a wake states the rule that keeps one post from waking the office again',
+    bob.tools.get('office_post').description,
+    /Silence is the normal answer to a delivered message/,
+    'the rule is standing context instead',
   )
 })
 
@@ -2439,7 +2452,8 @@ await check('a wake says how far the channel had moved when the turn was queued'
   const body = lagging.liveAgents.get('session-zed').sent.at(-1).message.content[0].text
   assert.match(body, /^\[office #general from chief \| general-1\]/)
   assert.match(body, /#general had already reached general-2 when this turn was queued/)
-  assert.match(body, /Newer messages are not part of it; office_read reads them\./)
+  assert.match(body, /when this turn was queued; newer messages are not in it\./)
+  assert.ok(!body.includes('office_read reads them'), 'the staleness line states the state, not where to read next')
 
   // A wake that was never overtaken carries no such line: a live message and a stale one must
   // not look the same in the opposite direction either.
@@ -2933,12 +2947,16 @@ await check('a consultant speaks into the office while its session runs read-onl
   })
   assert.equal(hired.colleague.permission, 'read-only', 'the preset is the session restriction, not the voice')
 
-  // The frame answers with the tools the role holds, so a consultant is told where a public
-  // answer belongs rather than being pointed at its own transcript.
+  // The rule about answering in public is standing context, not part of the frame: a frame is
+  // written into the colleague's session and re-sent with every later request.
   await callBoss(chief, 'quiet', 'office_post', { text: 'any advice? mention me if so', wake: ['@rose'] })
   const frame = rose.sent.at(-1).message.content[0].text
-  assert.match(frame, /Post important information to #general so everyone can learn from it/, 'the frame names what the role holds')
-  assert.match(frame, /send short exchanges privately with office_dm/)
+  assert.ok(!frame.includes('everyone can learn from it'), 'the frame carries the message alone')
+  assert.match(
+    rose.tools.get('office_post').description,
+    /Silence is the normal answer to a delivered message/,
+    'and the colleague holds the tool that states the rule',
+  )
 
   const spoken = await call(rose, 'office_post', { text: 'advice: the summary is settled', wake: [] })
   assert.equal(spoken.message.channelId, 'general', 'a consultant writes into the office like a member')
@@ -3304,8 +3322,15 @@ await check('the boss and the leaders manage channels, whose members decide who 
   assert.ok(mia.sent.length > before[1], 'a member is woken')
   assert.equal(lea.sent.length, before[0], 'and nobody else is, not even the boss preset\'s other ties')
   const frame = mia.sent.at(-1).message.content[0].text
-  assert.match(frame, /Post important information to #wakecheck so everyone can learn from it/,
-    'the answering rule names the channel the message arrived on')
+  assert.ok(
+    !frame.includes('everyone can learn from it'),
+    'the frame names the message, not the rule it used to carry',
+  )
+  assert.match(
+    mia.tools.get('office_post').description,
+    /answer a message where it stands/,
+    'the standing rule tells a colleague to answer in the channel the message arrived on',
+  )
   const read = await call(mia, 'office_read', { office: 'teams', channel: '#wakecheck' })
   assert.equal(read.messages.at(-1).text, 'the release notes are ready')
   await assert.rejects(

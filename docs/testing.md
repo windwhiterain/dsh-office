@@ -36,10 +36,10 @@ What it covers, by area:
   an unknown timing, the `source.kind` each delivery claims (`user` on the splice the Web Chat draws
   as an in-turn message, `office-message` on the turn it draws as a trigger), `turn-end` merging a
   burst into one turn, a durable hold surviving a simulated restart, cold resume on the route the
-  session last logged, delivery statuses, and the frames, including the role-aware answering rule. A
-  `step-end` wake is covered too: the steer into a running turn, the hold released when the harness
-  claims the message, the recovery of a wake nothing claimed (still pending, discarded, or carried
-  across a restart), and the hold deleted with a deleted channel.
+  session last logged, delivery statuses, and the frames, which carry the message and no standing
+  rule. A `step-end` wake is covered too: the steer into a running turn, the hold released when the
+  harness claims the message, the recovery of a wake nothing claimed (still pending, discarded, or
+  carried across a restart), and the hold deleted with a deleted channel.
 - **`office_read_notifications`** — taking a steered and a held notification in one read, the inbox
   copy going back with the hold so no step delivers it twice, the delivery recorded as `delivered`,
   the message left in its channel and in `office_read`, reading twice taking nothing, a colleague

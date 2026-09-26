@@ -126,13 +126,22 @@ The split of responsibility is the rule that keeps them from growing back:
 - Recovery advice belongs in the thrown error, which is read exactly when it is needed and costs
   nothing until then. `office_dm`'s refusal of a wake level, for instance, names `office_post` as
   the tool that does take one.
-- Behaviour that is a *norm* rather than an interface — never post to acknowledge a message —
-  is stated once, in the onboarding turn, and only in the compressed form the tool description
-  needs.
-- The onboarding turn states the colleague's place and those norms, and deliberately does not
-  enumerate the tools the role holds. The scope's own schema declares them, and the turn stays in
-  the colleague's history for the life of its session, so a copied catalog would be paid on every
-  later request. The role still decides the tool set; the turn only stops restating it.
+- Behaviour that is a *norm* rather than an interface — silence is the normal answer to a delivered
+  message, never post an acknowledgement — is stated once, in the tool that owns it:
+  `office_post`. Every predefined role holds that tool, so one statement reaches every colleague
+  and the boss.
+- The onboarding turn states the colleague's place, and deliberately neither enumerates the tools
+  the role holds nor restates those norms. The scope's own schema declares the tools, and the turn
+  stays in the colleague's history for the life of its session, so a copied catalog and a copied
+  rule would be paid on every later request. The role still decides the tool set; the turn only
+  stops restating it.
+
+One rule follows from that argument and is worth stating on its own: **nothing written into a
+session carries a standing rule.** A delivery frame is appended to the receiving colleague's
+history once per message, so a rule inside it is re-sent with every later request for the life of
+that history. The answering rules moved out of the frames for that reason; see
+[delivery.md](delivery.md#the-answering-rule). The frames are therefore not a row in the table
+below — what they carry is the message, which is content rather than budget.
 
 Shared parameters are declared once, by a builder, so a wording change lands in every tool that
 carries them: `officeArgument()`, `roleProperty()`, `descriptionProperty()`, and
@@ -143,11 +152,17 @@ Measured with the literals concatenated the way the model receives them:
 
 | surface | before | after |
 |---|---:|---:|
-| a boss's eighteen tool schemas | 14,725 | 9,061 |
-| a member's six tool schemas | 6,560 | 3,468 |
+| a boss's eighteen tool schemas | 14,725 | 9,243 |
+| a member's six tool schemas | 6,560 | 3,650 |
 | the boss persona | 1,080 | 779 |
-| a member's onboarding turn | 1,607 | 1,143 |
-| a leader's onboarding turn | 2,248 | 1,408 |
+| a member's onboarding turn | 1,607 | 592 |
+| a leader's onboarding turn | 2,248 | 857 |
+
+The tool figures include 182 characters that moved *into* `office_post` when the answering rules
+left the delivery frames. That is the trade described above: those characters used to be appended
+to every frame instead — about 396 for a public delivery and 148 for a direct one — so a colleague
+woken twenty times now carries roughly 7,900 characters less, and pays for the rule once per
+request as part of a schema that was already being sent.
 
 Output schemas are not part of these figures: a canonical request carries `parameters` only, so
 `output.schema` costs nothing outside PTC presentation.
@@ -461,8 +476,7 @@ Three properties decide its shape:
 - **It is a read, and a delivery.** The tool result *is* the delivery, so the hold is released and
   the sender's recorded outcome becomes `delivered` with a detail naming the read; leaving it
   `queued` would report a message as unread for ever. The frame the colleague receives is the one a
-  wake would have carried, answering rule included, so what a colleague reads does not depend on
-  whether it waited or asked.
+  wake would have carried, so what a colleague reads does not depend on whether it waited or asked.
 - **It takes the delivery, never the message.** The message stays in its channel, where
   `office_read` finds it, so a colleague that reads its notifications and then loses its turn has
   lost nothing: the office gave up a delivery it can no longer make twice, not a record. The one
