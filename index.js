@@ -1102,8 +1102,12 @@ function channelLabel(message) {
  * that matters: the user does see the reply. A colleague told that nothing reaches anybody has no
  * reason to reach for a tool — the fact that a tool is the only thing a colleague sees is the part
  * that has to be said.
+ *
+ * It is written in the second person for that reason. A demonstrative would have no antecedent but
+ * the message just delivered, so "this reply reaches the user alone" reads as a remark about the
+ * colleague that sent the message rather than about what the reader is about to write.
  */
-const OFFICE_DELIVERY_NOTE = '(Only an office tool notifies a colleague; this reply reaches the user alone.)'
+const OFFICE_DELIVERY_NOTE = '(What you write yourself reaches only the user; only an office tool notifies a colleague.)'
 
 /**
  * The office's delivery contract, contributed to every armed agent's system prompt.

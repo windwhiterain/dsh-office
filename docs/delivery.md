@@ -247,7 +247,7 @@ One message:
 [office #general from colleague alice | general-9]
 @bob can you take this?
 
-(Only an office tool notifies a colleague; this reply reaches the user alone.)
+(What you write yourself reaches only the user; only an office tool notifies a colleague.)
 ```
 
 A turn that carries a merged burst — its header says how many, and each message keeps its own:
@@ -264,7 +264,7 @@ thanks — merging
 [office DM from colleague erin | dm-….4]
 can you look at this before I ship?
 
-(Only an office tool notifies a colleague; this reply reaches the user alone.)
+(What you write yourself reaches only the user; only an office tool notifies a colleague.)
 ```
 
 The frame names the sender as a colleague or as the user, the destination, and the message
@@ -325,9 +325,12 @@ asked for, and wrote its answer as its own turn. It never called `office_post` o
 the rules being in a schema it did carry made no difference: nothing in front of it at the moment
 it answered said that a reply in its own turn reaches only the user. Two changes came out of it.
 
-- **The frame states that one fact**, as `OFFICE_DELIVERY_NOTE`: only an office tool notifies a
-  colleague, and this reply reaches the user alone. It is the single fact the colleague's next
-  action depends on, and the colleague reads it in the message it was just handed.
+- **The frame states that one fact**, as `OFFICE_DELIVERY_NOTE`: what a colleague writes itself
+  reaches only the user, and only an office tool notifies a colleague. It is the single fact the
+  colleague's next action depends on, and the colleague reads it in the message it was just handed.
+  It is worded in the second person on purpose: a demonstrative — "this reply reaches the user
+  alone" — has no antecedent in a frame but the message that just arrived, so it reads as a remark
+  about the sender rather than about what the reader is about to write.
 - **The office contributes standing prompt text**, `OFFICE_DELIVERY_CONTRACT`, registered into each
   armed agent's own scope alongside its tools and withdrawn with them. A colleague's system prompt
   otherwise says nothing about the office at all — its preset is an ordinary coding agent — so the
@@ -395,7 +398,7 @@ can you look at this before I ship?
 [office #general from colleague bob | general-9] (held until the end of your turn)
 release is cut
 
-(Only an office tool notifies a colleague; this reply reaches the user alone.)
+(What you write yourself reaches only the user; only an office tool notifies a colleague.)
 ```
 
 | Field | Meaning |

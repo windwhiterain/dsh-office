@@ -54,17 +54,17 @@ Each colleague receives its own turn in its own conversation — not a line in a
 [office #general from the user | general-12]
 release is cut — review the diff before I tag it
 
-(Only an office tool notifies a colleague; this reply reaches the user alone.)
+(What you write yourself reaches only the user; only an office tool notifies a colleague.)
 ```
 
-The frame names the sender as a colleague or as the user, and carries exactly one rule: what a
-colleague writes in its own turn is seen by the user alone, so reaching a colleague takes an office
-tool. The rules that keep one post from waking the office again — silence is the normal answer,
-answer where the message stands, never post an acknowledgement — are standing context instead, in
-`office_post`'s description and in a prompt section the office contributes to each armed colleague.
-A frame is written into the colleague's session, so a paragraph in it would be copied into that
-history once per delivered message and re-sent with every later request; the one line stays because
-the colleague reads it in the message it was just handed.
+The frame names the sender as a colleague or as the user, and carries exactly one rule, in the
+second person: what a colleague writes itself reaches only the user, so reaching a colleague takes
+an office tool. The rules that keep one post from waking the office again — silence is the normal
+answer, answer where the message stands, never post an acknowledgement — are standing context
+instead, in `office_post`'s description and in a prompt section the office contributes to each
+armed colleague. A frame is written into the colleague's session, so a paragraph in it would be
+copied into that history once per delivered message and re-sent with every later request; the one
+line stays because the colleague reads it in the message it was just handed.
 
 A colleague that is mid-turn is **not interrupted**. By default it reads the message at its next
 step boundary — `steered`, above — so it hears about a correction while the work it corrects is
@@ -84,7 +84,7 @@ office_read_notifications  {}
 [office #general from the user | general-12]
 release is cut — review the diff before I tag it
 
-(Only an office tool notifies a colleague; this reply reaches the user alone.)
+(What you write yourself reaches only the user; only an office tool notifies a colleague.)
 ```
 
 Address the user and the message lands in the user's mailbox instead of waking anybody:
@@ -645,12 +645,12 @@ unauthenticated.
   agent's, and the only office text it ever reads is a tool description it may not be reaching for.
 - **A delivery frame names the sender and carries exactly one rule.** A message the human sent says
   `from the user`; every other sender says `from colleague <name>`. The trailing line states the one
-  fact the colleague's next action depends on — only an office tool notifies a colleague, and this
-  reply reaches the user alone. The paragraph it replaced, which held the answering rules and the
-  acknowledgement rule, is standing context now: a frame is written into the receiving colleague's
-  session once per delivered message, so a paragraph in it is re-sent with every later request for
-  the life of that history. See [docs/delivery.md](docs/delivery.md#the-answering-rule) for why the
-  one line stayed.
+  fact the colleague's next action depends on, in the second person: what the colleague writes
+  itself reaches only the user, and only an office tool notifies a colleague. The paragraph it
+  replaced, which held the answering rules and the acknowledgement rule, is standing context now: a
+  frame is written into the receiving colleague's session once per delivered message, so a paragraph
+  in it is re-sent with every later request for the life of that history. See
+  [docs/delivery.md](docs/delivery.md#the-answering-rule) for why the one line stayed.
 - **Only a hire carries the leader's guide.** A session that is *adopted* as a leader, or promoted
   by `office_configure`, takes no onboarding turn, so nothing ever tells it where the notes are;
   it learns the path from the office's own record or from the operator. The path is resolved

@@ -1655,12 +1655,12 @@ await check('a delivery frame names the sender, the message, and the one rule it
   const dmText = bob.sent.at(-1).message.content[0].text
   assert.match(
     dmText,
-    /^\[office DM from colleague Alice Smith \| dm-\S+\]\n\nprivate note\n\n\(Only an office tool notifies a colleague; this reply reaches the user alone\.\)$/,
+    /^\[office DM from colleague Alice Smith \| dm-\S+\]\n\nprivate note\n\n\(What you write yourself reaches only the user; only an office tool notifies a colleague\.\)$/,
     'the frame is the sender, the identity, the body, and the one line the next action depends on',
   )
   await call(alice, 'office_post', { text: 'public note', wake: ['@bob'] })
   const publicText = bob.sent.at(-1).message.content[0].text
-  assert.match(publicText, /^\[office #general from colleague Alice Smith \| general-\d+\]\n\npublic note\n\n\(Only an office tool/)
+  assert.match(publicText, /^\[office #general from colleague Alice Smith \| general-\d+\]\n\npublic note\n\n\(What you write yourself/)
   // The paragraph that used to be appended here — silence is the normal answer, answer where the
   // message stands, never post an acknowledgement — is standing context now: a frame is written
   // into the colleague's session and re-sent with every later request for the life of that history.

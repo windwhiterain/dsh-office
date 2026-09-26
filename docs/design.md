@@ -169,7 +169,7 @@ Measured with the literals concatenated the way the model receives them:
 | a member's onboarding turn | 1,607 | 592 |
 | a leader's onboarding turn | 2,248 | 857 |
 | the delivery contract, once per request | 0 | 323 |
-| one frame's rule tail | 396 | 78 |
+| one frame's rule tail | 396 | 90 |
 
 The tool figures include 182 characters that moved *into* `office_post`. The frame tail came down
 from the full paragraph to the one line, so a colleague woken twenty times carries roughly 6,300
