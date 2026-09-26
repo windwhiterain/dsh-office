@@ -650,6 +650,8 @@ unauthenticated.
 - [docs/hot-reload.md](docs/hot-reload.md) — what applies live, and how to iterate against a
   running host.
 - [docs/testing.md](docs/testing.md) — the offline probe and the panel render check.
+- [experience/README.md](experience/README.md) — leading a team that lives in this office:
+  how to dispatch, how readings lie, and what to keep when someone leaves.
 
 ## License
 
