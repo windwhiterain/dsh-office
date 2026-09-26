@@ -41,9 +41,9 @@ office_post  { "text": "release is cut — review the diff before I tag it" }
 
 [office] Posted general-12 to general.
 Delivery:
-- alice: delivered
-- bob: delivered
-- carol: queued (held until its turn ends)
+- alice: steered
+- bob: steered
+- carol: delivered
 ```
 
 Each colleague receives its own turn in its own conversation — not a line in a shared log:
@@ -59,21 +59,23 @@ with it, or to say that you are working on it: a public post wakes every colleag
 of them spends a turn on it.)
 ```
 
-A colleague that is mid-turn is **not interrupted**. Everything that arrives while it works is
-held and handed over as **one** turn when it stops — nine messages cost one turn and one answer
-— and the hold is durable, so a message a colleague is waiting for survives a host restart. Two
-exceptions are deliberate. A **leader** holds `office_interrupt`, which cancels a running turn and
-lets the office hand over everything held for that colleague at once. And `office_dm` may ask for
-the running turn with `notify: "step-end"`, which splices its message into that turn to be read at
-the next step boundary — the way to change what a colleague is doing rather than answer it
-afterwards:
+A colleague that is mid-turn is **not interrupted**. By default it reads the message at its next
+step boundary — `steered`, above — so it hears about a correction while the work it corrects is
+still running. `notify: "turn-end"` asks for the other timing instead: everything that arrives
+while a colleague works is held and handed over as **one** turn when it stops — nine messages cost
+one turn and one answer — and the hold is durable, so a message a colleague is waiting for survives
+a host restart. Two more exceptions are deliberate. A **leader** holds `office_interrupt`, which
+cancels a running turn and lets the office hand over everything held for that colleague at once.
+And a colleague that wants what is held for it *now* reads it itself with
+`office_read_notifications`, which takes the holds rather than waiting for the turn to end:
 
 ```text
-office_dm  { "to": "alice", "text": "stop: that is the wrong branch", "notify": "step-end" }
+office_read_notifications  {}
 
-[office] Posted dm-….4 to dm-sessionalice+sessionyou.
-Delivery:
-- alice: steered (the colleague is mid-turn; it receives this at the end of the step that is running)
+[office office] 3 notifications were held for you, read here on request:
+
+[office #general from user | general-12]
+release is cut — review the diff before I tag it
 ```
 
 Address the user and the message lands in the user's mailbox instead of waking anybody:
@@ -115,9 +117,11 @@ rather than of arrivals. `role` is one of `member` (the default), `leader`, or `
 ```text
 office_post  { "text": "morning" }                      # wakes the whole office
 office_dm    { "to": "alice", "text": "look at this" }  # wakes one colleague
-office_dm    { "to": "alice", "notify": "step-end", "text": "stop: wrong branch" }  # steers its running turn
+office_post  { "text": "stop: wrong branch", "mentions": ["alice"], "notify": "turn-end" }
+                                                        # holds it for alice's turn to end
 office_dm    { "to": "user", "text": "blocked on ci" }  # mail for you, wakes nobody
 office_read  { "channel": "#general", "from": 1 }       # a query; never a wake
+office_read_notifications  {}                           # what is held for you, taken now
 office_colleagues  { "office": "office" }               # who is busy, and what is held for whom
 ```
 
@@ -134,7 +138,7 @@ once.
 
 | Capability | `member` | `leader` | `consultant` |
 |---|---|---|---|
-| `office_read`, `office_colleagues`, `office_channels` | yes | yes | yes |
+| `office_read`, `office_read_notifications`, `office_colleagues`, `office_channels` | yes | yes | yes |
 | `office_post`, `office_dm` | yes | yes | yes |
 | `office_interrupt` | — | yes | — |
 | `office_compact`, `office_configure` | — | yes | — |
@@ -204,9 +208,10 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_channel_delete` | Delete a group channel the office created; its messages and the holds it owed go with it. The standing channels and the direct ones are refused. |
 | `office_channel_members` | Add or remove a group channel's members, named by session title — or read the current members back with neither list. |
 | `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. |
-| `office_post` | Post to a channel: `#general` by default, where a post wakes the whole roster; a group channel wakes exactly its members. `mentions` narrows that, `mention_all: false` writes without waking anyone, and naming the user files a copy in the mailbox. |
-| `office_dm` | Private message to one colleague, or mail to the user, whose name writes to the mailbox. `notify` picks when a colleague that is mid-turn receives it: `turn-end` (default) after its turn, `step-end` at the next step boundary of the turn it is running. |
+| `office_post` | Post to a channel: `#general` by default, where a post wakes the whole roster; a group channel wakes exactly its members. `mentions` narrows that, `mention_all: false` writes without waking anyone, and naming the user files a copy in the mailbox. `notify` picks when a colleague that is **mid-turn** receives it: `step-end` (the default) splices it into the running turn to be read at its next step boundary, and `turn-end` holds it until the turn ends and hands it over merged with whatever else arrived. An idle colleague gets it now either way. |
+| `office_dm` | Private message to one colleague, or mail to the user, whose name writes to the mailbox. Takes the same `notify` as `office_post`. |
 | `office_read` | Read channel history by sequence range and filters, addressed by name, by a colleague's title for a DM, or by `*` for everything you can read. |
+| `office_read_notifications` | Take the notifications the office is holding for you, and read them now instead of at the end of your turn. |
 | `office_compact` | Replace a sequence range with a summary the boss wrote, so a long channel stays bounded. |
 | `office_channels` | List the channels this caller may read, with their kind, topic, and members. A pure query: it wakes nobody. |
 
@@ -227,6 +232,7 @@ Installed into every colleague's session, and into a session the moment it is ad
 | Tool | `member` | `leader` | `consultant` |
 |---|---|---|---|
 | `office_read` | yes | yes | yes |
+| `office_read_notifications` | yes | yes | yes |
 | `office_colleagues`, `office_channels` | yes | yes | yes |
 | `office_post` | yes | yes | — |
 | `office_dm` | yes | yes | — |
@@ -458,6 +464,12 @@ narrows it, and `mention_all: false` wakes nobody.
 Waking is not the same as reading: `mention_all: false` still writes the message to the channel,
 where anyone can find it with `office_read`.
 
+The panel has no timing control, so its posts carry the office's default: a colleague that is
+mid-turn reads a post from the panel at its next step boundary, exactly as it reads one from the
+model. A caller that wants the message held for the turn to end — merged with whatever else
+arrives before it — expresses that with `notify: "turn-end"` on `office_post`, which the panel has
+no control for yet.
+
 ## Web routes
 
 The panel reads two groups of routes registered on `ctx.webServer`.
@@ -513,10 +525,16 @@ unauthenticated.
   not told that it joined; an operator who wants that announces it, or the new colleague posts
   when it has something to say. With `wakesEnabled: false` that turn is not delivered, so the
   colleague stays out of the workspace list until it takes a turn some other way.
+- **A colleague cannot see that anything is held for it.** A hold is invisible by design — the
+  office does not interrupt a working colleague — so a colleague that is running learns about held
+  mail only by asking for it, with `office_read_notifications`. Nothing pushes it a notice that
+  something is waiting.
 - **Nothing bounds how many messages a burst merges, and nothing bounds the loop a burst can
-  start.** Merging is a turn-count damper, not a brake: a colleague that answers every wake in
-  public keeps the loop running, because its answer wakes everyone who woke it. What bounds the
-  office is the answering rule stated in every frame and every tool description.
+  start.** Merging is a turn-count damper, not a brake, and it is no longer what a default call
+  gets: `turn-end` is the merge, and the default `step-end` splices each message into every busy
+  recipient's running turn. A colleague that answers every wake in public keeps the loop running,
+  because its answer wakes everyone who woke it. What bounds the office is the answering rule
+  stated in every frame and every tool description.
 - **The mailbox has no reply action yet.** Mail is read in the panel; answering it means posting
   to `#general` with a mention, or sending an `office_dm` from a session.
 - **`userName` is reserved.** A colleague whose session title is exactly the user's name cannot be
@@ -528,8 +546,8 @@ unauthenticated.
 - [docs/design.md](docs/design.md) — why the plugin is shaped this way: row kinds, the host/office
   split, the boss preset's mask, the role model, and why a wake can be timed.
 - [docs/data-model.md](docs/data-model.md) — storage domains, tables, and identity.
-- [docs/delivery.md](docs/delivery.md) — waking, merged turns, step-end steering, durable holds,
-  frames, reading, and compaction.
+- [docs/delivery.md](docs/delivery.md) — waking, steering, merged turns, durable holds, frames,
+  reading what is held, and compaction.
 - [docs/hot-reload.md](docs/hot-reload.md) — what applies live, and how to iterate against a
   running host.
 - [docs/testing.md](docs/testing.md) — the offline probe and the panel render check.

@@ -102,17 +102,28 @@ const DESCRIPTION_MAX_CHARS = 2000
 /**
  * When a wake reaches a colleague that is mid-turn.
  *
- * `turn-end` is the office's own contract: a colleague is never interrupted by a delivery, and
- * everything that arrives while it works is held and handed over as one turn when it stops.
- * `office_dm` may ask for `step-end` instead, which splices its message into the running turn at
- * that turn's next step boundary — the choice between answering after the work and steering the
- * work.
+ * `step-end` splices the message into the running turn, to be read at that turn's next step
+ * boundary, so a busy colleague reads a notification while it works rather than after it
+ * stops. `turn-end` holds it instead, and hands it over — merged with everything else that
+ * arrived meanwhile — as one turn when the colleague stops. Neither interrupts a turn: the
+ * difference is whether the colleague that is working hears about it before or after it
+ * finishes.
  */
 const NOTIFY_TURN_END = 'turn-end'
 const NOTIFY_STEP_END = 'step-end'
 
 /** Every notification timing a caller may ask for, default first. */
-const NOTIFY_TIMINGS = [NOTIFY_TURN_END, NOTIFY_STEP_END]
+const NOTIFY_TIMINGS = [NOTIFY_STEP_END, NOTIFY_TURN_END]
+
+/**
+ * The timing a call that names none gets.
+ *
+ * The office delivers as soon as the colleague can read, which is `step-end`: a notification
+ * that waits for a turn to end answers something the colleague has already moved past. Every
+ * surface that carries a message inherits this default — the tools, and the panel route, which
+ * has no timing control of its own — so a caller that wants the merge must ask for it.
+ */
+const DEFAULT_NOTIFY = NOTIFY_STEP_END
 
 /** The identity prefix of the turn one office message becomes. */
 const WAKE_ID_PREFIX = 'office-'
@@ -181,16 +192,16 @@ function normalizeDescription(value, where) {
 /**
  * Validate the notification timing a caller asked for.
  *
- * An absent timing is the office's own contract rather than an omission: it is what every caller
- * that predates the argument meant, and what the office already does for a colleague that is
- * mid-turn.
+ * An absent timing is the office's default rather than an omission: a caller that names no
+ * timing gets {@link DEFAULT_NOTIFY}, which is what every surface that carries no timing
+ * control of its own — the panel route — means too.
  * @param value - the requested timing.
  * @param tool - the registered tool name refusing it.
  * @returns a timing of {@link NOTIFY_TIMINGS}.
  * @throws {TypeError} when the value is neither absent nor a known timing.
  */
 function requireNotify(value, tool) {
-  if (value === undefined) return NOTIFY_TURN_END
+  if (value === undefined) return DEFAULT_NOTIFY
   if (typeof value !== 'string' || !NOTIFY_TIMINGS.includes(value)) {
     throw new TypeError(
       `${tool}: notify must be one of ${NOTIFY_TIMINGS.join(', ')}, got ${JSON.stringify(value)}`,
@@ -895,6 +906,35 @@ function frameBatch(officeName, messages, newestSeq, role) {
   ].filter(line => line !== undefined).join('\n\n')
 }
 
+/**
+ * Compose the model-visible framing of the notifications one colleague read for itself.
+ *
+ * It is the frame a delivery would have carried — destination, sender, identity, body, and the
+ * answering rule — because what a colleague reads must not depend on whether it waited for its
+ * turn to end or asked for its mail in the middle of one. Only the header differs: this is the
+ * colleague's own read, so it does not claim the messages arrived while it worked. A notification
+ * held under the non-default timing says so, because a colleague that asked for its mail is
+ * otherwise unable to tell an announcement from a message somebody wanted it to act on now.
+ * @param officeName - the office the notifications came from.
+ * @param notifications - the read notifications, oldest first, as the tool reported them.
+ * @param role - the reading colleague's predefined role, which decides what an answer may use.
+ * @returns the framed text of the tool result.
+ */
+function frameNotifications(officeName, notifications, role) {
+  const last = notifications.at(-1)
+  const rule = `${OFFICE_SILENCE_RULE} ${answerRule(last.kind, role, last.channelName)}`
+  const headline = notifications.length === 1
+    ? '1 notification was held for you, read here on request:'
+    : `${String(notifications.length)} notifications were held for you, read here on request:`
+  const frames = notifications.map((notification) => {
+    const held = notification.notify === NOTIFY_TURN_END
+      ? ' (held until the end of your turn)'
+      : ''
+    return `[office ${whereOf(notification)} | ${notification.messageId}]${held}\n${notification.text}`
+  })
+  return [ `[office ${officeName}] ${headline}`, ...frames, `(${rule})` ].join('\n\n')
+}
+
 /** Distinguishing short form of a session id, for an unnamed sender in a transcript. */
 function shortSessionId(sessionId) {
   const bare = sessionId.startsWith('session-') ? sessionId.slice('session-'.length) : sessionId
@@ -1444,6 +1484,47 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
+   * Hand a colleague what the office is holding for it, because the colleague asked for it.
+   *
+   * This is the one release that does not wait for the colleague to stop: it is the colleague
+   * itself, mid-turn, taking its notifications out of the office. What it takes is what
+   * {@link heldWakes} reports — the office's own record of what the harness has not claimed —
+   * so nothing can be read twice. A step-end hold whose message the running turn already
+   * carries is dropped rather than handed back: the hold's deletion and this read race when the
+   * step boundary that claimed the message is the same boundary that started this call, and the
+   * session log is what settles it, exactly as {@link recoverStepEndWakes} settles it.
+   *
+   * What the office gives up is the delivery, not the message: the message stays in its
+   * channel, where `office_read` still finds it, so a caller that takes a notification and then
+   * loses its turn has lost nothing the office promised to keep.
+   * @param sessionId - the colleague that asked, whose own holds are the only ones taken.
+   * @param agent - its live agent, when the registry still holds one; the inbox copy of a
+   *   step-end wake can only be taken back through it.
+   * @returns the taken messages, oldest first, each with the timing it was held under.
+   */
+  const takeWakes = async (sessionId, agent) => {
+    const taken = []
+    for (const entry of heldWakes(sessionId)) {
+      const wakeId = wakeIdOf(entry.message)
+      const inboxed = agent !== undefined
+        && agent.inbox.nextStep.some(message => message.id === wakeId)
+      if (!inboxed && entry.stepEnd && await receivedWake(sessionId, entry.message)) {
+        await pendingWakes.delete(entry.pendingKey)
+        continue
+      }
+      if (inboxed) agent.inbox.remove(wakeId)
+      await pendingWakes.delete(entry.pendingKey)
+      await recordDelivery(entry.messageKey, sessionId, {
+        status: 'delivered',
+        at: Date.now(),
+        detail: 'the colleague read this in the middle of its turn, with office_read_notifications',
+      })
+      taken.push({ message: entry.message, stepEnd: entry.stepEnd })
+    }
+    return taken
+  }
+
+  /**
    * Record that the harness took a step-end wake into a step.
    *
    * The hold is deleted here, which is what makes a step-end wake a promise the office keeps
@@ -1479,19 +1560,23 @@ function createOffice(ctx, domain, config, hooks) {
    *
    * A colleague that is idle is handed the message now — together with anything it was already
    * waiting for, because those wakes were held for exactly this moment, and because a colleague
-   * with no turn to steer has no timing to choose between. One that is mid-turn is not
-   * interrupted, and it is not queued a row of stale single-message turns either: the message
-   * is held and goes into the one turn that hands over everything that arrived meanwhile.
-   * A caller that asked for `step-end` is the one exception — its message is steered into the
-   * turn that is running, to be read at that turn's next step boundary — and its hold stays
-   * until the harness claims it, so the promise survives a process that stops first.
+   * with no turn to steer has no timing to choose between. That is the same delivery whichever
+   * timing was asked for: a timing only decides what happens to a colleague that is mid-turn.
+   *
+   * A busy colleague is never interrupted. What the timing decides is whether it hears about the
+   * message while it works or when it stops: `step-end`, the office's default, steers the message
+   * into the running turn to be read at that turn's next step boundary, and its hold stays until
+   * the harness claims it, so the promise survives a process that stops first. `turn-end` holds
+   * it instead, and it goes into the one turn that hands over everything that arrived meanwhile —
+   * one turn for the burst rather than one per message.
    * @param message - the stored message.
    * @param key - the message's key in the messages table, where the outcome is recorded.
    * @param colleague - the recipient's roster record.
-   * @param notify - when the caller asked the wake to arrive.
+   * @param notify - when the caller asked the wake to arrive; defaults to the office's own
+   *   {@link DEFAULT_NOTIFY}, which is what a surface with no timing control of its own means.
    * @returns `delivered`, `queued`, or `steered`.
    */
-  const deliver = async (message, key, colleague, notify = NOTIFY_TURN_END) => {
+  const deliver = async (message, key, colleague, notify = DEFAULT_NOTIFY) => {
     const agent = await ensureAgent(colleague.sessionId)
     if (agent.status !== 'idle' && notify === NOTIFY_STEP_END) {
       await holdWake(colleague.sessionId, message, NOTIFY_STEP_END)
@@ -1634,7 +1719,16 @@ function createOffice(ctx, domain, config, hooks) {
    *   message that only addresses the user: the user has no session to steer.
    * @returns the stored message and one delivery outcome per recipient.
    */
-  const post = async ({ channel, sender, text, recipients, kind, mentionAll, toUser = false, notify }) => {
+  const post = async ({
+    channel,
+    sender,
+    text,
+    recipients,
+    kind,
+    mentionAll,
+    toUser = false,
+    notify = DEFAULT_NOTIFY,
+  }) => {
     if (text.length > config.maxMessageChars) {
       throw new Error(`dsh-office: message is ${text.length} characters; the limit is ${config.maxMessageChars}`)
     }
@@ -2224,6 +2318,7 @@ function createOffice(ctx, domain, config, hooks) {
     compactRange,
     acknowledgeClaim,
     flushWakes,
+    takeWakes,
     restoreWakes,
     senderOf,
     generalChannel: GENERAL_CHANNEL,
@@ -3783,6 +3878,92 @@ function createReadTool(agent, tool, config) {
 }
 
 /**
+ * Build the notification-reading tool for one agent.
+ *
+ * Every role holds it, and no capability gates it: what the office is holding was addressed to
+ * the reader alone, so reading it is not a permission, it is the reader's own mail. The tool
+ * exists because a held notification is otherwise invisible until the turn that is running
+ * stops — a colleague cannot see that something arrived, and `office_colleagues` reports the
+ * count of what is held to the office rather than the messages to their recipient.
+ * @param agent - the agent whose scope receives this tool.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the notification-reading tool definition.
+ */
+function createNotificationsTool(agent, tool) {
+  const name = 'office_read_notifications'
+  const { text } = tool
+  return {
+    name,
+    description:
+      'Read the notifications the office is holding for you, and take them: they are no longer held, so '
+      + 'they will not also reach you as a turn. Use it in the middle of a turn to see what has been '
+      + 'addressed to you before you finish, rather than after. It carries only what was addressed to you, '
+      + 'and most notifications need no answer — office_read reads the channel record you were not notified '
+      + 'about.',
+    parameters: tool.parameters([], {}),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'role', 'notifications'],
+        properties: {
+          office: { type: 'string' },
+          // The reading colleague's own role, which decides what the frame the reader receives may
+          // suggest as an answer; the presenter must not have to re-resolve the office to know it.
+          role: { type: 'string' },
+          notifications: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['messageId', 'channelId', 'kind', 'senderName', 'seq', 'createdAt', 'notify', 'text'],
+              properties: {
+                messageId: { type: 'string' },
+                channelId: { type: 'string' },
+                channelName: { type: 'string' },
+                kind: { type: 'string' },
+                senderName: { type: 'string' },
+                seq: { type: 'integer' },
+                createdAt: { type: 'integer' },
+                // The timing this was held under, which is the timing its sender asked for.
+                notify: { type: 'string', enum: NOTIFY_TIMINGS },
+                text: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => (value.notifications.length === 0
+        ? text(`[office ${value.office}] Nothing was held for you.`)
+        : text(frameNotifications(value.office, value.notifications, value.role))),
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, name)
+      const { office, name: officeName } = resolved
+      const sender = await office.senderOf(agent)
+      // The caller is executing a tool inside its own turn, so its agent is live: the handle is
+      // read rather than resumed, because taking a hold must never be what loads a session.
+      const taken = await office.takeWakes(sender.sessionId, office.liveAgent(sender.sessionId))
+      return {
+        office: officeName,
+        role: tool.roleIn(resolved) ?? DEFAULT_COLLEAGUE_ROLE,
+        notifications: taken.map(({ message, stepEnd }) => compact({
+          messageId: message.messageId,
+          channelId: message.channelId,
+          channelName: message.channelName,
+          kind: message.kind,
+          senderName: message.senderName,
+          seq: message.seq,
+          createdAt: message.createdAt,
+          notify: stepEnd ? NOTIFY_STEP_END : NOTIFY_TURN_END,
+          text: message.text,
+        })),
+      }
+    },
+  }
+}
+
+/**
  * Build the channel-writing tools one agent's capabilities include.
  *
  * Writing into the office is a capability, not a property of being a colleague: every predefined
@@ -3806,8 +3987,11 @@ function createCommunicationTools(agent, tool) {
         + 'announce that you are working. Pass a channel name to post to one you are a member of instead — '
         + 'a group channel wakes its own members, so only those subscribed read a turn of it. Name the '
         + 'colleagues who need to read it in mentions to wake only them, or pass mention_all:false to write '
-        + 'to the record without waking anyone. Use office_dm for short or private exchanges, and'
-        + ' office_channels for the channels you hold.',
+        + 'to the record without waking anyone. notify decides what a colleague that is mid-turn gets, and '
+        + 'defaults to step-end — read at its next step boundary — so a post reaches the busy colleagues who '
+        + 'are working rather than waiting for them to stop; pass notify:"turn-end" for a message that can '
+        + 'wait and should be merged with whatever else arrives before the turn ends. Use office_dm for '
+        + 'short or private exchanges, and office_channels for the channels you hold.',
       parameters: tool.parameters(['channel', 'text'], {
         channel: {
           type: 'string',
@@ -3822,6 +4006,13 @@ function createCommunicationTools(agent, tool) {
         mention_all: {
           type: 'boolean',
           description: 'Wake the whole office. Defaults to true unless mentions names who to wake; false writes to the channel without waking anyone, who can still read it with office_read.',
+        },
+        notify: {
+          type: 'string',
+          enum: NOTIFY_TIMINGS,
+          description: 'When a colleague that is mid-turn receives this: "step-end" (default) splices it into '
+            + 'the running turn at that turn\'s next step boundary; "turn-end" holds it and hands it over as one '
+            + 'turn when that turn ends. An idle colleague receives it now either way.',
         },
       }),
       output: {
@@ -3864,6 +4055,7 @@ function createCommunicationTools(agent, tool) {
           kind: 'public',
           mentionAll,
           toUser: audience.toUser,
+          notify: requireNotify(args?.notify, 'office_post'),
         }), officeName)
       },
     })
@@ -3874,21 +4066,21 @@ function createCommunicationTools(agent, tool) {
       description:
         'Send a private message to one colleague, for short exchanges that do not need the whole '
         + 'office. The message is stored in the office and delivered into that colleague\'s session as '
-        + 'a user turn, waking it if it is inactive. A colleague that is mid-turn is not interrupted by '
-        + 'default: the message is held and handed over as one turn when that turn ends. Pass '
-        + 'notify:"step-end" to steer instead, so the colleague reads it at the end of the step it is '
-        + 'running. Every delivery outcome is reported: a wake that could not happen is reported rather '
-        + 'than silently dropped. Addressing the user writes to the user mailbox instead: the user has '
-        + 'no session, so nothing is woken and the message waits there.',
+        + 'a user turn, waking it if it is inactive. A colleague that is mid-turn is not interrupted, '
+        + 'and by default it reads this at the end of the step it is running, so the message reaches it '
+        + 'while it works; pass notify:"turn-end" to hold it instead, and have it handed over as one '
+        + 'turn when that turn ends. Every delivery outcome is reported: a wake that could not happen is '
+        + 'reported rather than silently dropped. Addressing the user writes to the user mailbox instead: '
+        + 'the user has no session, so nothing is woken and the message waits there.',
       parameters: tool.parameters(['to', 'text'], {
         to: { type: 'string', description: "The colleague's session title, or the user's name for the user mailbox." },
         text: { type: 'string', description: 'The message body.' },
         notify: {
           type: 'string',
           enum: NOTIFY_TIMINGS,
-          description: 'When a colleague that is mid-turn receives this: "turn-end" (default) holds it and '
-            + 'hands it over as one turn when that turn ends; "step-end" splices it into the running turn at '
-            + 'its next step boundary. An idle colleague receives it now either way.',
+          description: 'When a colleague that is mid-turn receives this: "step-end" (default) splices it into '
+            + 'the running turn at that turn\'s next step boundary; "turn-end" holds it and hands it over as one '
+            + 'turn when that turn ends. An idle colleague receives it now either way.',
         },
       }),
       output: {
@@ -3946,6 +4138,7 @@ function createOfficeTools(agent, host) {
   definitions.push(createChannelsTool(agent, tool))
   definitions.push(...createCommunicationTools(agent, tool))
   definitions.push(createReadTool(agent, tool, host.config))
+  definitions.push(createNotificationsTool(agent, tool))
   definitions.push(createColleaguesTool(tool))
   return definitions
 }
@@ -4476,6 +4669,10 @@ function registerHostRoutes(ctx, config) {
             // unchecking the box narrows the wake to the colleagues the body names.
             mentionAll: body.mention_all !== false,
             toUser: audience.toUser,
+            // The panel carries no timing control, so it sends none and gets the office's own
+            // default: a colleague that is mid-turn reads a post from the panel at its next step
+            // boundary, exactly as it reads one from the model. office_post is where a caller
+            // asks for the merge instead.
           })
           return respondJson(res, 200, toPostResult(posted, mounted.name))
         } catch (error) {

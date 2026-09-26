@@ -28,22 +28,32 @@ The order inside one post is fixed:
 `wakesEnabled: false` stops after step 4: every recipient reports `wakes-disabled` and no session
 is touched.
 
-## A wake is merged, not queued
+## A wake is steered by default, and merged when asked for
 
 A colleague that is **idle** is handed the message now, as an ordinary `followup` turn — together
 with anything it was already waiting for, because those wakes were held for exactly this moment.
-One that is **mid-turn** is not interrupted: nothing is spliced into the turn it is running, and
-it is not queued a row of single-message turns either. Its wake is held, and when the colleague
-goes idle it receives **one** turn carrying everything that arrived meanwhile, in order.
+That is the same delivery whichever timing was asked for: a timing only decides what happens to a
+colleague that is **mid-turn**.
 
-That is the difference between answering a conversation and answering a queue. A queue of
-single-message turns makes a colleague answer each message minutes after it was written and
-answer the last one long after the conversation moved on; a merged turn costs one, and the
-colleague answers once.
+A busy colleague is never interrupted. What its sender chooses is whether it hears about the
+message while it works or when it stops:
 
-`office_dm` may ask for the running turn instead, with `notify: 'step-end'`; the merge above is
-what every other wake, and every caller that names no timing, gets. That choice is described under
-[Step-end: steering a running turn](#step-end-steering-a-running-turn).
+| `notify` | what a mid-turn colleague gets |
+|---|---|
+| `step-end` (default) | the message is spliced into the turn that is running and read at that turn's next step boundary |
+| `turn-end` | the office holds the message and hands it over as one turn when that turn stops |
+
+`step-end` is the default because a notification that waits for a turn to end answers something the
+colleague has already moved past; `turn-end` is the merge, and a caller asks for it when the message
+can wait. It is not a queue of single-message turns either: `turn-end` holds everything that
+arrives and hands it over as **one** turn, in order, because a queue of single-message turns makes a
+colleague answer each message minutes after it was written and answer the last one long after the
+conversation moved on. A merged turn costs one, and the colleague answers once.
+
+Both timings are on both carrying tools — `office_dm` and `office_post` — and the panel route,
+which has no timing control of its own, sends none and gets the default. So a post to a busy
+colleague is read at its next step boundary unless its sender asked for the turn end, and a
+broadcast is read that way by every busy colleague at once.
 
 Nothing refuses a wake. There is **no per-colleague budget and no cascade-depth bound**: every
 notification that is made is delivered, immediately or held. The only brake is what a colleague
@@ -52,21 +62,13 @@ under [The answering rule](#the-answering-rule).
 
 ## Step-end: steering a running turn
 
-`office_dm` carries one timing argument, `notify`, and it decides only what happens to a colleague
-that is **mid-turn**:
-
-| `notify` | what a mid-turn colleague gets |
-|---|---|
-| `turn-end` (default) | the office holds the message and hands it over as one turn when that turn stops |
-| `step-end` | the message is spliced into the turn that is running and read at that turn's next step boundary |
-
-`step-end` is the harness's own steering: the message enters the colleague's inbox as pending step
-input, and the loop claims pending input at every step boundary, so the colleague reads it between
-the steps it is running rather than after them. That is what a caller wants when the point is to
-change what the colleague is doing — the wrong branch, a correction, a fact the next step needs —
-where the default answers it afterwards. It is deliberately **not** an option on `office_post`:
-one public post that reaches every busy colleague would otherwise splice into every run in the
-office.
+`step-end` is what a call that names no timing gets, on `office_dm` and on `office_post` alike. It
+is the harness's own steering: the message enters the colleague's inbox as pending step input, and
+the loop claims pending input at every step boundary, so the colleague reads it between the steps
+it is running rather than after them. That is what a caller wants when the point is to change what
+the colleague is doing — the wrong branch, a correction, a fact the next step needs — and it is the
+office's default because reaching a colleague while it works is what a notification is for. The
+timing table is under [A wake is steered by default](#a-wake-is-steered-by-default-and-merged-when-asked-for).
 
 An idle colleague has no turn to steer, so it receives the message now either way, and the recorded
 outcome says which happened: `steered` for the splice, `delivered` for a turn.
@@ -109,6 +111,9 @@ colleague actually got, and the detail is why it was not the splice its sender a
 | `office_post` naming the user | the named colleagues, and a copy in the mailbox |
 | `office_dm` to a colleague | that colleague alone, at the timing its `notify` asks for |
 | `office_dm` to the user | the mailbox; no session is woken, and `notify` means nothing to a user with no session |
+
+Every `office_post` row carries the same timing choice as `office_dm`: a post and a dm differ in
+who they reach, never in when a recipient that is mid-turn reads them.
 
 `mention_all` defaults to true when `mentions` is absent and to false when it is present, so
 naming colleagues narrows the audience rather than adding to it, and `mentions: []` posts a notice
@@ -257,9 +262,10 @@ Two consequences follow, and both are deliberate:
 
 - **A message nobody is notified for reaches nobody's context.** A `mention_all: false` post sits
   in its channel until someone reads it with `office_read`.
-- **A held message waits for the turn to end.** Its sender is told `queued`, not `delivered`, and
-  the message is in the next turn that colleague takes. A `step-end` wake is the one exception its
-  sender can ask for, and it is reported as `steered` rather than `queued`.
+- **A held message waits for the turn to end.** Its sender asked for `turn-end`, is told `queued`
+  rather than `delivered`, and the message is in the next turn that colleague takes. A message
+  under the default timing is reported as `steered` instead, and a colleague may also take what is
+  held for it with `office_read_notifications`, which records it `delivered`.
 
 ## Durable holds
 
@@ -271,6 +277,8 @@ durable because a wake is a promise the office keeps:
 - A step-end hold is released when the harness claims its message into a step, and recovered as the
   office's own turn when nothing did; see
   [A step-end wake is held too](#a-step-end-wake-is-held-too).
+- A step-end hold is also released when its colleague reads it for itself, which is
+  [Reading what is held, in the middle of a turn](#reading-what-is-held-in-the-middle-of-a-turn).
 - A message compacted away while it was held is dropped from the batch on purpose: its summary is
   what replaced it, and the summary is what a reader meets.
 - A **dismissed** colleague's holds are deleted with its roster entry. Nothing would deliver them,
@@ -281,6 +289,51 @@ durable because a wake is a promise the office keeps:
 - The hold records are deleted only **after** the turn has been queued, so a failure while
   releasing them leaves them held and the next idle transition retries.
 
+## Reading what is held, in the middle of a turn
+
+`office_read_notifications` returns what the office is holding for the **calling** colleague and
+takes it, so a colleague that is working can read its mail at a step of its own choosing instead of
+waiting for the turn to end. It is the only release that does not wait for the colleague to stop,
+and the only one where the colleague is the reader rather than the recipient of a turn.
+
+```text
+office_read_notifications  {}
+
+[office office] 2 notifications were held for you, read here on request:
+
+[office DM from alice | dm-….4]
+can you look at this before I ship?
+
+[office #general from bob | general-9] (held until the end of your turn)
+release is cut
+
+(Your reply stays in this session and reaches nobody. …)
+```
+
+| Field | Meaning |
+|---|---|
+| `messageId`, `channelId`, `channelName`, `kind`, `senderName`, `seq`, `createdAt` | The message, exactly as a frame names it. |
+| `notify` | The timing it was held under, which is the timing its sender asked for. `turn-end` is the one the frame calls out, because it is the one a reader would otherwise not expect. |
+| `text` | The body. |
+
+- **Every role holds it, and it has no `office`-free form of another colleague.** What is held was
+  addressed to that colleague alone, so there is no argument naming one: a boss able to read a
+  colleague's holds would be able to answer for it.
+- **The tool result is the delivery.** Each taken message gets the same `delivered` outcome a
+  handed-over turn records, with a detail naming the read. Leaving it `queued` would report a
+  message the colleague has read as unread for ever. No `batch` is recorded, because no turn
+  carried it.
+- **It reads only what the harness has not claimed.** A hold still present while the colleague's
+  session log already carries the message is the race between a step claiming a step-end wake and
+  the office deleting its hold; it is dropped rather than handed over a second time, and the log is
+  what settles it — the same judgement
+  [a recovered step-end wake](#a-step-end-wake-is-held-too) makes.
+- **It takes the delivery, never the message.** The message stays in its channel, where
+  `office_read` finds it. Reading twice takes nothing the second time.
+- **It is not a substitute for `office_read`.** A wake carries only what was addressed to the
+  colleague, so a notification read this way is exactly that and no more; the channel record the
+  colleague was not notified about is still read with `office_read`.
+
 ## Delivery statuses
 
 Each recipient's outcome is recorded on the message in `deliveries`, keyed by that recipient's
@@ -288,9 +341,9 @@ session id — or by the user's name for the mailbox — and reported in the too
 
 | Status | Meaning |
 |---|---|
-| `delivered` | The turn was handed to the colleague, now or as part of a merged batch. A batch records how many messages it carried. A recovered step-end wake records it with a detail naming the recovery. |
-| `queued` | The colleague was mid-turn at that moment, so the message is held in `pending` and goes into its next turn, merged with whatever else is held for it. |
-| `steered` | The colleague was mid-turn and the message was spliced into the turn it was running, to be read at that turn's next step boundary. |
+| `delivered` | The turn was handed to the colleague, now or as part of a merged batch. A batch records how many messages it carried. A recovered step-end wake, and a notification the colleague read for itself, record it with a detail naming why. |
+| `queued` | The colleague was mid-turn and the sender asked for `turn-end`, so the message is held in `pending` and goes into its next turn, merged with whatever else is held for it. |
+| `steered` | The colleague was mid-turn and the message was spliced into the turn it was running, to be read at that turn's next step boundary. This is what the default timing reports. |
 | `wakes-disabled` | The office runs with `wakesEnabled: false`; the message is stored and no session is touched. |
 | `mailbox` | The message was addressed to the **user**, who has no session to wake, so it waits in the user mailbox. |
 | `failed` | The delivery itself threw; the message stays in its channel and `office_read` still finds it. |

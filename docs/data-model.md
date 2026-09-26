@@ -144,6 +144,12 @@ for one colleague is exactly what the harness has not taken. See
 [delivery.md](delivery.md) for the batch a hold is released as, and for how a step-end wake nothing
 claimed is recovered.
 
+Three things end a hold, and all three leave the message itself where it is: a turn is queued for
+it, the harness claims it into a step, or the colleague reads it for itself with
+`office_read_notifications`. The third writes the same `delivered` delivery outcome as the first,
+because the tool result is the delivery; what it never does is remove the message from its channel,
+which is why the table can be emptied without anything becoming unreadable.
+
 ## Identity
 
 A colleague **is** a session. The office stores no name of its own: a colleague is addressed by

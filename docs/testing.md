@@ -25,11 +25,19 @@ What it covers, by area:
   per-call capability check that narrows it, a role change withdrawing tools from the live
   session, the `rolePermissions` map and its fail-closed refusal, and the migration of a stored
   role that is no longer predefined.
-- **Delivery** — merging a burst into one turn, a durable hold surviving a simulated restart,
-  cold resume on the route the session last logged, delivery statuses, and the frames, including
-  the role-aware answering rule. A `step-end` wake is covered too: the steer into a running turn,
-  the hold released when the harness claims the message, the recovery of a wake nothing claimed
-  (still pending, discarded, or carried across a restart), and the refusal of an unknown timing.
+- **Delivery** — the default timing steering a post and a dm into a running turn and the refusal of
+  an unknown timing, `turn-end` merging a burst into one turn, a durable hold surviving a simulated
+  restart, cold resume on the route the session last logged, delivery statuses, and the frames,
+  including the role-aware answering rule. A `step-end` wake is covered too: the steer into a
+  running turn, the hold released when the harness claims the message, the recovery of a wake
+  nothing claimed (still pending, discarded, or carried across a restart), and the hold deleted
+  with a deleted channel.
+- **`office_read_notifications`** — taking a steered and a held notification in one read, the inbox
+  copy going back with the hold so no step delivers it twice, the delivery recorded as `delivered`,
+  the message left in its channel and in `office_read`, reading twice taking nothing, a colleague
+  reading only its own holds, and the stale-hold race: a hold whose message a step already claimed
+  is dropped rather than handed over again. The fake answers `readSession` per session so a check
+  can put one wake in one session's log.
 - **The user mailbox** — `@user` in a public post filing a copy with its `origin`, `office_dm` to
   the user waking nobody, and every spelling of the mailbox being refused to `office_read` and
   `office_compact` while `channel: "*"` never reaches it.

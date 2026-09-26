@@ -350,6 +350,15 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
   const loggedEvents = loggedRoute === undefined
     ? []
     : [{ type: 'request/header', data: { header: { config: loggedRoute } } }]
+  /**
+   * The wake payloads one session's log carries, per session.
+   *
+   * A message the harness claims out of an inbox is appended to that session as a
+   * `user/message` before the request that reads it, which is the durable answer to "did this
+   * colleague receive this?". `loggedEvents` stands in for the route a session last logged and
+   * answers for every session; this map is how a check places one wake in one session's log.
+   */
+  const carriedWakes = new Map()
 
   /**
    * The durable pending input of one session, which belongs to the session rather than to the
@@ -460,7 +469,9 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       }
       if (name === 'sessionQuery') {
         return {
-          readSession: async () => ({ events: loggedEvents }),
+          readSession: async (sessionId) => ({
+            events: [...(carriedWakes.get(sessionId) ?? []), ...loggedEvents],
+          }),
           readTitle: async (sessionId) => {
             const title = titles.get(sessionId)
             return title === undefined
@@ -651,6 +662,21 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       const agent = liveAgents.get(sessionId)
       assert.ok(agent, `${sessionId} must be live to discard its input`)
       agent.inbox.nextStep.length = 0
+    },
+    /**
+     * Record one office message as already carried by a session's own log.
+     *
+     * This is the state the office's hold deletion has not caught up with: the step boundary
+     * took the inbox copy and the session carries the message, so the hold is the only thing
+     * left that says otherwise. The real loop reaches it whenever a claim and the read that
+     * follows it race the office's own acknowledgement.
+     * @param sessionId - the session whose log carries the wake.
+     * @param messageId - the office message the wake payload belongs to.
+     */
+    carryInLog: (sessionId, messageId) => {
+      const events = carriedWakes.get(sessionId) ?? []
+      events.push({ type: 'user/message', data: { id: `office-${messageId}` } })
+      carriedWakes.set(sessionId, events)
     },
     dispose: (agent) => {
       liveAgents.delete(agent.session.header.id)
@@ -847,6 +873,7 @@ await check('the boss holds the office complete tool set, the colleague only its
     'office_list',
     'office_post',
     'office_read',
+    'office_read_notifications',
     'office_rename',
     'office_roster',
   ])
@@ -869,8 +896,8 @@ await check('adopting a live session installs the tools its role holds', async (
   titles.set('session-bob', 'bob')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-alice', role: 'member' })
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-bob' })
-  assert.deepEqual(toolNames(alice), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
-  assert.deepEqual(toolNames(bob), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(alice), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
+  assert.deepEqual(toolNames(bob), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
   assert.deepEqual(toolNames(outsider), [], 'adoption does not spread to other sessions')
   const roster = await callBoss(boss, 'office', 'office_roster', {})
   assert.deepEqual(roster.colleagues.map(entry => entry.name).sort(), ['Alice Smith', 'bob'])
@@ -968,15 +995,19 @@ await check('a mention that matches no session title fails loud', async () => {
   )
 })
 
-await check('a colleague that is mid-turn is handed one merged turn when it is idle again', async () => {
+await check('notify:turn-end holds a burst and hands over one merged turn when the colleague is idle', async () => {
   const before = bob.sent.length
   bob.status = 'running'
-  const dm = await call(alice, 'office_dm', { to: 'bob', text: 'private note' })
+  const dm = await call(alice, 'office_dm', { to: 'bob', text: 'private note', notify: 'turn-end' })
   assert.equal(dm.message.channelId, 'dm-sessionalice+sessionbob')
   assert.deepEqual(dm.deliveries, [{ colleague: 'bob', status: 'queued' }], 'a busy colleague is not interrupted')
   assert.equal(bob.sent.length, before, 'and nothing is spliced into the turn it is running')
 
-  const second = await call(alice, 'office_post', { text: 'public note, same burst', mentions: ['bob'] })
+  const second = await call(alice, 'office_post', {
+    text: 'public note, same burst',
+    mentions: ['bob'],
+    notify: 'turn-end',
+  })
   assert.deepEqual(second.deliveries, [{ colleague: 'bob', status: 'queued' }])
 
   await harness.setStatus('session-bob', 'idle')
@@ -997,6 +1028,53 @@ await check('a colleague that is mid-turn is handed one merged turn when it is i
   const read = await call(alice, 'office_read', { channel: 'bob' })
   assert.equal(read.channelId, 'dm-sessionalice+sessionbob')
   assert.equal(read.messages.at(-1).text, 'private note')
+})
+
+await check('the default timing steers into a running turn, for a post and for a dm alike', async () => {
+  const timing = makeHarness({ officeName: 'timing' })
+  await timing.ready
+  const chief = timing.publish('session-timing-boss', { preset: 'office-boss' })
+  timing.titles.set('session-timing-boss', 'chief')
+  timing.titles.set('session-rosa', 'rosa')
+  timing.titles.set('session-sam', 'sam')
+  const rosa = timing.publish('session-rosa')
+  const sam = timing.publish('session-sam')
+  for (const sessionId of ['session-rosa', 'session-sam']) {
+    await callBoss(chief, 'timing', 'office_adopt', { session_id: sessionId })
+  }
+
+  rosa.status = 'running'
+  const post = await callBoss(chief, 'timing', 'office_post', { text: 'release is cut', mentions: ['rosa'] })
+  assert.deepEqual(post.deliveries, [{ colleague: 'rosa', status: 'steered' }], 'a post steers by default')
+  assert.equal(rosa.sent[0].via, 'steer')
+  assert.equal(rosa.inbox.nextStep.length, 1, 'and the hold is what the office keeps until a step claims it')
+
+  const dm = await callBoss(chief, 'timing', 'office_dm', { to: 'rosa', text: 'and a private one' })
+  assert.deepEqual(dm.deliveries, [{ colleague: 'rosa', status: 'steered' }], 'so does a dm')
+
+  // A broadcast steers every colleague it reaches, not only a named one.
+  sam.status = 'running'
+  const broadcast = await callBoss(chief, 'timing', 'office_post', { text: 'standup in five' })
+  assert.deepEqual(
+    broadcast.deliveries.map(entry => entry.status),
+    ['steered', 'steered'],
+    'the whole audience of a public post is steered, which is what the timings have to be chosen for',
+  )
+
+  // turn-end is what a caller asks for when the message can wait for the merge.
+  const held = await callBoss(chief, 'timing', 'office_dm', { to: 'rosa', text: 'this one can wait', notify: 'turn-end' })
+  assert.deepEqual(held.deliveries, [{ colleague: 'rosa', status: 'queued' }])
+  await assert.rejects(
+    () => callBoss(chief, 'timing', 'office_post', { text: 'x', notify: 'later' }),
+    /office_post: notify must be one of step-end, turn-end/,
+    'a timing nobody defined is refused rather than quietly defaulted',
+  )
+
+  // The idle case has no timing to choose between, so both spellings reach it now.
+  rosa.status = 'idle'
+  const idle = await callBoss(chief, 'timing', 'office_dm', { to: 'rosa', text: 'no turn to steer' })
+  assert.equal(idle.deliveries[0].status, 'delivered')
+  assert.equal(rosa.sent.at(-1).via, 'followup')
 })
 
 await check('office_dm notify:step-end steers into the running turn, and the claim releases the hold', async () => {
@@ -1043,7 +1121,7 @@ await check('office_dm notify:step-end steers into the running turn, and the cla
 
   await assert.rejects(
     () => callBoss(chief, 'steering', 'office_dm', { to: 'nina', text: 'x', notify: 'turn' }),
-    /notify must be one of turn-end, step-end/,
+    /notify must be one of step-end, turn-end/,
   )
 })
 
@@ -1088,6 +1166,117 @@ await check('a step-end wake the running turn never took is recovered as the off
   assert.match(otto.sent.at(-1).message.content[0].text, /cancelled away/, 'a discarded wake is not lost')
 })
 
+await check('office_read_notifications takes what is held for its own caller, mid-turn', async () => {
+  const reading = makeHarness({ officeName: 'reading' })
+  await reading.ready
+  const chief = reading.publish('session-reading-boss', { preset: 'office-boss' })
+  reading.titles.set('session-reading-boss', 'chief')
+  reading.titles.set('session-ada', 'ada')
+  reading.titles.set('session-ben', 'ben')
+  const ada = reading.publish('session-ada')
+  const ben = reading.publish('session-ben')
+  for (const sessionId of ['session-ada', 'session-ben']) {
+    await callBoss(chief, 'reading', 'office_adopt', { session_id: sessionId })
+  }
+
+  // Nothing held reads as nothing, and reading never wakes anybody.
+  const empty = await call(ada, 'office_read_notifications', {})
+  assert.deepEqual(empty.notifications, [])
+  assert.equal(empty.role, 'member')
+  assert.equal(ada.sent.length, 0)
+  assert.equal(
+    ada.tools.get('office_read_notifications').output.render({}, empty)[0].text,
+    '[office reading] Nothing was held for you.',
+  )
+
+  // One steered notification and one held one, addressed to ada while it works. ben is busy too,
+  // so its own copy stays held for it to read or receive later.
+  ada.status = 'running'
+  ben.status = 'running'
+  const steered = await callBoss(chief, 'reading', 'office_dm', { to: 'ada', text: 'the step-boundary one' })
+  assert.equal(steered.deliveries[0].status, 'steered')
+  const held = await callBoss(chief, 'reading', 'office_post', {
+    text: 'ben and ada, this can wait',
+    mentions: ['ada', 'ben'],
+    notify: 'turn-end',
+  })
+  assert.deepEqual(held.deliveries.map(entry => entry.status), ['queued', 'queued'])
+  assert.equal(ada.inbox.nextStep.length, 1, 'the steered copy is pending input until it is taken')
+
+  const read = await call(ada, 'office_read_notifications', {})
+  assert.deepEqual(
+    read.notifications.map(entry => entry.text),
+    ['the step-boundary one', 'ben and ada, this can wait'],
+    'what is held is read oldest first, in the timing it was held under',
+  )
+  assert.deepEqual(read.notifications.map(entry => entry.notify), ['step-end', 'turn-end'])
+  assert.deepEqual(read.notifications.map(entry => entry.kind), ['dm', 'public'])
+  assert.equal(
+    ada.inbox.nextStep.length,
+    0,
+    'the pending inbox copy goes back with the hold, so no step delivers it twice',
+  )
+
+  const rendered = ada.tools.get('office_read_notifications').output.render({}, read)[0].text
+  assert.match(rendered, /^\[office reading\] 2 notifications were held for you, read here on request:/)
+  assert.match(rendered, /\[office DM from chief \| dm-\S+\]\nthe step-boundary one/)
+  assert.match(
+    rendered,
+    /\[office #general from chief \| general-\d+\] \(held until the end of your turn\)/,
+    'a notification held under the non-default timing says so',
+  )
+  assert.match(
+    rendered,
+    /Most messages need no answer, and silence is a normal one\./,
+    'the frame carries the answering rule',
+  )
+
+  // Taking is what makes it a delivery, and it is only ever the caller's own mail.
+  const stored = storedMessage(reading, steered.message.messageId).deliveries['session-ada']
+  assert.equal(stored.status, 'delivered')
+  assert.match(stored.detail, /office_read_notifications/)
+  const pending = await callBoss(chief, 'reading', 'office_colleagues')
+  const pendingOf = (name) => pending.colleagues.find(entry => entry.name === name).pending
+  assert.equal(pendingOf('ada'), 0, 'the office stops holding what was read')
+  assert.equal(pendingOf('ben'), 1, 'and keeps holding what was not')
+
+  const benRead = await call(ben, 'office_read_notifications', {})
+  assert.deepEqual(
+    benRead.notifications.map(entry => entry.text),
+    ['ben and ada, this can wait'],
+    'a colleague reads its own holds, and one addressed to two colleagues is each of theirs to read',
+  )
+  assert.equal(ben.sent.length, 0, 'and reading wakes nobody')
+
+  // Reading twice takes nothing the second time, and the turn the office owes nobody is owed.
+  const again = await call(ada, 'office_read_notifications', {})
+  assert.deepEqual(again.notifications, [])
+  const steers = ada.sent.length
+  await reading.setStatus('session-ada', 'idle')
+  assert.equal(ada.sent.length, steers, 'nothing already handed over or read is delivered again')
+
+  // What the office gave up is the delivery, not the message: the record keeps it.
+  const record = await callBoss(chief, 'reading', 'office_read', { channel: '#general' })
+  assert.equal(record.messages.at(-1).text, 'ben and ada, this can wait')
+
+  // A wake the running turn already carried is dropped rather than handed over twice. The hold
+  // and the session log disagree only while the office's own deletion is in flight, which is the
+  // state a claim and the read that follows it race into.
+  ada.status = 'running'
+  const raced = await callBoss(chief, 'reading', 'office_dm', { to: 'ada', text: 'already in the turn' })
+  assert.equal(raced.deliveries[0].status, 'steered')
+  reading.discardInbox('session-ada')
+  reading.carryInLog('session-ada', raced.message.messageId)
+  const afterRace = await call(ada, 'office_read_notifications', {})
+  assert.deepEqual(afterRace.notifications, [], 'the hold is stale, not the message')
+  const settled = await callBoss(chief, 'reading', 'office_colleagues')
+  assert.equal(
+    settled.colleagues.find(entry => entry.name === 'ada').pending,
+    0,
+    'and a stale hold is dropped rather than kept for ever',
+  )
+})
+
 await check('a step-end wake held when the process stops is recovered after it restarts', async () => {
   const stopping = makeHarness({ officeName: 'stepping' }, undefined, { rowId: 'office_stepping' })
   await stopping.ready
@@ -1130,7 +1319,11 @@ await check('a wake held when the process stops is delivered after it restarts',
   await callBoss(chief, 'stopping', 'office_adopt', { session_id: 'session-ivy' })
 
   ivy.status = 'running'
-  const posted = await callBoss(chief, 'stopping', 'office_post', { text: 'ivy, please take this', mentions: ['ivy'] })
+  const posted = await callBoss(chief, 'stopping', 'office_post', {
+    text: 'ivy, please take this',
+    mentions: ['ivy'],
+    notify: 'turn-end',
+  })
   assert.deepEqual(posted.deliveries, [{ colleague: 'ivy', status: 'queued' }])
   assert.equal(ivy.sent.length, 0)
 
@@ -1157,7 +1350,11 @@ await check('a dismissed colleague does not leave the office holding its wake', 
   await callBoss(chief, 'leaving', 'office_adopt', { session_id: 'session-dana' })
 
   dana.status = 'running'
-  const posted = await callBoss(chief, 'leaving', 'office_post', { text: 'dana, before you go', mentions: ['dana'] })
+  const posted = await callBoss(chief, 'leaving', 'office_post', {
+    text: 'dana, before you go',
+    mentions: ['dana'],
+    notify: 'turn-end',
+  })
   assert.deepEqual(posted.deliveries, [{ colleague: 'dana', status: 'queued' }])
   await callBoss(chief, 'leaving', 'office_dismiss', { name: 'dana' })
 
@@ -1262,7 +1459,7 @@ await check('office_hire creates a session, titles it, adopts it, and arms it', 
     toolNames(liveAgents.get('session-hired-1')),
     ['office_channel_create', 'office_channel_delete', 'office_channel_members', 'office_channels',
       'office_colleagues', 'office_compact', 'office_configure', 'office_dm', 'office_interrupt',
-      'office_post', 'office_read'],
+      'office_post', 'office_read', 'office_read_notifications'],
     'the new colleague is armed with exactly the tools its role holds, in the same activation',
   )
   await assert.rejects(
@@ -1430,7 +1627,7 @@ await check('the panel can hire, and can post without waking anyone', async () =
   assert.equal(hires.at(-1).agentPreset, 'standard')
   assert.deepEqual(
     toolNames(liveAgents.get(hired.payload.colleague.sessionId)),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
   )
 
   const quiet = await callRoute(routes, officeRoute('post', 'office'), {
@@ -1520,7 +1717,7 @@ await check('a disposed agent loses its office tools', async () => {
   const temp = harness.publish('session-temp')
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
-  assert.equal(temp.tools.size, 5)
+  assert.equal(temp.tools.size, 6)
   harness.dispose(temp)
   assert.equal(temp.tools.size, 0, 'the scoped registrations unwind with the agent')
 })
@@ -1529,7 +1726,7 @@ await check('office_dismiss removes a colleague and withdraws its channel tools'
   const temp = harness.publish('session-temp')
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
-  assert.equal(temp.tools.size, 5, 'adoption arms the session')
+  assert.equal(temp.tools.size, 6, 'adoption arms the session')
   const dismissed = await callBoss(boss, 'office', 'office_dismiss', { name: 'temp' })
   assert.deepEqual(dismissed.colleague, { name: 'temp', sessionId: 'session-temp' })
   assert.equal(temp.tools.size, 0, 'the channel tools withdraw from the live session')
@@ -1563,7 +1760,7 @@ await check('officeName makes a fully independent office behind one shared tool 
   await callBoss(studioBoss, 'studio', 'office_adopt', { session_id: 'session-member' })
   assert.deepEqual(
     toolNames(member),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
   )
   const roster = await callBoss(studioBoss, 'studio', 'office_roster', {})
   assert.deepEqual(roster.channels.map(entry => entry.channelId), ['general', 'mailbox'], 'the office seeds the public channel and the user mailbox')
@@ -2376,7 +2573,7 @@ await check('each predefined role holds exactly the office tools it is defined w
       description: `the office ${role}`,
     })
   }
-  assert.deepEqual(toolNames(sessions.member), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(sessions.member), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
   assert.deepEqual(toolNames(sessions.leader), [
     'office_channel_create',
     'office_channel_delete',
@@ -2389,10 +2586,11 @@ await check('each predefined role holds exactly the office tools it is defined w
     'office_interrupt',
     'office_post',
     'office_read',
+    'office_read_notifications',
   ])
   assert.deepEqual(
     toolNames(sessions.consultant),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
     'a consultant speaks like a member and carries no leader-only tool',
   )
   const roster = await callBoss(chief, 'roles', 'office_roster', {})
@@ -2424,7 +2622,7 @@ await check('changing a role moves the live session to the tool set the new role
   })
   assert.deepEqual(
     toolNames(dana),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
     'a demotion withdraws the leader-only tools rather than leaving them to refuse at call time',
   )
   assert.equal(demoted.colleague.description, 'reads the record and writes no files')
@@ -2464,7 +2662,7 @@ await check('a stored role that is no longer predefined reads as the default mem
     Number.isSafeInteger(stored.adoptedAt),
     'the next write rewrites the label, so storage stops carrying a role nobody can resolve',
   )
-  assert.deepEqual(toolNames(old), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'])
+  assert.deepEqual(toolNames(old), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
 })
 
 await check('office_colleagues reports the roster with each colleague live status', async () => {
@@ -2498,7 +2696,7 @@ await check('office_colleagues reports the roster with each colleague live statu
   // Reading the roster delivers nothing, and a wake the office holds for a busy colleague is
   // reported as pending rather than delivered behind its back.
   const before = ann.sent.length
-  await callBoss(chief, 'board', 'office_post', { text: 'status please', mentions: ['ann'] })
+  await callBoss(chief, 'board', 'office_post', { text: 'status please', mentions: ['ann'], notify: 'turn-end' })
   const after = await call(ann, 'office_colleagues', {})
   assert.equal(ann.sent.length, before, 'office_colleagues is a query and wakes nobody')
   assert.equal(after.colleagues[0].pending, 1, 'the held wake is reported')
@@ -2728,7 +2926,7 @@ await check('the panel snapshot offers the roles, and the configure route edits 
   assert.equal(configured.payload.colleague.permission, 'read-only')
   assert.deepEqual(
     toolNames(pia),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
     'the panel edit reaches the live session exactly as the tool does',
   )
   assert.ok(pia.tools.has('office_post'), 'and a consultant the panel created holds the messaging tools')
@@ -2801,7 +2999,7 @@ await check('the panel adopts an existing session as a colleague', async () => {
   }, 'the colleague is named by the adopted session title, like every colleague')
   assert.deepEqual(
     toolNames(sam),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
     'adoption from the panel arms the live session exactly as the tool does',
   )
   const after = (await callRoute(routes, officeRoute('state', 'guiadopt'))).payload
@@ -3103,7 +3301,11 @@ await check('office_channel_members edits the roster, the routes mirror the tool
 
   // A member of the channel that is mid-turn holds the delivery; the channel must not strand it.
   await harness.setStatus('session-nia', 'running')
-  await callBoss(chief, 'cleanup', 'office_post', { channel: 'shortlived', text: 'held while nia works' })
+  await callBoss(chief, 'cleanup', 'office_post', {
+    channel: 'shortlived',
+    text: 'held while nia works',
+    notify: 'turn-end',
+  })
   await callBoss(chief, 'cleanup', 'office_channel_delete', { channel: 'shortlived' })
   assert.equal(
     [...harness.tables.get('messages').keys()].filter(key => key.startsWith('shortlived#')).length,

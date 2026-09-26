@@ -270,12 +270,16 @@ and [data-model.md](data-model.md) for the record shape.
 
 ## Why a wake can be timed, and why it is still durable
 
-`office_dm` accepts `notify: 'turn-end' | 'step-end'`, and the second is the only way an office wake
-is ever spliced into a turn that is already running. The two things a colleague can be sent are
-genuinely different questions: *answer this afterwards* is what a held, merged turn is for, and
-*stop doing that now* cannot wait for the turn to end without arriving useless.
+Every tool that carries a message takes `notify: 'step-end' | 'turn-end'`, and a call that names
+none gets `step-end`. The two things a colleague can be sent are genuinely different questions:
+*change what you are doing* cannot wait for the turn to end without arriving useless, and *answer
+this afterwards* is what a held, merged turn is for. The office's default is the first, because a
+notification that waits for a turn to end answers something the colleague has already moved past:
+reaching a colleague while it works is what a notification is for, and the merge is the option a
+caller asks for when the message can wait.
 
-Three harness contracts make it safe rather than a fire-and-forget splice:
+`step-end` is the only way an office wake is ever spliced into a turn that is already running, and
+three harness contracts make it safe rather than a fire-and-forget splice:
 
 - `Agent.steer` puts the message into the session's inbox as pending step input, which the loop
   claims at every step boundary. The colleague therefore reads it between the steps it is running,
@@ -291,5 +295,43 @@ Three harness contracts make it safe rather than a fire-and-forget splice:
   removed (`Agent.inbox.remove`) before the office queues its own turn, so exactly one of the two
   carries the message.
 
-`notify` is deliberately not on `office_post`: one public post reaches every busy colleague, so the
-timing would turn a single message into an interruption of every run in the office at once.
+**`office_post` carries the timing too, and that reversed an earlier decision.** The first version
+refused it there, because one public post reaches every busy colleague, so the timing turns a
+single message into a splice into every run in the office at once — and because a default
+`step-end` takes the merged burst away from every caller that does not ask for it, which is the
+turn-count damper against a wake loop. That reasoning still holds about what is given up; what
+changed is the weight of what it bought. A held turn answers a message the colleague has already
+moved past, and the common case in this office is a correction or a fact that is worth more before
+the work it is about than after it. So the timing is offered on every carrying tool and defaults
+to reaching the colleague, the merge is one argument away, and the same default reaches the panel
+route, which has no timing control of its own. A caller that broadcasts should expect every busy
+colleague to read it at its next step boundary.
+
+## Reading what is held, in the middle of a turn
+
+A hold is invisible to the colleague it is held for. That is the point of holding it — the
+colleague is working, and the office will not interrupt — but it also means a colleague has no way
+to notice that something arrived, and `office_colleagues`, which reports how many messages are
+held for each colleague, reports them to the office rather than to their recipient.
+`office_read_notifications` closes that: it returns what the office is holding for the **calling**
+colleague and releases it, so the colleague reads its mail at a step of its own choosing rather
+than waiting for the turn to end.
+
+Three properties decide its shape:
+
+- **It is not a capability.** What the office holds was addressed to that colleague alone, so no
+  role gate applies and every predefined role holds it, exactly as every role holds `office_read`.
+  It also takes only the caller's own holds: there is no argument naming a colleague, because a
+  boss able to drain a colleague's mail would be able to answer for it.
+- **It is a read, and a delivery.** The tool result *is* the delivery, so the hold is released and
+  the sender's recorded outcome becomes `delivered` with a detail naming the read; leaving it
+  `queued` would report a message as unread for ever. The frame the colleague receives is the one a
+  wake would have carried, answering rule included, so what a colleague reads does not depend on
+  whether it waited or asked.
+- **It takes the delivery, never the message.** The message stays in its channel, where
+  `office_read` finds it, so a colleague that reads its notifications and then loses its turn has
+  lost nothing: the office gave up a delivery it can no longer make twice, not a record. The one
+  state that must not be read twice is the race between a step claiming a `step-end` wake and the
+  office deleting the hold for it; the colleague's session log settles it, exactly as it settles
+  the recovery case.
+
