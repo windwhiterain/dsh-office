@@ -129,17 +129,28 @@ The split of responsibility is the rule that keeps them from growing back:
 - Behaviour that is a *norm* rather than an interface — never post to acknowledge a message —
   is stated once, in the onboarding turn, and only in the compressed form the tool description
   needs.
+- The onboarding turn states the colleague's place and those norms, and deliberately does not
+  enumerate the tools the role holds. The scope's own schema declares them, and the turn stays in
+  the colleague's history for the life of its session, so a copied catalog would be paid on every
+  later request. The role still decides the tool set; the turn only stops restating it.
 
 Shared parameters are declared once, by a builder, so a wording change lands in every tool that
 carries them: `officeArgument()`, `roleProperty()`, `descriptionProperty()`, and
 `notifyProperty()`. The `office` argument is the one worth watching, because a boss emits it in
 all eighteen tools.
 
-Measured with the description literals concatenated the way the model receives them: a boss's
-eighteen tools went from 14,725 to 9,061 characters, a member's six from 6,560 to 3,468, and the
-persona from 1,080 to 779 — roughly 1,500 characters off every boss request, and 770 off a
-member's. Output schemas are not part of this figure: a canonical request carries `parameters`
-only, so `output.schema` costs nothing outside PTC presentation.
+Measured with the literals concatenated the way the model receives them:
+
+| surface | before | after |
+|---|---:|---:|
+| a boss's eighteen tool schemas | 14,725 | 9,061 |
+| a member's six tool schemas | 6,560 | 3,468 |
+| the boss persona | 1,080 | 779 |
+| a member's onboarding turn | 1,607 | 1,143 |
+| a leader's onboarding turn | 2,248 | 1,408 |
+
+Output schemas are not part of these figures: a canonical request carries `parameters` only, so
+`output.schema` costs nothing outside PTC presentation.
 
 ## The profile patch
 

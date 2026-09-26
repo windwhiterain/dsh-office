@@ -1503,7 +1503,11 @@ await check('hiring greets the new colleague privately, and that greeting makes 
   assert.match(text, /^\[office office \| you were hired\]/, 'it is framed as an onboarding note, not as a channel post')
   assert.match(text, /You are "Greeted", a colleague of the office "office"/, 'the greeting states who it is')
   assert.match(text, /Your role: member\./)
-  assert.match(text, /office_post writes to a channel with a channel argument/, 'and what it can do')
+  assert.match(text, /The office tools your scope lists are how you take part/, 'and how it takes part')
+  assert.ok(
+    !/You hold \d+ tools?/.test(text),
+    'the greeting does not copy the tool catalog into a turn its session keeps for its whole life',
+  )
   assert.match(text, /nothing here was posted to a channel/)
   assert.equal(greeted.sent[0].message.source.channelId, 'office-onboarding')
   const feed = await callBoss(boss, 'office', 'office_read', { channel: '#general' })
@@ -2945,8 +2949,7 @@ await check('a consultant speaks into the office while its session runs read-onl
   const greeted = quiet.liveAgents.get(greeting.colleague.sessionId)
   const text = greeted.sent[0].message.content[0].text
   assert.match(text, /Your role: consultant\./)
-  assert.match(text, /office_post writes to a channel with a channel argument/, 'the greeting lists the tools the role actually holds')
-  assert.match(text, /You hold 5 tools/)
+  assert.match(text, /your role decides which you hold/, 'the greeting points at the scope, not at a copied catalog')
   assert.ok(!text.includes('You hold no tool that writes into the office'), 'a consultant holds the messaging tools')
 })
 

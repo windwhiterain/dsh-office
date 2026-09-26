@@ -2435,8 +2435,14 @@ function createOffice(ctx, domain, config, hooks) {
    * session unless it is the selected one: a colleague nobody has spoken to yet is invisible
    * in the workspace it was hired into, and knows nothing about the office it joined. One
    * message solves both — the delivered turn clears the blank state, and the body names the
-   * colleague, the office, its role, and the tools that role holds. A leader is told one thing
+   * colleague, the office, and its role, and says how it takes part. A leader is told one thing
    * more: where {@link LEADER_GUIDE_PATH} sits, because the seat it was hired into has notes.
+   *
+   * The greeting deliberately does NOT enumerate the tools the role holds. Those are already in
+   * the scope's own schema, and this turn stays in the colleague's history for the life of the
+   * session, so a copied catalog would be paid on every later request. What it states instead is
+   * the part a schema cannot say: that the colleague writes into a shared record rather than
+   * answering in private, and which of those two it is.
    *
    * Onboarding is a private turn and nothing else: it is not written to `#general` or to any
    * other channel, so the office's public history stays a record of work rather than of
@@ -2452,45 +2458,25 @@ function createOffice(ctx, domain, config, hooks) {
     if (!config.wakesEnabled) return 'wakes-disabled'
     const role = canonicalRole(colleague.role)
     const held = ROLE_CAPABILITIES[role]
-    // The greeting names the tools this colleague actually holds, because the role decides them:
-    // a colleague told about a tool its scope lacks would spend its first turn on it regardless.
-    const described = [
-      'office_read reads any channel office_channels lists for you',
-      'office_colleagues lists the roster with each colleague\'s role, description, and current status',
-      'office_channels lists the channels the office holds: #general, your direct ones, and the channels you are a member of',
-      held.includes('post') ? 'office_post writes to a channel with a channel argument; #general wakes the whole office by default' : undefined,
-      held.includes('dm') ? 'office_dm sends one colleague a private message for short exchanges' : undefined,
-      held.includes('channels')
-        ? 'office_channel_create and office_channel_delete add and remove a group channel, and office_channel_members edits its membership'
-        : undefined,
-      held.includes('interrupt')
-        ? 'office_interrupt cancels a colleague\'s running turn, which then receives everything the office held for it as one turn'
-        : undefined,
-      held.includes('compact')
-        ? 'office_compact replaces a range of a channel\'s messages with a summary you wrote'
-        : undefined,
-      held.includes('configure') ? 'office_configure sets a colleague\'s role or description' : undefined,
-    ].filter(line => line !== undefined)
     const body = [
       `You are "${colleague.name}", a colleague of the office "${name()}".`,
       `Your role: ${role}.`,
       colleague.description === undefined ? undefined : `Notes on you: ${colleague.description}.`,
-      `This office is a set of ordinary sessions. You hold ${String(described.length)} `
-      + `${described.length === 1 ? 'tool' : 'tools'}: ${described.join('; ')}.`,
       held.includes('post') || held.includes('dm')
-        ? undefined
-        : 'You hold no tool that writes into the office: what you answer in this session reaches no '
-          + 'channel, and the office reads the record rather than your replies.',
+        ? 'This office is a set of ordinary sessions. The office tools your scope lists are how you take '
+          + 'part, and your role decides which you hold.'
+        : 'This office is a set of ordinary sessions. You hold no tool that writes into the office: what '
+          + 'you answer in this session reaches no channel, and the office reads the record rather than '
+          + 'your replies.',
       role === ROLE_LEADER
         ? `Your seat has notes from the leaders before you, at ${LEADER_GUIDE_PATH} (written in`
           + ' Chinese): how to dispatch work, how a reading can lie, and what to keep when someone'
           + ' leaves. Read them before you dispatch your first piece of work.'
         : undefined,
       'The office has a history from before you joined, and nothing replays it. Read the range you'
-      + ' need with office_read, which takes a sequence range and filters by sender, text, mention,'
-      + ' or time; a channel that grew long holds summaries where older messages were compacted.',
-      'A message delivered to you is a private turn in your own session, and what you answer here'
-      + ' reaches nobody. Most messages need no answer, and silence is a normal one.',
+      + ' need with office_read; a long channel holds summaries where older messages were compacted.',
+      'A message delivered to you is a private turn in your own session, and your answer reaches'
+      + ' nobody. Most messages need no answer, and silence is a normal one.',
       held.includes('post')
         ? '#general is the office\'s shared record. Post important information there so everyone can'
           + ' learn from it; send short exchanges privately with office_dm. Never post to acknowledge'

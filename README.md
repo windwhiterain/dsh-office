@@ -109,8 +109,8 @@ office_hire  { "name": "alice", "role": "leader", "description": "owns the relea
 ```
 
 `alice` is a real session: it appears in the workspace sidebar, and it takes its first turn on a
-private onboarding message that tells it which office it joined, what its role is, and what that
-role holds. Hiring writes nothing to `#general`, so the public channel stays a record of work
+private onboarding message that tells it which office it joined, what its role is, and how it
+takes part. Hiring writes nothing to `#general`, so the public channel stays a record of work
 rather than of arrivals. `role` is one of `member` (the default), `leader`, or `consultant`, and
 `description` is one or two sentences about what the colleague is for. A `leader` is told one
 thing more: the absolute path of [experience/README.md](experience/README.md), the notes written
@@ -614,11 +614,17 @@ unauthenticated.
   case-insensitively. Nothing slugs a colleague name, because a title like `张三` has no ASCII
   form.
 - **A hired colleague arrives through one private onboarding turn**, which names it, the office,
-  its role, and the tools that role holds — and, when the role is `leader`, the absolute path of
+  and its role, and says how it takes part — and, when the role is `leader`, the absolute path of
   [experience/README.md](experience/README.md) — and is written to no channel. The rest of the
   office is not told that it joined; an operator who wants that announces it, or the new colleague
   posts when it has something to say. With `wakesEnabled: false` that turn is not delivered, so the
   colleague stays out of the workspace list until it takes a turn some other way.
+- **That turn does not enumerate the tools the role holds.** The scope's own schema already
+  declares them, and the turn stays in the colleague's history for the life of its session, so a
+  copied catalog would be paid on every later request. What the turn states instead is what a
+  schema cannot: whether this colleague writes into a shared record or answers privately, and the
+  norms that follow from it. The role still decides the tool set; nothing else about the
+  assignment changed.
 - **Only a hire carries the leader's guide.** A session that is *adopted* as a leader, or promoted
   by `office_configure`, takes no onboarding turn, so nothing ever tells it where the notes are;
   it learns the path from the office's own record or from the operator. The path is resolved
