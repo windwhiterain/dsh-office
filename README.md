@@ -24,6 +24,7 @@ through the Cordis context, so it survives harness upgrades.
 - [Tools](#tools)
 - [Channels](#channels)
 - [The user mailbox](#the-user-mailbox)
+- [The idle notice](#the-idle-notice)
 - [The boss preset](#the-boss-preset)
 - [Configuration](#configuration)
 - [Multiple offices](#multiple-offices)
@@ -291,6 +292,45 @@ its message count. It is a column beside `#general` rather than a band above it,
 never share a width or a scrollport; the sidebar names the mailbox and the name that reaches it,
 and a message copied from a channel says where it was also said.
 
+## The idle notice
+
+An idle session has no turn to notice anything in, so an office in which everybody has stopped has
+nobody left to say what comes next. `idleNotice` gives the office one turn of its own: when a
+colleague's turn ends and the whole roster has stopped, and something was written since the office
+last asked, it posts one question and wakes exactly the colleagues whose role is `leader`.
+
+The office row carries the whole notice. It is off by default, so the example opts in and restates
+the two values it would otherwise inherit:
+
+```yaml
+idleNotice:
+  enabled: true
+  channel: general
+  text: >-
+    The office is idle: every colleague has stopped and no turn is running. Leaders, decide what
+    happens next — name the work and who takes it, and post the decision where the office records
+    it, so the colleagues it concerns are woken. This notice arrives only when something new
+    happened in the office; if nothing should happen next, answer nothing and the office stays quiet.
+```
+
+It is **off until an office row enables it**, because it spends one turn of every leader's session.
+A leader receives it as an ordinary message in whichever channel `channel` names — `#general` by
+default — with its own sequence number, so the panel shows it, `office_read` finds it, and the
+leaders answer it the way they answer anything else. It is authored by `office` rather than by a
+colleague or by you.
+
+Two things bound it.
+
+- **It never repeats on its own.** The notice wakes the leaders, their turns end, and the office is
+  idle again with the record it had before. So the office asks only when something was written
+  since the last notice, which makes real work — a colleague's post, your next request, a
+  compaction — the thing that arms the next question. An office in which nothing happens, or in
+  which the leaders answered without writing anything down, stays quiet instead of waking them
+  again.
+- **A silent office never asks.** `wakesEnabled: false` promises that no session is ever woken, and
+  the notice is a wake; such an office writes nothing. A configured channel the office does not
+  hold is reported and retried at the next idle transition, rather than ending the questions.
+
 ## The boss preset
 
 The bundle's patch declares `office-boss`: a persona, the persistent shell rows, and
@@ -326,6 +366,7 @@ refused, not ignored.
 | `rolePermissions` | `{ consultant: read-only }` | Role → session permission preset. A role absent from the map keeps its session's own permission, and a name your deployment does not define is refused. |
 | `maxMessageChars` | `16384` | Maximum length of one message body. |
 | `wakesEnabled` | `true` | When false, messages are stored and no session is ever woken. |
+| `idleNotice` | `{ enabled: false, channel: "general" }` | The office's own question to its leaders, asked when the whole roster has stopped and something was written since the office last asked; see [The idle notice](#the-idle-notice). `enabled` opts in per office, `channel` is where the question is posted, and `text` is its body — the default is the one above. The mailbox and the `dm-` idspace are refused, and an unknown key inside the object is refused. |
 | `operatorName` | — | **Renamed to `userName`.** A row that still sets `operatorName` fails activation; the validation message names the fields the row accepts. |
 
 ## Multiple offices
@@ -508,6 +549,8 @@ unauthenticated.
 
 ## Known limitations
 
+- **The idle notice has no panel control.** `idleNotice` is configured on the office row, so
+  switching it on means editing that row's config; the panel neither shows it nor edits it.
 - **Panel copy is not localized.** Strings are inline in `client.js` rather than routed through
   the Client locale dictionaries, so the panel does not follow the UI language.
 - **An office name accepts letters, digits, and underscores.** Any script is accepted, but a

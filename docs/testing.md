@@ -45,6 +45,13 @@ What it covers, by area:
   duplicates, and the unknown members it refuses), the membership-gated listings and reads, the
   audience a post to a group channel wakes, membership edits, the panel routes that mirror them,
   and a deletion taking its messages and its holds with it.
+- **The idle notice** — the office asking its leaders once the last colleague stops, the audience it
+  wakes (the leaders alone, never a member), the brake: a second idle transition with nothing new
+  written sends nothing, and any new message re-arms it; a colleague that is still working, an
+  office with no leader, a session outside the roster going idle, `wakesEnabled: false`, a
+  configured channel the office does not hold being reported rather than swallowed, the record of
+  the last notice surviving a restart, and the row validation that refuses a notice it could never
+  send.
 - **The panel routes** — the state snapshot (roster, roles, mailbox, totals, the channel the feed
   asked for), the history page a folded row asks for, hire, configure, dismiss, and the connection
   policy each one applies.

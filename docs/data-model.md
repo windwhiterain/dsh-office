@@ -8,14 +8,14 @@ office does with these records is in [delivery.md](delivery.md).
 
 One office is one **storage domain**, named by its `officeId`: one JSON unit at
 `$DSH_HOME/storages/<officeId>.json`. The domain declaration carries `version: 1`, a `global`
-slot, and four tables:
+slot, and five tables:
 
 ```js
 {
   name: officeId,                       // the unit name; renaming the office never changes it
   version: 1,
   global: { schema, initial: { officeId, name } },
-  tables: { colleagues, channels, messages, pending },
+  tables: { colleagues, channels, messages, pending, notices },
 }
 ```
 
@@ -48,6 +48,7 @@ as a malformed tool result.
 | `channels` | channel id | `{ channelId, kind, name, topic, members, createdAt, nextSeq }` |
 | `messages` | `<channelId>#<seq>` | `{ messageId, channelId, channelName, kind, seq, senderName, senderSessionId?, recipients, text, createdAt, deliveries, covers?, replaced?, origin? }` |
 | `pending` | `<sessionId>#<messageId>` | `{ sessionId, channelId, seq, at }` |
+| `notices` | notice kind | `{ messageId }` |
 
 ### `colleagues`
 
@@ -107,8 +108,8 @@ feeds or a direct channel.
 | `channelId`, `channelName` | Where the message lives, by key and by display name. |
 | `kind` | `public`, `dm`, `mailbox`, or `summary`. |
 | `seq` | The sequence number within the channel. Allocated by incrementing `channels.nextSeq`, never renumbered. |
-| `senderName` | The sender's name at the time of writing: a session title, the short-id fallback, or `userName`. |
-| `senderSessionId` | The sender's session, **absent** when the user posted from the panel. |
+| `senderName` | The sender's name at the time of writing: a session title, the short-id fallback, `userName`, or `office` for the one message the office writes itself. |
+| `senderSessionId` | The sender's session, **absent** when no session authored the message: a post from the panel, and the office's own idle notice. |
 | `recipients` | The session ids the message was addressed to. Empty on a summary or a mailbox record. |
 | `text` | The body. A summary's body is the text a model wrote for the range. |
 | `createdAt` | Unix milliseconds. |
@@ -149,6 +150,22 @@ it, the harness claims it into a step, or the colleague reads it for itself with
 `office_read_notifications`. The third writes the same `delivered` delivery outcome as the first,
 because the tool result is the delivery; what it never does is remove the message from its channel,
 which is why the table can be emptied without anything becoming unreadable.
+
+### `notices`
+
+The messages the office itself wrote, keyed by the kind of notice, so a question the office asked
+once is not asked again for the same reason. `idle` is the only kind today.
+
+| Field | Meaning |
+|---|---|
+| `messageId` | The notice last sent of this kind. While it is still the newest record in `messages`, nobody has written anything since the office asked, and the office stays quiet. |
+
+The watermark is a message identity rather than a timestamp because the two records that race — the
+work that armed the notice and the notice itself — can be written in the same millisecond, and a
+clock would have to guess which of them it was looking at. Record order is write order, so "has
+anything happened since the office asked?" has an exact answer. The record is written after the
+notice it names, so a process that stops in between asks its leaders once more rather than retiring
+a question they never received. See [design.md](design.md) for why the notice exists at all.
 
 ## Identity
 

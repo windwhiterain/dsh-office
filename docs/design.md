@@ -1,7 +1,8 @@
 # Design
 
 Why `dsh-office` is shaped this way: the row kinds, the host/office split, the boss preset's
-mask, how the profile patch is edited, the role model, and why a wake can be timed. Read this
+mask, how the profile patch is edited, the role model, why a wake can be timed, and what the one
+message the office writes itself is for. Read this
 before changing `index.js`; the storage and identity contract is in
 [data-model.md](data-model.md), and what happens when something is posted is in
 [delivery.md](delivery.md).
@@ -334,4 +335,49 @@ Three properties decide its shape:
   state that must not be read twice is the race between a step claiming a `step-end` wake and the
   office deleting the hold for it; the colleague's session log settles it, exactly as it settles
   the recovery case.
+
+## Why the office asks a question of its own
+
+Every message the office stores was written by somebody: the user, or a colleague with something to
+say. The one message the office writes itself exists for a case it is otherwise blind to — the
+whole roster has stopped, and nothing in the record says what comes next. No colleague can notice
+that on its own: the ones who would notice are idle, and an idle session has no turn to notice
+anything in. `idleNotice`, off by default on every office row, is the office taking that turn for
+them: it posts one question to `idleNotice.channel`, addressed to the colleagues that hold the
+`leader` role, and asks them to decide what happens next.
+
+Three properties decide its shape.
+
+- **It is triggered by a colleague's turn ending, never by a clock.** The office listens for the one
+  moment the question is meaningful — a colleague becoming idle — and then asks whether the whole
+  roster has stopped. `inactive` counts as stopped: a colleague whose session is not loaded has no
+  turn to be in either state of. Nothing polls, so an office nothing happens in costs nothing, and
+  there is no interval for a deployment to tune. The office also asks once at activation, which is
+  what makes switching the feature on take effect without waiting for work that may never come.
+- **It cannot repeat on its own, and that is deliberately not configurable.** The notice wakes the
+  leaders, their turns end, and the office is idle again with the record it had before — so "ask
+  whenever everyone is idle" would ask for ever, spending a leader turn every turn-latency to be
+  told there is nothing to do. The office therefore asks only when something was written since it
+  last asked, which makes work the thing that arms the next question: a colleague's post, the
+  user's next request, a compaction, anything that lands in `messages`. What it compares is a
+  message identity rather than a timestamp, for the reason in
+  [data-model.md](data-model.md): the work that arms a notice and the notice itself can be written
+  in the same millisecond, and a clock cannot tell those two apart — it would either repeat the
+  question for work the leaders were already told about, or hide work from them for ever.
+- **It is an ordinary stored message, authored by the office.** It is written to a channel, so it is
+  in the record where `office_read` finds it and where the panel shows it, and the leaders answer it
+  the way they answer anything else. Its audience is the leaders alone, because the decision is
+  theirs and a wake costs every colleague that receives one a turn. Its sender is `office`, with no
+  session id: naming the user would read as the user speaking, and naming a colleague would
+  attribute the office's question to that colleague.
+
+Two conditions are refusals rather than defaults. `wakesEnabled: false` is a promise that no session
+is ever woken, and a question nobody is woken for is not a question, so such an office writes
+nothing. And a configured channel the office does not hold fails the send rather than the question:
+the office reports it and asks again at the next idle transition, so a deployment that renamed or
+deleted the channel finds out instead of wondering why its leaders went quiet.
+
+The notice runs **after** the wake flush of the same idle transition, because the two are ordered by
+what they know: a colleague that has just been handed held mail is working again, and asking the
+leaders while the office is still moving asks about a state that no longer holds.
 

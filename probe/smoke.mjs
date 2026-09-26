@@ -317,6 +317,8 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
   const globalTools = new Map()
   const routes = new Map()
   const liveAgents = new Map()
+  /** Warnings the office logged, so a check can tell a quiet success from a swallowed failure. */
+  const warnings = []
   /** Pending input per session, which a resumed agent reattaches rather than starting empty. */
   const inboxes = new Map()
   const titles = new Map()
@@ -588,7 +590,13 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     // One row per apply call, so this harness rewrites the id before mounting each row.
     // The kind of a row is its id, exactly as it is for a Loader entry.
     fiber: { entry: { options: { id: '' } } },
-    logger: { error: (message) => { throw new Error(message) } },
+    // `error` throws, because a logged error is a failure the probe must not swallow. `warn` is
+    // the office's own report of a path it survived without doing its job, which a check reads
+    // back rather than losing: a notice that could not be sent is exactly that.
+    logger: {
+      error: (message) => { throw new Error(message) },
+      warn: (message) => { warnings.push(message) },
+    },
   }
   /**
    * Disposing a fiber runs its effects' cleanups, and the office keeps module-level state:
@@ -611,6 +619,7 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     hires,
     selects,
     permissions,
+    warnings,
     publish,
     close,
     /**
@@ -3355,6 +3364,186 @@ await check('office_channel_members edits the roster, the routes mirror the tool
   assert.equal(deleted.status, 200)
   const afterDelete = await callRoute(routes, '/dsh-office/offices/state?office=cleanup&channel=routed')
   assert.equal(afterDelete.payload.channel, 'general', 'the state route falls back to the public feed')
+})
+
+await check('an idle office asks its leaders what comes next, and only when something new happened', async () => {
+  const idle = makeHarness(
+    { officeName: 'idle', idleNotice: { enabled: true, text: 'the office stopped; leaders, decide' } },
+    undefined,
+    { rowId: 'office_idle' },
+  )
+  await idle.ready
+  idle.titles.set('session-idle-boss', 'chief')
+  idle.titles.set('session-idle-lead', 'lead')
+  idle.titles.set('session-idle-hand', 'hand')
+  const chief = idle.publish('session-idle-boss', { preset: 'office-boss' })
+  const lead = idle.publish('session-idle-lead')
+  const hand = idle.publish('session-idle-hand')
+  await callBoss(chief, 'idle', 'office_adopt', { session_id: 'session-idle-lead', role: 'leader' })
+  await callBoss(chief, 'idle', 'office_adopt', { session_id: 'session-idle-hand' })
+
+  /** The messages the office itself wrote, oldest first. */
+  const notices = () => [...idle.tables.get('messages').entries()]
+    .map(([, value]) => value)
+    .filter(message => message.senderName === 'office')
+    .sort((left, right) => left.createdAt - right.createdAt)
+
+  // Nothing was ever said in this office, so there is nothing to decide and nobody to ask.
+  await idle.setStatus('session-idle-lead', 'running')
+  await idle.setStatus('session-idle-lead', 'idle')
+  assert.equal(notices().length, 0, 'an office with no history has nothing to ask about')
+
+  // Work happened, and the last colleague to stop leaves the office idle with a question to ask.
+  // The post wakes nobody, so every delivery below belongs to the notice itself.
+  await callBoss(chief, 'idle', 'office_post', { text: 'the release is cut', mention_all: false })
+  await idle.setStatus('session-idle-lead', 'running')
+  await idle.setStatus('session-idle-lead', 'idle')
+  const asked = notices()
+  assert.equal(asked.length, 1, 'the office asks once the last colleague has stopped')
+  assert.equal(asked[0].channelId, 'general', 'the question is part of the office record')
+  assert.equal(asked[0].text, 'the office stopped; leaders, decide')
+  assert.deepEqual(asked[0].recipients, ['session-idle-lead'], 'only a leader is addressed')
+  assert.equal(lead.sent.length, 1, 'the leader is woken with the question')
+  assert.equal(lead.sent[0].via, 'followup')
+  assert.match(lead.sent[0].message.content[0].text, /the office stopped; leaders, decide/)
+  assert.equal(hand.sent.length, 0, 'a member is not woken by the office asking its leaders')
+
+  // The brake: asking again would be the only thing that ever happens, so the office asks once
+  // and waits until somebody writes something new.
+  await idle.setStatus('session-idle-hand', 'running')
+  await idle.setStatus('session-idle-hand', 'idle')
+  assert.equal(notices().length, 1, 'the notice does not repeat without new work')
+  assert.equal(lead.sent.length, 1, 'and nobody is woken a second time')
+
+  // A colleague's post is work, so the next time the office stops there is something to decide.
+  await call(hand, 'office_post', { office: 'idle', text: 'the migration notes are done', mentions: ['lead'] })
+  await idle.setStatus('session-idle-lead', 'running')
+  await idle.setStatus('session-idle-lead', 'idle')
+  assert.equal(notices().length, 2, 'new work arms the next notice')
+
+  // The office is not idle while one colleague is still working, which is the whole condition.
+  await call(hand, 'office_dm', { office: 'idle', to: 'lead', text: 'one more thing' })
+  await idle.setStatus('session-idle-hand', 'running')
+  await idle.setStatus('session-idle-lead', 'idle')
+  assert.equal(notices().length, 2, 'a colleague that is still working means the office has not stopped')
+  await idle.setStatus('session-idle-hand', 'idle')
+  assert.equal(notices().length, 3, 'and the office asks once it really has stopped')
+
+  // A status change is process-wide, so a session that is not a colleague must not be mistaken
+  // for one. The stranger's turn asks nothing, and the colleague that follows it proves the
+  // office was armed to ask and simply was not asked by a stranger's transition.
+  idle.publish('session-idle-stranger')
+  await call(hand, 'office_dm', { office: 'idle', to: 'lead', text: 'and one more' })
+  await idle.setStatus('session-idle-stranger', 'running')
+  await idle.setStatus('session-idle-stranger', 'idle')
+  assert.equal(notices().length, 3, 'a session outside the roster asks nothing')
+  await idle.setStatus('session-idle-lead', 'running')
+  await idle.setStatus('session-idle-lead', 'idle')
+  assert.equal(notices().length, 4, 'while the office asking after its own colleague does')
+
+  // What the office asked last is stored rather than remembered, so a restart is not a reason to
+  // ask the same question again.
+  await idle.close()
+  idle.ctx.fiber.entry.options.id = 'office_idle'
+  await apply(idle.ctx, {
+    officeName: 'idle',
+    idleNotice: { enabled: true, text: 'the office stopped; leaders, decide' },
+  })
+  await settle()
+  assert.equal(notices().length, 4, 'a restart with nothing new to decide asks nothing')
+})
+
+await check('the idle notice needs a leader, a colleague, and a channel that exists', async () => {
+  // An office of members only has nobody to ask, and must not guess at a substitute.
+  const headless = makeHarness({ officeName: 'headless', idleNotice: { enabled: true } }, undefined, {
+    rowId: 'office_headless',
+  })
+  await headless.ready
+  headless.titles.set('session-headless-boss', 'chief')
+  headless.titles.set('session-headless-hand', 'hand')
+  const headlessChief = headless.publish('session-headless-boss', { preset: 'office-boss' })
+  const headlessHand = headless.publish('session-headless-hand')
+  await callBoss(headlessChief, 'headless', 'office_adopt', { session_id: 'session-headless-hand' })
+  await callBoss(headlessChief, 'headless', 'office_post', { text: 'nobody leads this office', mention_all: false })
+  await headless.setStatus('session-headless-hand', 'running')
+  await headless.setStatus('session-headless-hand', 'idle')
+  assert.equal(
+    [...headless.tables.get('messages').entries()].filter(([, message]) => message.senderName === 'office').length,
+    0,
+    'an office with no leader has nobody to ask',
+  )
+
+  // `wakesEnabled: false` is a promise that no session is ever woken, and a question nobody is
+  // woken for is not a question.
+  const mute = makeHarness({ officeName: 'mute', wakesEnabled: false, idleNotice: { enabled: true } }, undefined, {
+    rowId: 'office_mute',
+  })
+  await mute.ready
+  mute.titles.set('session-mute-boss', 'chief')
+  mute.titles.set('session-mute-lead', 'lead')
+  const muteChief = mute.publish('session-mute-boss', { preset: 'office-boss' })
+  const muteLead = mute.publish('session-mute-lead')
+  await callBoss(muteChief, 'mute', 'office_adopt', { session_id: 'session-mute-lead', role: 'leader' })
+  await callBoss(muteChief, 'mute', 'office_post', { text: 'stored, never delivered', mention_all: false })
+  await mute.setStatus('session-mute-lead', 'running')
+  await mute.setStatus('session-mute-lead', 'idle')
+  assert.equal(muteLead.sent.length, 0, 'a silent office wakes nobody')
+  assert.equal(
+    [...mute.tables.get('messages').entries()].filter(([, message]) => message.senderName === 'office').length,
+    0,
+    'and stores no question of its own',
+  )
+
+  // A configured channel the office does not hold is reported rather than dropped: the office
+  // keeps asking at the next idle transition, and the operator has something to read.
+  const lost = makeHarness({ officeName: 'lost', idleNotice: { enabled: true, channel: 'nowhere' } }, undefined, {
+    rowId: 'office_lost',
+  })
+  await lost.ready
+  lost.titles.set('session-lost-boss', 'chief')
+  lost.titles.set('session-lost-lead', 'lead')
+  const lostChief = lost.publish('session-lost-boss', { preset: 'office-boss' })
+  lost.publish('session-lost-lead')
+  await callBoss(lostChief, 'lost', 'office_adopt', { session_id: 'session-lost-lead', role: 'leader' })
+  await callBoss(lostChief, 'lost', 'office_post', { text: 'somewhere to ask', mention_all: false })
+  await lost.setStatus('session-lost-lead', 'running')
+  await lost.setStatus('session-lost-lead', 'idle')
+  assert.match(lost.warnings.join('\n'), /the idle notice failed: .*unknown channel "nowhere"/)
+})
+
+await check('an office row refuses an idleNotice it could never send', async () => {
+  await assert.rejects(() => makeHarness({ idleNotice: 'yes' }).ready, /idleNotice must be an object/)
+  await assert.rejects(
+    () => makeHarness({ idleNotice: { who: 'leaders' } }).ready,
+    /idleNotice\.who has no meaning/,
+    'an unknown key would look configured while doing nothing',
+  )
+  await assert.rejects(() => makeHarness({ idleNotice: { enabled: 'yes' } }).ready, /idleNotice\.enabled must be a boolean/)
+  for (const channel of ['mailbox', 'dm-a+b', '  ']) {
+    await assert.rejects(
+      () => makeHarness({ idleNotice: { channel } }).ready,
+      /idleNotice\.channel must name a channel of the office/,
+      `${JSON.stringify(channel)} is not a channel the office can post to`,
+    )
+  }
+  await assert.rejects(() => makeHarness({ idleNotice: { text: '   ' } }).ready, /must be a non-empty message body/)
+  await assert.rejects(
+    () => makeHarness(undefined, undefined, { host: true, hostConfig: { idleNotice: {} } }).ready,
+    /config\.idleNotice has no meaning on an office host row/,
+    'the notice belongs to an office, not to the host that owns the tool set',
+  )
+  // The defaults are the safe ones: an office row that says nothing about the notice never asks.
+  const quiet = makeHarness({ officeName: 'quiet' }, undefined, { rowId: 'office_quiet' })
+  await quiet.ready
+  quiet.titles.set('session-quiet-boss', 'chief')
+  quiet.titles.set('session-quiet-lead', 'lead')
+  const quietChief = quiet.publish('session-quiet-boss', { preset: 'office-boss' })
+  const quietLead = quiet.publish('session-quiet-lead')
+  await callBoss(quietChief, 'quiet', 'office_adopt', { session_id: 'session-quiet-lead', role: 'leader' })
+  await callBoss(quietChief, 'quiet', 'office_post', { text: 'work, unasked', mention_all: false })
+  await quiet.setStatus('session-quiet-lead', 'running')
+  await quiet.setStatus('session-quiet-lead', 'idle')
+  assert.equal(quietLead.sent.length, 0, 'a row that never opts in never asks')
 })
 
 for (const label of checks) console.log(`  ok  ${label}`)

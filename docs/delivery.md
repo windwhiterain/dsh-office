@@ -111,6 +111,7 @@ colleague actually got, and the detail is why it was not the splice its sender a
 | `office_post` naming the user | the named colleagues, and a copy in the mailbox |
 | `office_dm` to a colleague | that colleague alone, at the timing its `notify` asks for |
 | `office_dm` to the user | the mailbox; no session is woken, and `notify` means nothing to a user with no session |
+| the office's own idle notice | exactly the colleagues whose stored role is `leader` |
 
 Every `office_post` row carries the same timing choice as `office_dm`: a post and a dm differ in
 who they reach, never in when a recipient that is mid-turn reads them.
@@ -118,6 +119,11 @@ who they reach, never in when a recipient that is mid-turn reads them.
 `mention_all` defaults to true when `mentions` is absent and to false when it is present, so
 naming colleagues narrows the audience rather than adding to it, and `mentions: []` posts a notice
 nobody is woken for. A session never receives its own message.
+
+The office is the one sender that is not a session, and it has one message to send: when the whole
+roster has stopped and something was written since the office last asked, it posts `idleNotice.text`
+to `idleNotice.channel` and notifies the leaders alone. That is the only wake in the office no
+session asked for; [design.md](design.md) says why it exists and what stops it from repeating.
 
 The panel sends the same shape and makes the same choice: its **Wake everyone** box starts
 checked, and unchecking it narrows the wake to the names the stored body carries with `@`. The

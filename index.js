@@ -133,6 +133,44 @@ const STEP_END_RECOVERY_DETAIL = 'the running turn ended before it took this ste
   + 'the office handed it over as its own turn'
 
 /**
+ * The name the office itself speaks under.
+ *
+ * An idle notice is the office's own act rather than a colleague's, so no session authors it.
+ * The name is what every reader sees in the frame the notice becomes, and naming the user there
+ * would read as the user speaking while naming a colleague would attribute the office's prompt
+ * to that colleague.
+ */
+const OFFICE_SENDER_NAME = 'office'
+
+/**
+ * What the office does when every colleague has stopped: it asks its leaders what comes next.
+ *
+ * An office in which nothing is running and nothing says what happens after that has no next
+ * step, and only the leaders can decide one. So the office notices exactly that moment and wakes
+ * them with the question. It is off by default, because it spends one turn of every leader's
+ * session, and a deployment opts in on the office row it wants it for.
+ *
+ * The notice can never repeat on its own, and that gate is an invariant rather than a value a
+ * deployment could switch off: it is sent only when something was written to the office since
+ * the notice before it. A notice that only ever produced another notice would be the office
+ * waking its leaders for ever to be told there is nothing to decide, which is the one outcome
+ * this feature must not have. What re-arms it is work — any message anyone stores — so the
+ * leaders are asked again the next time the office stops, after something actually happened.
+ */
+const DEFAULT_IDLE_NOTICE = {
+  enabled: false,
+  channel: GENERAL_CHANNEL,
+  text: 'The office is idle: every colleague has stopped and no turn is running. Leaders, decide '
+    + 'what happens next — name the work and who takes it, and post the decision where the office '
+    + 'records it, so the colleagues it concerns are woken. This notice arrives only when something '
+    + 'new happened in the office; if nothing should happen next, answer nothing and the office '
+    + 'stays quiet.',
+}
+
+/** The one record the `notices` table holds: the idle notice the office sent last. */
+const IDLE_NOTICE_KEY = 'idle'
+
+/**
  * Role → session permission preset, per office row.
  *
  * A role's office capabilities decide which office tools its session holds; this map decides
@@ -258,6 +296,7 @@ const DEFAULT_OFFICE_CONFIG = {
   userName: 'user',
   bossPreset: 'office-boss',
   rolePermissions: { ...DEFAULT_ROLE_PERMISSIONS },
+  idleNotice: { ...DEFAULT_IDLE_NOTICE },
   // Both are listed so the unknown-key check accepts them, and neither carries a value here.
   // They are the two halves of an office's identity: `officeName` is the name people and the
   // model read and pass, and `officeId` is the storage key behind it, which defaults to the
@@ -308,6 +347,9 @@ function officeDomain(officeId, name) {
       channels: { valueSchema: PASSTHROUGH_SCHEMA },
       messages: { valueSchema: PASSTHROUGH_SCHEMA },
       pending: { valueSchema: PASSTHROUGH_SCHEMA },
+      // Notices the office itself sent, so an idle notice outlives the process that sent it: a
+      // restart that forgot when the leaders were last asked would ask them again at once.
+      notices: { valueSchema: PASSTHROUGH_SCHEMA },
     },
   }
 }
@@ -532,6 +574,42 @@ function resolveRowConfig(raw, defaults, label, rowId) {
     mapping[role] = preset.trim()
   }
   config.rolePermissions = mapping
+  // The idle notice is one object rather than three fields, because its keys only mean anything
+  // together: a notice with no channel or no body is not a notice. An object that names only some
+  // of them completes against the defaults, and an unknown key is refused for the same reason a
+  // field on the wrong kind of row is — it would look configured while doing nothing.
+  const idleNotice = config.idleNotice
+  if (idleNotice === null || typeof idleNotice !== 'object' || Array.isArray(idleNotice)) {
+    throw new TypeError(`dsh-office: config.idleNotice must be an object, got ${JSON.stringify(idleNotice)}`)
+  }
+  for (const key of Object.keys(idleNotice)) {
+    if (!Object.hasOwn(DEFAULT_IDLE_NOTICE, key)) {
+      throw new TypeError(
+        `dsh-office: config.idleNotice.${key} has no meaning; idleNotice takes `
+        + Object.keys(DEFAULT_IDLE_NOTICE).sort().join(', '),
+      )
+    }
+  }
+  const notice = { ...DEFAULT_IDLE_NOTICE, ...idleNotice }
+  if (typeof notice.enabled !== 'boolean') {
+    throw new TypeError(
+      `dsh-office: config.idleNotice.enabled must be a boolean, got ${JSON.stringify(notice.enabled)}`,
+    )
+  }
+  // The channel is normalized here because it is a channel id everywhere else: the standing
+  // channel keeps its spellings, and a group channel is stored under its normalized name. The
+  // mailbox and the direct-message idspace are refused rather than accepted and never delivered:
+  // the mailbox is the user's private mail, and a direct channel is created by a conversation.
+  const noticeChannel = typeof notice.channel === 'string' ? normalizeName(notice.channel) : ''
+  if (noticeChannel.length === 0 || noticeChannel === MAILBOX_CHANNEL || noticeChannel.startsWith('dm-')) {
+    throw new TypeError(
+      `dsh-office: config.idleNotice.channel must name a channel of the office, got ${JSON.stringify(notice.channel)}`,
+    )
+  }
+  if (typeof notice.text !== 'string' || notice.text.trim().length === 0) {
+    throw new TypeError('dsh-office: config.idleNotice.text must be a non-empty message body')
+  }
+  config.idleNotice = { enabled: notice.enabled, channel: noticeChannel, text: notice.text.trim() }
   return config
 }
 
@@ -688,7 +766,7 @@ function rowOfficeIdentity(document, path, fallbackName) {
  * @param identity - the storage key and name to restore after the wipe.
  */
 async function purgeDomain(domain, identity) {
-  for (const tableName of ['colleagues', 'channels', 'messages', 'pending']) {
+  for (const tableName of ['colleagues', 'channels', 'messages', 'pending', 'notices']) {
     const table = domain.table(tableName)
     for (const key of [...table.keys()]) await table.delete(key)
   }
@@ -956,6 +1034,7 @@ function createOffice(ctx, domain, config, hooks) {
   const channels = domain.table('channels')
   const messages = domain.table('messages')
   const pendingWakes = domain.table('pending')
+  const notices = domain.table('notices')
 
   /** The session's committed title, or undefined when none exists yet. */
   const readTitle = async (sessionId) => {
@@ -2008,6 +2087,96 @@ function createOffice(ctx, domain, config, hooks) {
     return described
   }
 
+  /** Set while one idle notice is being sent, so two idle transitions cannot send two. */
+  let idleNoticeInFlight = false
+
+  /**
+   * Whether anything was written to the office after one idle notice.
+   *
+   * The question is not "what time is it" but "is the newest record the question I asked last",
+   * and the messages table answers it in the order the office wrote its records. A clock
+   * comparison cannot: a message written in the same millisecond as the notice is exactly as new
+   * as one written a moment later, so a timestamp would have to guess which of the two it was
+   * looking at — and guessing wrong either repeats the question for work the leaders were
+   * already told about, or hides work from them for ever.
+   *
+   * The notice itself is therefore not activity: it is the record the next notice would repeat.
+   * Every other write is, whatever channel it landed in and whether the user or a colleague made
+   * it, which is what makes real work the thing that arms the next question.
+   * @param notice - the stored record of the last notice the office sent, when there is one.
+   * @returns whether the newest record is one the notice did not write.
+   */
+  const activitySince = (notice) => {
+    let newest
+    for (const key of messages.keys()) newest = key
+    if (newest === undefined) return false
+    return validateMessage(messages.get(newest)).messageId !== notice?.messageId
+  }
+
+  /**
+   * Tell the leaders that the whole office has stopped, when there is a decision to make.
+   *
+   * This is the office's own turn, and it is the only one it ever takes: every other message the
+   * office stores was written by a session that wanted it sent. It runs when a colleague's turn
+   * ends and once at activation, which is what makes enabling the feature take effect without
+   * waiting for work that may never come.
+   *
+   * Three conditions must hold together, and each of them is a fact about the office rather than
+   * a preference: nobody is mid-turn, at least one colleague holds the leader role, and something
+   * was written since the last notice. The last one is what bounds the feature — the notice wakes
+   * the leaders, their turns end, and the office is idle again; without it the office would wake
+   * them once more, for ever, having learned nothing in between. The notice is therefore a
+   * question asked *after* something happened, never a heartbeat.
+   *
+   * The notice is a message in a channel rather than a private word to each leader, because the
+   * leaders are meant to decide together and the office's record is where a decision belongs. It
+   * is addressed to the leaders by name, so only they are woken, and it is authored by the office
+   * itself, which no colleague's name or the user's name would describe.
+   * @param sessionId - the colleague whose turn just ended, or undefined for the activation check.
+   * @returns the notice as `{ channelId, messageId, leaders, deliveries }`, or undefined when the
+   *   office had nothing to ask.
+   */
+  const noteIdle = async (sessionId) => {
+    const settings = config.idleNotice
+    // A deployment that wakes nobody cannot ask anybody anything; the notice would be a message
+    // written for a reader the office promised not to disturb.
+    if (!settings.enabled || !config.wakesEnabled || idleNoticeInFlight) return undefined
+    // A status change is process-wide, so it says nothing about this office unless the session
+    // that changed is one of its colleagues: another session going idle must not wake the leaders.
+    if (sessionId !== undefined && colleagueBySession(sessionId) === undefined) return undefined
+    idleNoticeInFlight = true
+    try {
+      const roster = await listColleagues()
+      if (roster.some(colleague => liveAgent(colleague.sessionId)?.status === 'running')) return undefined
+      // Only the predefined `leader` role counts. A role is a permission set rather than a job
+      // title, and choosing which colleague decides is exactly a permission.
+      const waiting = roster.filter(colleague => canonicalRole(colleague.role) === ROLE_LEADER)
+      if (waiting.length === 0) return undefined
+      const stored = notices.get(IDLE_NOTICE_KEY)
+      if (!activitySince(stored === undefined ? undefined : requireRecord('notice', stored))) return undefined
+      // The message is stored before the notice is recorded, so what the record describes is a
+      // message that exists: a process that stops in between asks once more, which is a repeat,
+      // while the other order would silently retire the question that was never asked.
+      const posted = await post({
+        channel: settings.channel,
+        sender: { name: OFFICE_SENDER_NAME },
+        text: settings.text,
+        recipients: waiting,
+        kind: 'public',
+        mentionAll: false,
+      })
+      await notices.put(IDLE_NOTICE_KEY, { messageId: posted.message.messageId })
+      return {
+        channelId: posted.message.channelId,
+        messageId: posted.message.messageId,
+        leaders: waiting.map(colleague => colleague.name),
+        deliveries: posted.deliveries,
+      }
+    } finally {
+      idleNoticeInFlight = false
+    }
+  }
+
   /** Set the session title that every surface displays as the colleague's name. */
   const rename = async (sessionId, title) => {
     const trimmed = typeof title === 'string' ? title.trim() : ''
@@ -2320,6 +2489,7 @@ function createOffice(ctx, domain, config, hooks) {
     flushWakes,
     takeWakes,
     restoreWakes,
+    noteIdle,
     senderOf,
     generalChannel: GENERAL_CHANNEL,
     mailboxChannel: MAILBOX_CHANNEL,
@@ -5241,14 +5411,32 @@ async function applyOffice(ctx, raw, rowId) {
   // A colleague that finishes a turn is idle, and everything the office held for it while that
   // turn ran is delivered as one turn. `agent/status` is a process-wide agent event, so this
   // listener sees every agent; an office ignores the sessions that are not its colleagues
-  // because it holds nothing for them.
+  // because it holds nothing for them — and because an idle transition in some other session
+  // says nothing about whether this office has stopped.
+  //
+  // The idle notice is asked second and in sequence, because a colleague that has just been
+  // handed held mail is working again: evaluating before that delivery would ask the leaders
+  // while the office was still moving.
   ctx.on('agent/status', ({ agent, status }) => {
     if (status !== 'idle') return
-    void office.flushWakes(agent.session.header.id).catch((error) => {
-      // The held wakes stay where they are, so the next idle transition delivers them; the
-      // failure is reported here because nothing else would show it.
-      ctx.logger?.warn?.(`dsh-office: delivering held wakes failed: ${String(error)}`)
-    })
+    const sessionId = agent.session.header.id
+    void (async () => {
+      try {
+        await office.flushWakes(sessionId)
+      } catch (error) {
+        // The held wakes stay where they are, so the next idle transition delivers them; the
+        // failure is reported here because nothing else would show it.
+        ctx.logger?.warn?.(`dsh-office: delivering held wakes failed: ${String(error)}`)
+        return
+      }
+      try {
+        await office.noteIdle(sessionId)
+      } catch (error) {
+        // A notice that could not be sent is a question nobody read, and the office will ask it
+        // again at the next idle transition: the attempt records nothing.
+        ctx.logger?.warn?.(`dsh-office: the idle notice failed: ${String(error)}`)
+      }
+    })()
   })
 
   // A step-end wake reaches its colleague's turn as pending input, and the office's hold for it
@@ -5263,10 +5451,22 @@ async function applyOffice(ctx, raw, rowId) {
     })
   })
 
-  // A process that stopped while wakes were held delivers them now, one turn per colleague.
-  void office.restoreWakes().catch((error) => {
-    ctx.logger?.warn?.(`dsh-office: restoring held wakes failed: ${String(error)}`)
-  })
+  // A process that stopped while wakes were held delivers them now, one turn per colleague, and
+  // then the office checks whether it is idle with something new to decide. That check is what
+  // makes an office that is quiet at the moment the feature is switched on — or at the moment
+  // the Host restarts — ask its leaders, instead of waiting for work that may never come.
+  void (async () => {
+    try {
+      await office.restoreWakes()
+    } catch (error) {
+      ctx.logger?.warn?.(`dsh-office: restoring held wakes failed: ${String(error)}`)
+    }
+    try {
+      await office.noteIdle()
+    } catch (error) {
+      ctx.logger?.warn?.(`dsh-office: the idle notice failed: ${String(error)}`)
+    }
+  })()
 
   // One roster event, one resync: entering, leaving, and changing role all move the agent's
   // tool set, so none of them installs or withdraws anything itself.
