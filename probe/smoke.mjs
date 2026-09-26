@@ -17,6 +17,13 @@ import { apply } from '../index.js'
 /** Scratch profile patch this probe edits; kept inside the package, removed at the end. */
 const PATCH_PATH = join(fileURLToPath(new URL('.', import.meta.url)), 'patch-scratch.yml')
 
+/**
+ * The notes a hired leader is pointed at, resolved the way the plugin resolves them: against the
+ * package the module lives in, not against the colleague's cwd.
+ */
+const LEADER_GUIDE = fileURLToPath(new URL('../experience/README.md', import.meta.url))
+  .replaceAll('\\', '/')
+
 /** Seed patch carrying a user comment that every edit must preserve. */
 const PATCH_SEED = `# user comment that must survive every edit
 - id: office
@@ -1510,6 +1517,21 @@ await check('hiring greets the new colleague privately, and that greeting makes 
   const mutedBoss = muted.publish('session-muted-boss', { preset: 'office-boss' })
   const quiet = await callBoss(mutedBoss, 'mutedhire', 'office_hire', { name: 'Unwoken' })
   assert.equal(quiet.greeting, 'wakes-disabled', 'with wakes off the greeting is not delivered, and the report says why')
+})
+
+await check('a hired leader is sent to the notes written for that seat, and a member is not', async () => {
+  // The role decides the seat, so it decides whether the guide belongs in the first turn: a
+  // member has no dispatching to do, and a path it will never read is noise in its onboarding.
+  const lead = await callBoss(boss, 'office', 'office_hire', { name: 'Guided', role: 'leader' })
+  const told = liveAgents.get(lead.colleague.sessionId).sent[0].message.content[0].text
+  assert.ok(told.includes(LEADER_GUIDE), 'the leader\'s onboarding names the guide by its absolute path')
+  assert.match(told, /Read them before you dispatch your first piece of work/)
+  const guide = await readFile(LEADER_GUIDE, 'utf8')
+  assert.match(guide, /^# /, 'and the path it names is a markdown file the package ships')
+  assert.ok(guide.includes('leading.md'), 'the file it names is the index of the articles, not one of them')
+  const hand = await callBoss(boss, 'office', 'office_hire', { name: 'Unguided', role: 'member' })
+  const plain = liveAgents.get(hand.colleague.sessionId).sent[0].message.content[0].text
+  assert.ok(!plain.includes(LEADER_GUIDE), 'a member is not pointed at the leader\'s notes')
 })
 
 await check('a colleague whose title has no ASCII form is still addressable by name', async () => {

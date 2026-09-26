@@ -65,7 +65,8 @@ What it covers, by area:
   policy each one applies.
 
 Keep it out of `index.js`: the shipped plugin carries no test code, and `package.json`'s `files`
-list ships neither `probe/` nor `docs/`.
+list ships neither `probe/` nor `docs/`. `experience/` does ship: a hired leader's onboarding turn
+names `experience/README.md` by its absolute path, and a path a prompt hands a model must exist.
 
 ## The panel render check
 

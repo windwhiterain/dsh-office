@@ -112,7 +112,9 @@ office_hire  { "name": "alice", "role": "leader", "description": "owns the relea
 private onboarding message that tells it which office it joined, what its role is, and what that
 role holds. Hiring writes nothing to `#general`, so the public channel stays a record of work
 rather than of arrivals. `role` is one of `member` (the default), `leader`, or `consultant`, and
-`description` is one or two sentences about what the colleague is for.
+`description` is one or two sentences about what the colleague is for. A `leader` is told one
+thing more: the absolute path of [experience/README.md](experience/README.md), the notes written
+for that seat, so the role arrives with what leading this office has already cost.
 
 **3. Talk to it.**
 
@@ -612,10 +614,15 @@ unauthenticated.
   case-insensitively. Nothing slugs a colleague name, because a title like `张三` has no ASCII
   form.
 - **A hired colleague arrives through one private onboarding turn**, which names it, the office,
-  its role, and the tools that role holds, and is written to no channel. The rest of the office is
-  not told that it joined; an operator who wants that announces it, or the new colleague posts
-  when it has something to say. With `wakesEnabled: false` that turn is not delivered, so the
+  its role, and the tools that role holds — and, when the role is `leader`, the absolute path of
+  [experience/README.md](experience/README.md) — and is written to no channel. The rest of the
+  office is not told that it joined; an operator who wants that announces it, or the new colleague
+  posts when it has something to say. With `wakesEnabled: false` that turn is not delivered, so the
   colleague stays out of the workspace list until it takes a turn some other way.
+- **Only a hire carries the leader's guide.** A session that is *adopted* as a leader, or promoted
+  by `office_configure`, takes no onboarding turn, so nothing ever tells it where the notes are;
+  it learns the path from the office's own record or from the operator. The path is resolved
+  against the installed module, so it follows the package wherever the profile links it.
 - **A colleague cannot see that anything is held for it.** A hold is invisible by design — the
   office does not interrupt a working colleague — so a colleague that is running learns about held
   mail only by asking for it, with `office_read_notifications`. Nothing pushes it a notice that
@@ -651,7 +658,9 @@ unauthenticated.
   running host.
 - [docs/testing.md](docs/testing.md) — the offline probe and the panel render check.
 - [experience/README.md](experience/README.md) — leading a team that lives in this office:
-  how to dispatch, how readings lie, and what to keep when someone leaves.
+  how to dispatch, how readings lie, and what to keep when someone leaves. A hired `leader` is
+  handed this file's absolute path in its onboarding turn, which is why `experience/` ships with
+  the package.
 
 ## License
 

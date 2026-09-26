@@ -29,6 +29,7 @@
 
 import { createHash } from 'node:crypto'
 import { readFile, rename, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { isSeq, parseDocument } from 'yaml'
 
 /** Cordis plugin name. */
@@ -96,6 +97,21 @@ const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interr
 
 /** Role a colleague holds when its stored role is absent or no longer predefined. */
 const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
+
+/**
+ * The experience notes written for whoever sits in a leader's seat.
+ *
+ * A hired leader's onboarding turn names this path, so the seat arrives with what earlier
+ * leaders learned in it. The path is resolved against this module rather than written as a
+ * literal: the package is installed wherever the profile links it, and a colleague's own cwd is
+ * the workspace it was hired into, which is neither. Slashes are forward because the path is read
+ * by a model that may paste it into either shell, and Windows accepts both forms.
+ *
+ * The file ships with the package (`package.json`'s `files` lists `experience`), so the path a
+ * prompt names is one that exists.
+ */
+const LEADER_GUIDE_PATH = fileURLToPath(new URL('experience/README.md', import.meta.url))
+  .replaceAll('\\', '/')
 
 /**
  * The ladder a `#` wake level climbs.
@@ -2406,7 +2422,8 @@ function createOffice(ctx, domain, config, hooks) {
    * session unless it is the selected one: a colleague nobody has spoken to yet is invisible
    * in the workspace it was hired into, and knows nothing about the office it joined. One
    * message solves both — the delivered turn clears the blank state, and the body names the
-   * colleague, the office, its role, and the tools that role holds.
+   * colleague, the office, its role, and the tools that role holds. A leader is told one thing
+   * more: where {@link LEADER_GUIDE_PATH} sits, because the seat it was hired into has notes.
    *
    * Onboarding is a private turn and nothing else: it is not written to `#general` or to any
    * other channel, so the office's public history stays a record of work rather than of
@@ -2451,6 +2468,11 @@ function createOffice(ctx, domain, config, hooks) {
         ? undefined
         : 'You hold no tool that writes into the office: what you answer in this session reaches no '
           + 'channel, and the office reads the record rather than your replies.',
+      role === ROLE_LEADER
+        ? `Your seat has notes from the leaders before you, at ${LEADER_GUIDE_PATH} (written in`
+          + ' Chinese): how to dispatch work, how a reading can lie, and what to keep when someone'
+          + ' leaves. Read them before you dispatch your first piece of work.'
+        : undefined,
       'The office has a history from before you joined, and nothing replays it. Read the range you'
       + ' need with office_read, which takes a sequence range and filters by sender, text, mention,'
       + ' or time; a channel that grew long holds summaries where older messages were compacted.',

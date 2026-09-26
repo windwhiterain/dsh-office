@@ -37,7 +37,8 @@
     "client.js",
     "presets/*.mjs",
     "cordis.patch.yml",
-    "locale/*.json"
+    "locale/*.json",
+    "experience/*.md"
   ],
   "dependencies": {
     "yaml": "^2.4.5"
