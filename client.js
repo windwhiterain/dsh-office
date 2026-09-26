@@ -954,6 +954,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The colleagues one channel holds.
+     *
+     * The public channel records no members because every colleague of the office belongs to it,
+     * and a group channel's stored membership is exactly who may read it — so the roster column
+     * reads the channel the feed reads rather than the office's whole roster. The mailbox and the
+     * direct channels are never read by that column, and neither is scoped, so every other kind
+     * holds the roster as it stands.
+     * @param snapshot - the office snapshot, or undefined before one arrives.
+     * @param channelId - the channel whose membership scopes the list.
+     * @returns the colleagues, in roster order.
+     */
+    function channelColleagues(snapshot, channelId) {
+      const colleagues = snapshot?.colleagues ?? []
+      const channel = (snapshot?.channels ?? []).find(entry => entry.channelId === channelId)
+      if (channel?.kind !== 'group') return colleagues
+      const members = channel.members ?? []
+      return colleagues.filter(colleague => members.includes(colleague.sessionId))
+    }
+
+    /**
      * One panel feed: the newest page from the snapshot, plus the older pages a reader unfolded.
      *
      * The snapshot polls every few seconds and carries only the newest messages, so the unfolded
@@ -967,43 +987,62 @@ window.__ModuleLoader__.load({
      * @returns the combined messages, how many are still folded, the loader, and its failure.
      */
     function useFeedHistory({ officeName, channel, newest, total }) {
-      const [older, setOlder] = useState([])
+      /**
+       * The unfolded pages, carried with the channel they belong to.
+       *
+       * A page is a range of one channel's sequence numbers, so another channel's page is not
+       * this feed's: holding the key is what keeps the column from drawing the channel the
+       * reader left under the new channel's name. Clearing it from an effect could not — the
+       * frame before that effect runs would still render the mixture.
+       */
+      const [unfolded, setUnfolded] = useState({ key: undefined, messages: [] })
       const [failure, setFailure] = useState(undefined)
       const loading = useRef(false)
-      const previousTotal = useRef(undefined)
+      /** The last total seen, with its channel, so a switch is not read as a channel that shrank. */
+      const previous = useRef({ key: undefined, total: undefined })
+      const key = `${officeName ?? ''}\u0000${channel}`
+      const latest = useRef(key)
+      latest.current = key
+      const older = unfolded.key === key ? unfolded.messages : []
       const oldest = older.at(0)?.seq ?? newest.at(0)?.seq
 
-      // Another office, or another channel of the same one, invalidates what was unfolded: the
-      // page is a range of one channel's sequence numbers.
-      useEffect(() => {
-        setOlder([])
-        setFailure(undefined)
-      }, [officeName, channel])
+      // Opening another channel starts that feed unfolded by nothing, and a failure belonged to
+      // the page that was asked for rather than to the channel now being read.
+      useEffect(() => { setFailure(undefined) }, [key])
 
       // A channel that shrank lost messages the reader had unfolded — a compacted range replaces
       // them with one summary — so the whole page is dropped rather than shown above messages that
       // no longer exist. Which of them went is not knowable here; one click unfolds what remains.
       useEffect(() => {
-        const shrank = previousTotal.current !== undefined && total < previousTotal.current
-        previousTotal.current = total
-        if (shrank) setOlder([])
-      }, [total])
+        const shrank = previous.current.key === key
+          && previous.current.total !== undefined
+          && total < previous.current.total
+        previous.current = { key, total }
+        if (shrank) setUnfolded({ key, messages: [] })
+      }, [key, total])
 
       const load = useCallback(async () => {
         if (loading.current || oldest === undefined) return
         loading.current = true
+        const asked = key
         try {
           const page = await requestJson(
             `${withChannel(officeRoute('history', officeName), channel)}&before=${oldest}`,
           )
-          setOlder(current => [...(page?.messages ?? []), ...current])
+          // An answer is prepended only while the feed still reads the channel it was asked for.
+          if (latest.current !== asked) return
+          setUnfolded(current => ({
+            key: asked,
+            messages: [...(page?.messages ?? []), ...(current.key === asked ? current.messages : [])],
+          }))
           setFailure(undefined)
         } catch (error) {
+          if (latest.current !== asked) return
           setFailure(error instanceof Error ? error.message : String(error))
         } finally {
           loading.current = false
         }
-      }, [officeName, channel, oldest])
+      }, [officeName, channel, key, oldest])
 
       const messages = [...older, ...newest]
       return { messages, folded: Math.max(0, total - messages.length), load, failure }
@@ -1060,21 +1099,44 @@ window.__ModuleLoader__.load({
      * two pollers would double every request. `channelId` decides which feed `messages` and
      * `messagesTotal` carry — the servers' own fallback answers the public channel for a name
      * it does not resolve — and each switch is a new request, not a refetch of one channel.
+     *
+     * An answer is published only while the question it answers is still the one being asked.
+     * That is what makes a switch a decision: a poll already in flight for the channel the reader
+     * left is dropped instead of published, where publishing it would report a channel the panel
+     * no longer reads — and, because the panel follows the answered channel, would ask for that
+     * one again, for ever. Only another office or another channel supersedes a request, so two
+     * polls of one channel may both land.
      * @param officeName - the office to read, or undefined while none is mounted.
      * @param channelId - the channel whose `messages` the snapshot should carry.
-     * @returns the snapshot, its error, and a refresh callback.
+     * @returns the snapshot on hand, whether it answers this request, its error, and a refresher.
      */
     function useOffice(officeName, channelId) {
-      const [snapshot, setSnapshot] = useState(undefined)
-      const [error, setError] = useState(undefined)
-      useEffect(() => { setSnapshot(undefined); setError(undefined) }, [officeName, channelId])
+      /** The last published answer, carrying the office and channel it was asked for. */
+      const [held, setHeld] = useState(undefined)
+      /** The office and channel being asked for now, which is what an answer is judged against. */
+      const latest = useRef(undefined)
+      const wanted = `${officeName ?? ''}\u0000${channelId ?? ''}`
+      latest.current = wanted
       const refresh = useCallback(async () => {
         if (officeName === undefined || channelId === undefined) return
+        const asked = `${officeName}\u0000${channelId}`
         try {
-          setSnapshot(await requestJson(withChannel(officeRoute('state', officeName), channelId)))
-          setError(undefined)
+          const payload = await requestJson(withChannel(officeRoute('state', officeName), channelId))
+          if (latest.current !== asked) return
+          setHeld({ office: officeName, asked: channelId, payload, error: undefined })
         } catch (failure) {
-          setError(failure instanceof Error ? failure.message : String(failure))
+          if (latest.current !== asked) return
+          const message = failure instanceof Error ? failure.message : String(failure)
+          setHeld(previous => ({
+            office: officeName,
+            asked: channelId,
+            // A dropped poll must not blank a panel that already resolved, but a failure while
+            // another channel is coming has nothing of this channel to keep.
+            payload: previous?.office === officeName && previous.asked === channelId
+              ? previous.payload
+              : undefined,
+            error: message,
+          }))
         }
       }, [officeName, channelId])
       useEffect(() => {
@@ -1082,7 +1144,17 @@ window.__ModuleLoader__.load({
         const timer = setInterval(() => { void refresh() }, POLL_MS)
         return () => { clearInterval(timer) }
       }, [refresh])
-      return { snapshot, error, refresh }
+      // Another office's snapshot is not this office's: a roster, a channel list, and a mailbox
+      // all belong to the office they were read from.
+      const answer = held !== undefined && held.office === officeName ? held : undefined
+      return {
+        snapshot: answer?.payload,
+        // Whether the snapshot on hand is this request's answer, which is what lets the panel
+        // follow a fallback without letting a superseded answer move the reader's choice.
+        fresh: answer !== undefined && answer.asked === channelId,
+        error: answer?.error,
+        refresh,
+      }
     }
 
     /**
@@ -1847,13 +1919,20 @@ window.__ModuleLoader__.load({
       }
 
       const colleagues = snapshot?.colleagues ?? []
+      // The roster column reads the channel the feed reads; the composer does not, because
+      // naming a colleague addresses that colleague wherever the post goes.
+      const roster = channelColleagues(snapshot, channelId)
       const userName = snapshot?.user?.name
       const mailboxTotal = snapshot?.mailboxTotal ?? 0
+      // Only the messages are one channel's: the roster, the channels, and the mailbox on hand
+      // still stand while a switch is in flight, so the feed draws nothing until the snapshot
+      // that answers this channel arrives rather than another channel's page under its name.
+      const answered = snapshot?.channel === channelId
       const general = useFeedHistory({
         officeName,
         channel: channelId,
-        newest: snapshot?.messages ?? [],
-        total: snapshot?.messagesTotal ?? 0,
+        newest: answered ? snapshot?.messages ?? [] : [],
+        total: answered ? snapshot?.messagesTotal ?? 0 : 0,
       })
       const mailbox = useFeedHistory({
         officeName,
@@ -2053,9 +2132,11 @@ window.__ModuleLoader__.load({
                 }, '✕'),
               ),
               h('div', { style: railBody },
-                colleagues.length === 0
-                  ? h('p', { style: muted }, 'None yet. Use “Hire a colleague” above.')
-                  : colleagues.map(colleague => h('div', { key: colleague.sessionId, style: person },
+                roster.length === 0
+                  ? h('p', { style: muted }, colleagues.length === 0
+                    ? 'None yet. Use “Hire a colleague” above.'
+                    : `No member in #${channelId} yet. Add one from “Channels”.`)
+                  : roster.map(colleague => h('div', { key: colleague.sessionId, style: person },
                     h('div', { style: personHead },
                       h('div', { style: personName }, colleague.name),
                       h('button', {
@@ -2088,7 +2169,7 @@ window.__ModuleLoader__.load({
             h('div', { style: columnHead },
               h(ChannelSwitcher, { channels, active: channelId, onSelect: onChannelChange }),
             ),
-            h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll, 'data-channel': 'general' },
+            h('div', { ref: feedRef, style: feed, onScroll: onFeedScroll, 'data-channel': channelId },
               h(FoldedRow, { folded: general.folded, onUnfold: () => { void general.load() } }),
               messages.length === 0
                 ? h('p', { style: muted }, `#${channelId} has no messages yet.`)
@@ -2146,17 +2227,25 @@ window.__ModuleLoader__.load({
       const requestedChannel = typeof channelChoice === 'string' && channelChoice.length > 0
         ? channelChoice
         : 'general'
-      const { snapshot, error, refresh } = useOffice(active, requestedChannel)
+      const { snapshot, fresh, error, refresh } = useOffice(active, requestedChannel)
+      // The server answers the public channel for a name it does not resolve — one this office
+      // deleted while it was stored, say — and that answer is the channel to follow. Only the
+      // answer to the request the panel is waiting for is read that way, so the reader's choice
+      // is never reverted by a reply to a channel they left.
       useEffect(() => {
-        if (typeof snapshot?.channel === 'string' && snapshot.channel !== requestedChannel) {
+        if (fresh && typeof snapshot?.channel === 'string' && snapshot.channel !== requestedChannel) {
           setChannelChoice(snapshot.channel)
         }
-      }, [snapshot, requestedChannel, setChannelChoice])
-      const channelId = typeof snapshot?.channel === 'string' ? snapshot.channel : 'general'
+      }, [fresh, snapshot, requestedChannel, setChannelChoice])
+      // What the channel column draws: the reader's choice while its answer is on its way, and
+      // the channel the server answered with once one arrives.
+      const channelId = fresh && typeof snapshot?.channel === 'string' ? snapshot.channel : requestedChannel
       // The feeds a switcher offers: the standing public record and every group channel. The
       // mailbox is a sidebar of its own and the direct channels belong to one colleague.
       const channelOptions = (snapshot?.channels ?? [])
         .filter(entry => entry.kind === 'public' || entry.kind === 'group')
+      /** The colleagues that column holds, which the header counts. */
+      const roster = channelColleagues(snapshot, channelId)
       // Which side columns are open is a standing preference, like the draft and the office being
       // read. The roster starts open because it is the office's state at a glance; the mailbox
       // starts closed because it is a place to look when its count on the toggle says to.
@@ -2205,7 +2294,7 @@ window.__ModuleLoader__.load({
               : h(React.Fragment, null,
                 h(ColumnToggle, {
                   label: 'Colleagues',
-                  count: snapshot?.colleagues?.length,
+                  count: roster.length,
                   open: railShown,
                   controls: RAIL_PANEL_ID,
                   onToggle: () => { setRailShown(current => !current) },

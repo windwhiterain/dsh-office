@@ -90,10 +90,17 @@ const COLLEAGUE = {
   permission: 'read-only',
   pending: 2,
 }
+/** A colleague of the office who is not a member of the group channel below. */
+const OUTSIDER = {
+  name: 'omar',
+  sessionId: 'session-omar',
+  role: 'member',
+  status: 'idle',
+}
 const SNAPSHOT = {
   office: 'office',
   officeId: 'office',
-  colleagues: [COLLEAGUE],
+  colleagues: [COLLEAGUE, OUTSIDER],
   roles: [{ id: 'member' }, { id: 'leader' }, { id: 'consultant', permission: 'read-only' }],
   user: { name: 'user' },
   channels: [
@@ -127,6 +134,21 @@ const OLDER = {
 
 const calls = []
 let captured
+/**
+ * One held-back answer, so the check can deliver a superseded one after the reader moved on.
+ *
+ * A real poll spends a round trip in flight while the reader switches channels, and the answer
+ * to the channel they left arrives after the switch. `holding` names the request to keep, and
+ * {@link releaseHeld} delivers every kept answer at once.
+ */
+let holding = () => false
+let held = []
+const releaseHeld = () => {
+  holding = () => false
+  const pending = held
+  held = []
+  for (const resolve of pending) resolve()
+}
 dom.window.__ModuleLoader__ = { load: (module) => { captured = module } }
 globalThis.fetch = async (path) => {
   calls.push(path)
@@ -136,6 +158,9 @@ globalThis.fetch = async (path) => {
     : url.pathname.endsWith('/state')
       ? { ...SNAPSHOT, channel: url.searchParams.get('channel') ?? 'general' }
       : OLDER
+  if (url.pathname.endsWith('/state') && holding(url)) {
+    await new Promise(resolve => { held.push(resolve) })
+  }
   return { ok: true, status: 200, json: async () => body }
 }
 
@@ -290,34 +315,61 @@ assert.match(text(), /8 earlier messages/, 'and the row now counts what is left'
 // snapshot carries, asks the state route with the chosen one, and shows what it got back.
 const switcherAnchor = () => [...document.querySelectorAll('button')]
   .find(button => (button.getAttribute('aria-label') ?? '').startsWith('Channel:'))
+/** The channel the panel stored for this office, which is the one it reopens on. */
+const storedChannel = () => JSON.parse(localStorage.getItem('dsh-office.panel') ?? '{}')['channel:office']
+/** Open the switcher and pick one channel, the way a reader does. */
+const switchTo = async (id) => {
+  switcherAnchor().click()
+  await settle()
+  const item = document.querySelector(`button[data-menu-item="${id}"]`)
+  assert.ok(item, `the open switcher offers #${id}; body was: ${text()}`)
+  item.click()
+  await settle(120)
+}
 assert.ok(switcherAnchor(), 'the channel column owns a switcher')
 assert.equal(switcherAnchor().getAttribute('aria-label'), 'Channel: general')
+assert.match(text(), /Colleagues · 2/, 'the public channel holds every colleague of the office')
+assert.match(text(), /omar/, 'so a colleague outside the group channel is in its roster column')
+
+// One switch is one question. The answer to the channel the reader left is dropped rather than
+// published, so it can neither flip the choice back — the ping-pong that spun a switch for ever —
+// nor take the stored choice with it.
 const beforeSwitch = calls.length
-switcherAnchor().click()
-await settle()
-const releaseItem = document.querySelector('button[data-menu-item="release"]')
-assert.ok(releaseItem, `the open switcher lists the group channels; body was: ${text()}`)
-releaseItem.click()
-await settle(80)
+await switchTo('release')
+const asked = calls.slice(beforeSwitch).filter(path => path.includes('/state'))
 assert.ok(
-  calls.slice(beforeSwitch).some(path => path.includes('/state') && path.includes('channel=release')),
-  `switching must ask the state route with the channel named; calls: ${calls.slice(beforeSwitch).join(', ')}`,
+  asked.some(path => path.includes('channel=release')),
+  `switching must ask the state route with the channel named; calls: ${asked.join(', ')}`,
 )
 assert.ok(
-  await until(async () => switcherAnchor() !== undefined
-    && switcherAnchor().getAttribute('aria-label') === 'Channel: release'),
-  'the switcher shows the channel the snapshot answered with',
+  asked.every(path => path.includes('channel=release')),
+  `and must not ask again for the channel it left; calls: ${asked.join(', ')}`,
 )
+assert.equal(switcherAnchor().getAttribute('aria-label'), 'Channel: release',
+  'the switcher holds the channel the reader chose')
+assert.equal(storedChannel(), 'release', 'and that choice is what the panel stored')
 assert.match(text(), /Post to office #release/, 'the composer says which channel it will write to')
-// Back to the public record, so the sections below address the office's standing channel.
-switcherAnchor().click()
-await settle()
-document.querySelector('button[data-menu-item="general"]').click()
-await settle(80)
+assert.match(text(), /Colleagues · 1/, 'a group channel holds only its own members in the roster column')
+assert.ok(!text().includes('omar'), 'so the colleague outside it is not in that column')
+
+// A poll already in flight for one channel is not the reader's decision. The switch to #release
+// is held mid-flight, the reader moves to #general, and the late answer arrives afterwards.
+holding = url => url.searchParams.get('channel') === 'release'
+await switchTo('release')
+await switchTo('general')
+assert.equal(switcherAnchor().getAttribute('aria-label'), 'Channel: general', 'the reader is on #general')
+const beforeRelease = calls.length
+releaseHeld()
+await settle(120)
+assert.equal(switcherAnchor().getAttribute('aria-label'), 'Channel: general',
+  'a superseded answer cannot claim the choice back')
+assert.equal(storedChannel(), 'general', 'nor the stored choice')
 assert.ok(
-  await until(async () => false || switcherAnchor().getAttribute('aria-label') === 'Channel: general'),
-  'the switcher shows what it got back',
+  !calls.slice(beforeRelease).some(path => path.includes('/state')),
+  `and asks nothing more, because nothing changed; calls: ${calls.slice(beforeRelease).join(', ')}`,
 )
+assert.match(text(), /Colleagues · 2/, 'the public channel holds every colleague again')
+assert.match(text(), /omar/, 'including the one the group channel leaves out')
 await settle(80)
 
 // The configure dialog posts the role and the description of the colleague it was opened on.

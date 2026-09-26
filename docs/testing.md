@@ -81,10 +81,30 @@ interactions: collapsing and reopening the roster column from the header toggle 
 its own head, opening the mailbox sidebar and asserting its scrollport is not the channel's,
 closing it again from its own ✕, unfolding a folded history row (asserting the history request is
 made *below* the oldest message the feed holds, and that the older page is prepended), switching
-the channel column between `#general` and a group channel through the switcher (asserting the
-state route is asked with the channel named and the switcher shows what it got back), opening the
+the channel column between `#general` and a group channel through the switcher, opening the
 Channels dialog onto the group channels, and seeding the colleague dialog from the colleague it
 was opened on.
+
+Four assertions belong to the switch itself, and they are the reason the stub can hold an answer
+back (see below):
+
+- A switch asks the state route with the channel chosen, **and never asks again for the channel it
+  left**. Before the panel dropped superseded answers, the answer to the channel a reader left was
+  published, the panel followed it, and the two asked for each other for ever — the spin a reader
+  saw as one switch reloading the panel without end.
+- The switcher and the stored `channel:<office>` both hold the chosen channel, which is what makes
+  the choice survive a reload. The same spin is what used to overwrite it with the channel that won
+  the last round trip.
+- An answer that arrives **after** the reader moved on is dropped: the switch to the group channel
+  is held mid-flight, the reader picks `#general`, and the late answer must change nothing.
+- The roster column reads the channel the feed reads — `#general` holds every colleague, a group
+  channel only its stored members — and the header counts the same list. The probe's roster
+  deliberately carries one colleague the group channel does not admit.
+
+The stub therefore has a `holding` predicate and a `releaseHeld()`: a `fetch` matching the
+predicate parks until released, which is how the check reproduces a poll that loses its race with a
+switch. A held answer is what the effect-based code could not survive, and it is the only way to
+drive that race without a real network.
 
 It is opt-in because it needs `react`, `react-dom`, and `jsdom`, which this package does not
 depend on. Point `DSH_OFFICE_PROBE_MODULES` at a directory holding a `node_modules` with them (a

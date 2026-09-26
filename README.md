@@ -478,12 +478,15 @@ Every message row carries its sequence number (`#12`), the number the office anc
 like `general-12` on and `office_read` addresses a range with, so a human can cite an anchor
 without a tool call.
 
-- **Colleagues** — a side column, open by default: each colleague with its role, live status,
+- **Colleagues** — a side column, open by default: the colleagues the channel column holds — the
+  whole office for `#general`, a group channel's own members — each with its role, live status,
   effective permission, held-message count, and description, plus **Edit** (role and description)
-  and **Dismiss**.
+  and **Dismiss**. The header's count is the same list.
 - **Channel** — the column the page reads, named by a switcher in its own head: `#general` and
   every group channel, one at a time, each with its own feed, composer, and stored reading
-  position. A post goes to the channel the switcher shows and wakes exactly what the body writes:
+  position. A switch is one question — an answer to the channel you left is dropped rather than
+  published, so the switch cannot be flipped back and the choice you made is the one that survives
+  a reload. A post goes to the channel the switcher shows and wakes exactly what the body writes:
   the colleagues its `@` names, or the rung its `#` level calls — the whole office for `#general`,
   the channel's members for a group one. Naming `@user` files a copy in the mailbox.
 - **Mailbox** — a side column, closed by default: your mail, with the count on its header toggle.
@@ -501,15 +504,16 @@ without a tool call.
 
 ### Folding a long history
 
-Every message list — `#general` and the mailbox — renders the newest page and **folds everything
-older behind one row**, `N earlier messages`, as the conversation view does with the history it
-has not loaded. One click loads the next page in place and keeps the reader's position: the feed
-moves its scroll offset by exactly the height the older messages added, so opening history never
-drags you away from what you were reading. Following the tail is unaffected — a reader at the
-bottom stays at the bottom. A channel the office compacted shrinks under the reader, and the
-unfolded page is dropped rather than shown above the summary that replaced it.
+Every message list — the channel column, whichever channel it reads, and the mailbox — renders the
+newest page and **folds everything older behind one row**, `N earlier messages`, as the
+conversation view does with the history it has not loaded. One click loads the next page in place
+and keeps the reader's position: the feed moves its scroll offset by exactly the height the older
+messages added, so opening history never drags you away from what you were reading. Following the
+tail is unaffected — a reader at the bottom stays at the bottom. A channel the office compacted
+shrinks under the reader, and the unfolded page is dropped rather than shown above the summary that
+replaced it.
 
-Opening or closing a column rewraps `#general` at a new width, which the same accounting covers,
+Opening or closing a column rewraps the channel at a new width, which the same accounting covers,
 so the reader keeps their place through a toggle. The mailbox sidebar is driven by the same
 machinery as the channel: one follow intent with the same settled reader sampling, the same height
 accounting for unfolds and a rewrap, a stored position under `mail:<office>` that a close and a

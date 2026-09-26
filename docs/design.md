@@ -342,6 +342,37 @@ of the office at the write, so membership cannot drift out of the roster by a ty
 that is dismissed leaves its stored membership behind, but it loses the office tools at the same
 moment, so the stale entry is inert rather than a doorway.
 
+## The panel's channel column
+
+The panel reads one channel at a time, and one `state` request carrying that channel is what feeds
+it. Two rules keep a switch a decision rather than a race, and both matter only when a reader
+switches while a poll is in flight.
+
+**An answer is published only while it answers the question still being asked.** A poll already in
+flight for the channel the reader left arrives afterwards carrying that channel's messages, and the
+panel treats the answered channel as the one to read. Publishing it therefore made the panel follow
+a channel the reader had left, ask for it, receive the answer to the channel they had chosen,
+follow that, and ask again — a ping-pong between two channels that never settles, because each
+answer legitimately contradicts the request the other one was for. Every round also threw the whole
+snapshot away, which is what a reader saw as the panel reloading without end, and the last round
+tripped the stored choice. The published snapshot is therefore tagged with the office and the
+channel it was asked for, and an answer that names anything else is dropped.
+
+**The reader's choice is authoritative while its answer is on its way.** The column draws the
+channel that was chosen, not the last one answered, so the server's own fallback — a channel
+deleted or renamed while it was stored — still converges: that answer *is* the current one, so the
+panel follows it and stores it. A superseded answer can no longer write the stored choice, which is
+the channel the panel reopens on and therefore the difference between a preference and a race.
+
+Only the messages in a snapshot belong to one channel. The roster, the channel list, the mailbox,
+and the options the dialogs offer belong to the office, so a switch keeps them on screen rather
+than blanking the panel and refilling it a round trip later. The same distinction decides who the
+roster **column** holds: `#general` records no members because every colleague belongs to it, so it
+lists the office roster, while a group channel's stored membership is exactly who may read it and
+is therefore who the column lists. The composer's `@` menu is deliberately not scoped that way:
+naming a colleague addresses that colleague wherever the post goes, and a level posted into a
+channel is already narrowed by that channel's membership.
+
 ## The user mailbox is a channel
 
 The user is not a session, so nothing can wake them and a colleague cannot answer them by
