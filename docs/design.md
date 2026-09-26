@@ -108,13 +108,15 @@ office tools with it.
 ### The model-facing text budget
 
 Everything this package puts in front of a model is billed on every request of the session that
-carries it, so the three surfaces are kept deliberately terse:
+carries it, so the surfaces are kept deliberately terse:
 
 | surface | where it lives | paid |
 |---|---|---|
 | the boss persona | `cordis.patch.yml`, the `persona` row's `prefix` | every boss request |
 | the office tool schemas | `index.js`, each tool's `description` and its parameter `description`s | every request of every office session |
+| the delivery contract | `index.js`, `OFFICE_DELIVERY_CONTRACT`, a prompt section in each armed agent's scope | every request of every office session |
 | the onboarding turn | `index.js`, `greet()` | every request of a hired colleague, for the life of its history |
+| one line per delivery frame | `index.js`, `OFFICE_DELIVERY_NOTE` | every request that carries the frame, for the life of that history |
 
 The split of responsibility is the rule that keeps them from growing back:
 
@@ -136,12 +138,21 @@ The split of responsibility is the rule that keeps them from growing back:
   rule would be paid on every later request. The role still decides the tool set; the turn only
   stops restating it.
 
-One rule follows from that argument and is worth stating on its own: **nothing written into a
-session carries a standing rule.** A delivery frame is appended to the receiving colleague's
-history once per message, so a rule inside it is re-sent with every later request for the life of
-that history. The answering rules moved out of the frames for that reason; see
-[delivery.md](delivery.md#the-answering-rule). The frames are therefore not a row in the table
-below — what they carry is the message, which is content rather than budget.
+**A frame carries the message, the sender, and exactly one line — and that line is a measured
+exception to the rest of this section.** An earlier version of this budget moved every rule out of
+the frames and into the schema and the onboarding turn, on the argument that a frame is appended to
+the receiving colleague's history and re-sent with every later request. A colleague running a weak
+free model then read a delivered message, spent forty tool calls on the work, and wrote its answer
+as its own turn: the schema statement was in its request and it never reached for the tool, and the
+frame it had been handed said nothing about what a reply reaches. The lesson is worth keeping: a
+rule has to be where the model is when it acts, and the budget is not the only consideration.
+
+So the frame states the single fact its next action depends on — what you write in your own turn is
+seen by the user alone, and only an office tool notifies a colleague — and the paragraph it used to
+carry stays in standing context, stated once per request instead of once per message. The same
+incident is why the contract is a prompt section and not only a tool description: the description
+was already being sent, and a colleague reads a section as instruction rather than as documentation
+for a tool it is not currently reaching for.
 
 Shared parameters are declared once, by a builder, so a wording change lands in every tool that
 carries them: `officeArgument()`, `roleProperty()`, `descriptionProperty()`, and
@@ -157,12 +168,12 @@ Measured with the literals concatenated the way the model receives them:
 | the boss persona | 1,080 | 779 |
 | a member's onboarding turn | 1,607 | 592 |
 | a leader's onboarding turn | 2,248 | 857 |
+| the delivery contract, once per request | 0 | 323 |
+| one frame's rule tail | 396 | 78 |
 
-The tool figures include 182 characters that moved *into* `office_post` when the answering rules
-left the delivery frames. That is the trade described above: those characters used to be appended
-to every frame instead — about 396 for a public delivery and 148 for a direct one — so a colleague
-woken twenty times now carries roughly 7,900 characters less, and pays for the rule once per
-request as part of a schema that was already being sent.
+The tool figures include 182 characters that moved *into* `office_post`. The frame tail came down
+from the full paragraph to the one line, so a colleague woken twenty times carries roughly 6,300
+characters less than it did before either change, and pays for the contract once per request.
 
 Output schemas are not part of these figures: a canonical request carries `parameters` only, so
 `output.schema` costs nothing outside PTC presentation.

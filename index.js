@@ -501,8 +501,10 @@ let officeHost
  * Agents currently holding the shared office tool set, keyed by agent.
  *
  * A scope rejects a duplicate tool name, so the set is installed once per agent and
- * withdrawn when the agent holds no office role at all. Only the host installs; see
- * {@link syncOfficeTools} and {@link installOfficeTools}.
+ * withdrawn when the agent holds no office role at all. {@link OFFICE_DELIVERY_CONTRACT} is
+ * registered and disposed with it, because an agent the office talks to is exactly an agent that
+ * holds office tools. Only the host installs; see {@link syncOfficeTools} and
+ * {@link installOfficeTools}.
  */
 const officeToolInstalls = new Map()
 
@@ -1066,11 +1068,19 @@ function validateMessage(value) {
   return record
 }
 
-/** How one frame names the destination the message arrived on. */
-function whereOf(message) {
-  return message.kind === 'dm'
-    ? `DM from ${message.senderName}`
-    : `#${message.channelName} from ${message.senderName}`
+/**
+ * How one frame names the sender and the destination the message arrived on.
+ *
+ * A colleague that has just been handed a message reads the message, so the frame says who sent it
+ * as what it is: `colleague <name>` for a peer, `the user` for the human at the keyboard. The name
+ * decides it, because that is the office's own identity for the user — a message the office
+ * carries from the human names the deployment's `userName`.
+ */
+function whereOf(message, userName) {
+  const sender = nameKey(String(message.senderName)) === nameKey(userName)
+    ? 'the user'
+    : `colleague ${message.senderName}`
+  return message.kind === 'dm' ? `DM from ${sender}` : `#${message.channelName} from ${sender}`
 }
 
 /** How a line talks about the channel itself, rather than about who sent what. */
@@ -1079,41 +1089,71 @@ function channelLabel(message) {
 }
 
 /**
- * A delivery frame carries the message it names, and nothing else.
+ * The one line every frame carries.
  *
- * The office's tools default to waking a whole roster, and a colleague that answers every wake in
- * public multiplies that reach: one post wakes every colleague, each woken colleague posts an
- * answer, and the answers wake the office again. The rules that stop that — silence is the normal
- * answer, answer where the message stands, never post an acknowledgement — are stated once, in
- * `office_post`'s description.
+ * The office's rules for answering are standing context — {@link OFFICE_DELIVERY_CONTRACT} in the
+ * prompt, and the answering rules in `office_post`'s description — because a frame is written into
+ * the receiving colleague's session and re-sent with every later request for the life of that
+ * history. This line is the exception, and it is one sentence rather than a paragraph: it is the
+ * single fact the colleague's next action depends on, and the colleague reads it in the message it
+ * was just handed.
  *
- * They are deliberately NOT appended to a frame. A frame is written into the receiving colleague's
- * session, so the same paragraph would be copied into its history once per delivered message and
- * re-sent with every later request for the life of that history. The rules belong to standing
- * context instead: every predefined role holds `office_post`, and a tool description is assembled
- * into each request rather than accumulated in the session.
+ * It replaced "Your reply stays in this session and reaches nobody", which was wrong in the way
+ * that matters: the user does see the reply. A colleague told that nothing reaches anybody has no
+ * reason to reach for a tool — the fact that a tool is the only thing a colleague sees is the part
+ * that has to be said.
  */
+const OFFICE_DELIVERY_NOTE = '(Only an office tool notifies a colleague; this reply reaches the user alone.)'
+
+/**
+ * The office's delivery contract, contributed to every armed agent's system prompt.
+ *
+ * A prompt section and a tool description are both assembled into every request, so neither one
+ * accumulates. The section is the one a colleague reads as standing instruction rather than as
+ * documentation for a tool it may not be reaching for.
+ */
+const OFFICE_DELIVERY_CONTRACT = 'The office delivers a colleague\'s message to you as a private '
+  + 'turn in this session. What you write in your own turn is seen by the user alone: only an '
+  + 'office tool notifies a colleague — office_post writes to a channel, office_dm sends one '
+  + 'colleague a private message, and office_read reads what you were not notified about.'
+
+/** Prompt-section name of that contract, registered into each armed agent's own scope. */
+const OFFICE_DELIVERY_SECTION = 'office:delivery'
+
+/**
+ * Placement of that section among the assembled prompt sections.
+ *
+ * The harness allocates its own named slots and an out-of-tree plugin is not one of them, so the
+ * contract takes an explicit number in the gap it belongs to: after the reusable tool guidance
+ * (`TOOL_JOBS`, 1600) and before the terminal tool's (`TOOL_PTY`, 1700).
+ */
+const OFFICE_DELIVERY_ORDER = 1650
 
 /**
  * Compose the model-visible framing of one delivered office message.
  *
- * The frame names the destination, the sender, and the message identity so the
- * receiving colleague can attribute and answer it without reading the office domain. It carries
- * the message and nothing else; the rule comment above says why no answering guidance is appended.
+ * The frame names the sender as a colleague or as the user, the destination, and the message
+ * identity, so the receiving colleague can attribute and answer it without reading the office
+ * domain. {@link OFFICE_DELIVERY_NOTE} is the one rule it carries.
  *
  * `newestSeq` is how far past this message the channel had already moved when the turn was
  * queued. Without it, a message from ten minutes ago is indistinguishable from a live one,
  * and answering it reads as engaging with something already settled.
  * @param message - the stored message record that triggered the wake.
  * @param newestSeq - the channel's newest sequence when this turn was queued, when known.
+ * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameDelivery(message, newestSeq) {
+function frameDelivery(message, newestSeq, userName) {
   const freshness = newestSeq === undefined || newestSeq <= message.seq
     ? undefined
     : `(${channelLabel(message)} had already reached ${message.channelId}-${String(newestSeq)} when this turn was queued; newer messages are not in it.)`
-  return [ `[office ${whereOf(message)} | ${message.messageId}]`, message.text, freshness ]
-    .filter(line => line !== undefined)
+  return [
+    `[office ${whereOf(message, userName)} | ${message.messageId}]`,
+    message.text,
+    freshness,
+    OFFICE_DELIVERY_NOTE,
+  ].filter(line => line !== undefined)
     .join('\n\n')
 }
 
@@ -1128,35 +1168,38 @@ function frameDelivery(message, newestSeq) {
  * @param officeName - the office the wakes came from.
  * @param messages - the batched messages, oldest first.
  * @param newestSeq - the newest sequence of the last message's channel, when known.
+ * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameBatch(officeName, messages, newestSeq) {
-  if (messages.length === 1) return frameDelivery(messages[0], newestSeq)
+function frameBatch(officeName, messages, newestSeq, userName) {
+  if (messages.length === 1) return frameDelivery(messages[0], newestSeq, userName)
   const last = messages.at(-1)
   const freshness = newestSeq === undefined || newestSeq <= last.seq
     ? undefined
     : `(${channelLabel(last)} had already reached ${last.channelId}-${String(newestSeq)} when this turn was queued.)`
   return [
     `[office ${officeName} | ${String(messages.length)} messages arrived while you were working]`,
-    ...messages.map(message => `[office ${whereOf(message)} | ${message.messageId}]\n${message.text}`),
+    ...messages.map(message => `[office ${whereOf(message, userName)} | ${message.messageId}]\n${message.text}`),
     freshness,
+    OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined).join('\n\n')
 }
 
 /**
  * Compose the model-visible framing of the notifications one colleague read for itself.
  *
- * It is the frame a delivery would have carried — destination, sender, identity, and body —
- * because what a colleague reads must not depend on whether it waited for its turn to end or
- * asked for its mail in the middle of one. Only the header differs: this is the colleague's own
- * read, so it does not claim the messages arrived while it worked. A notification held under the
- * non-default timing says so, because a colleague that asked for its mail is otherwise unable to
- * tell an announcement from a message somebody wanted it to act on now.
+ * It is the frame a delivery would have carried — destination, sender, identity, and body, with
+ * {@link OFFICE_DELIVERY_NOTE} — because what a colleague reads must not depend on whether it
+ * waited for its turn to end or asked for its mail in the middle of one. Only the header differs:
+ * this is the colleague's own read, so it does not claim the messages arrived while it worked. A
+ * notification held under the non-default timing says so, because a colleague that asked for its
+ * mail is otherwise unable to tell an announcement from a message somebody wanted it to act on now.
  * @param officeName - the office the notifications came from.
  * @param notifications - the read notifications, oldest first, as the tool reported them.
+ * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
  * @returns the framed text of the tool result.
  */
-function frameNotifications(officeName, notifications) {
+function frameNotifications(officeName, notifications, userName) {
   const headline = notifications.length === 1
     ? '1 notification was held for you, read here on request:'
     : `${String(notifications.length)} notifications were held for you, read here on request:`
@@ -1164,9 +1207,9 @@ function frameNotifications(officeName, notifications) {
     const held = notification.notify === NOTIFY_TURN_END
       ? ' (held until the end of your turn)'
       : ''
-    return `[office ${whereOf(notification)} | ${notification.messageId}]${held}\n${notification.text}`
+    return `[office ${whereOf(notification, userName)} | ${notification.messageId}]${held}\n${notification.text}`
   })
-  return [ `[office ${officeName}] ${headline}`, ...frames ].join('\n\n')
+  return [ `[office ${officeName}] ${headline}`, ...frames, OFFICE_DELIVERY_NOTE ].join('\n\n')
 }
 
 /** Distinguishing short form of a session id, for an unnamed sender in a transcript. */
@@ -1592,7 +1635,7 @@ function createOffice(ctx, domain, config, hooks) {
     return {
       id: wakeIdOf(newest),
       role: 'user',
-      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq) }],
+      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, config.userName) }],
       // Every field here reaches the session log, which is JSON, and the harness rejects a
       // value JSON cannot round-trip — `undefined` among them. A message the user posted
       // from the panel has no sender session, so that field must be absent rather than present
@@ -4225,7 +4268,7 @@ function createReadTool(agent, tool, config) {
  * @param tool - the caller's shared declaration helpers.
  * @returns the notification-reading tool definition.
  */
-function createNotificationsTool(agent, tool) {
+function createNotificationsTool(agent, tool, userName) {
   const name = 'office_read_notifications'
   const { text } = tool
   return {
@@ -4266,7 +4309,7 @@ function createNotificationsTool(agent, tool) {
       },
       render: (_args, value) => (value.notifications.length === 0
         ? text(`[office ${value.office}] Nothing was held for you.`)
-        : text(frameNotifications(value.office, value.notifications))),
+        : text(frameNotifications(value.office, value.notifications, userName))),
     },
     async execute(args) {
       const resolved = tool.entry(args, name)
@@ -4455,7 +4498,7 @@ function createOfficeTools(agent, host) {
   definitions.push(createChannelsTool(agent, tool))
   definitions.push(...createCommunicationTools(agent, tool))
   definitions.push(createReadTool(agent, tool, host.config))
-  definitions.push(createNotificationsTool(agent, tool))
+  definitions.push(createNotificationsTool(agent, tool, host.config.userName))
   definitions.push(createColleaguesTool(tool))
   return definitions
 }
@@ -4484,6 +4527,11 @@ function officeToolSignature(agent) {
  * moves the agent to a different set, and withdraws when the agent holds no office role at
  * all. The signature is what makes a role change take effect: a leader demoted to member must
  * lose `office_interrupt` and `office_compact` from its scope, not merely be refused by them.
+ *
+ * {@link OFFICE_DELIVERY_CONTRACT} is installed with the tools and withdrawn with them, because
+ * it is the same fact: an agent that holds office tools is one the office talks to. `inject` is
+ * what scopes the section to this agent and what makes a late-activating `systemPrompt` still
+ * receive it; a deployment without that service arms the tools and contributes no prompt text.
  * @param agent - the agent to arm.
  */
 function installOfficeTools(agent) {
@@ -4496,7 +4544,20 @@ function installOfficeTools(agent) {
   if (signature === undefined) return
   const definitions = createOfficeTools(agent, officeHost) ?? []
   const disposers = definitions.map(definition => agent.ctx.tools.register(definition))
-  officeToolInstalls.set(agent, { signature, dispose: () => { for (const dispose of disposers) dispose() } })
+  const promptFiber = agent.ctx.inject(['systemPrompt'], (runtimeCtx) => {
+    runtimeCtx.systemPrompt.section({
+      name: OFFICE_DELIVERY_SECTION,
+      order: OFFICE_DELIVERY_ORDER,
+      text: OFFICE_DELIVERY_CONTRACT,
+    })
+  })
+  officeToolInstalls.set(agent, {
+    signature,
+    dispose: () => {
+      for (const dispose of disposers) dispose()
+      void promptFiber.dispose()
+    },
+  })
 }
 
 /**

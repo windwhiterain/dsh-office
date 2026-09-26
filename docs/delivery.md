@@ -244,8 +244,10 @@ with "carries non-JSON-serializable data".
 One message:
 
 ```text
-[office #general from alice | general-9]
+[office #general from colleague alice | general-9]
 @bob can you take this?
+
+(Only an office tool notifies a colleague; this reply reaches the user alone.)
 ```
 
 A turn that carries a merged burst — its header says how many, and each message keeps its own:
@@ -253,19 +255,23 @@ A turn that carries a merged burst — its header says how many, and each messag
 ```text
 [office office | 3 messages arrived while you were working]
 
-[office #general from carol | general-6]
+[office #general from colleague carol | general-6]
 the build is green again
 
-[office #general from dave | general-7]
+[office #general from colleague dave | general-7]
 thanks — merging
 
-[office DM from erin | dm-….4]
+[office DM from colleague erin | dm-….4]
 can you look at this before I ship?
+
+(Only an office tool notifies a colleague; this reply reaches the user alone.)
 ```
 
-The frame names the destination, the sender, and the message identity, so the receiving colleague
-can attribute and answer the message without reading the office domain. It carries **no** standing
-rule: [The answering rule](#the-answering-rule) says where that rule lives instead, and why.
+The frame names the sender as a colleague or as the user, the destination, and the message
+identity, so the receiving colleague can attribute and answer the message without reading the
+office domain. A message the human sent says `from the user`; every other sender is a colleague,
+because those are the only two things a colleague can be. [The answering rule](#the-answering-rule)
+says what the trailing line is doing there and what is deliberately not next to it.
 
 ### The staleness line
 
@@ -307,23 +313,38 @@ They are stated once, in `office_post`'s description. Every predefined role hold
 `member`, `leader`, and `consultant` alike, and the boss holds it too — so the tool a colleague
 answers with is the tool that says how.
 
-**That placement replaced a per-frame tail, and the move is the point.** The rules used to be
-appended to every frame, chosen from the receiving role's capabilities so that no frame named a
-tool its recipient lacked. A frame is written into the receiving colleague's session, though, so
-the same paragraph was copied into its history once per delivered message — around 400 characters
-for a public message, silence rule and acknowledgement rule together — and re-sent with every later
-request for the life of that history. A tool description is assembled into each request rather than
-accumulated in the session, so the rules now cost one statement instead of one per wake.
+**The paragraph these rules used to form is gone from the frames, and one line replaced it.** The
+full tail was appended to every delivered message — around 400 characters for a public one, the
+silence rule, the answering rule, and the acknowledgement rule together — and a frame is written
+into the receiving colleague's session, so it was copied into that history once per message and
+re-sent with every later request for the life of the history. That is why it moved.
 
-Two things went with the tail. A merged burst is one answer rather than one post per message, which
-its header states by counting the messages it carries. And the capability-selected branch that told
-a role holding no channel-write tool that `Nothing you write here reaches the office…` went too: no
-predefined role holds neither `office_post` nor `office_dm`, so the branch could not be reached,
-and a colleague's own tool set is what tells it what it holds.
+The move went too far, and the correction is worth recording. A colleague running a weak free model
+was handed a delivered message under the trimmed frame, spent forty tool calls on the work it
+asked for, and wrote its answer as its own turn. It never called `office_post` or `office_dm`, and
+the rules being in a schema it did carry made no difference: nothing in front of it at the moment
+it answered said that a reply in its own turn reaches only the user. Two changes came out of it.
 
-A frame therefore carries the message, its destination, its sender, and its identity, and nothing
-else. Delivery is still a private turn in the target's own session, so nothing anyone else reads
-happens by answering it — that is a property of the delivery, not a sentence every frame repeats.
+- **The frame states that one fact**, as `OFFICE_DELIVERY_NOTE`: only an office tool notifies a
+  colleague, and this reply reaches the user alone. It is the single fact the colleague's next
+  action depends on, and the colleague reads it in the message it was just handed.
+- **The office contributes standing prompt text**, `OFFICE_DELIVERY_CONTRACT`, registered into each
+  armed agent's own scope alongside its tools and withdrawn with them. A colleague's system prompt
+  otherwise says nothing about the office at all — its preset is an ordinary coding agent — so the
+  contract had no home that the model reads as instruction rather than as tool documentation.
+
+An earlier wording said "Your reply stays in this session and reaches nobody". That was wrong in
+the way that mattered: the user does see the reply, and a colleague told that nothing reaches
+anybody has no reason to reach for a tool.
+
+Two things went with the old paragraph and did not come back. A merged burst is one answer rather
+than one post per message, which its header states by counting the messages it carries. And the
+capability-selected branch that told a role holding no channel-write tool that `Nothing you write
+here reaches the office…` went too: no predefined role holds neither `office_post` nor `office_dm`,
+so the branch could not be reached, and a colleague's own tool set is what tells it what it holds.
+
+The line is the frame's only rule. Everything else a frame carries is the message itself, its
+sender, its destination, and its identity.
 
 Two consequences follow, and both are deliberate:
 
@@ -368,11 +389,13 @@ office_read_notifications  {}
 
 [office office] 2 notifications were held for you, read here on request:
 
-[office DM from alice | dm-….4]
+[office DM from colleague alice | dm-….4]
 can you look at this before I ship?
 
-[office #general from bob | general-9] (held until the end of your turn)
+[office #general from colleague bob | general-9] (held until the end of your turn)
 release is cut
+
+(Only an office tool notifies a colleague; this reply reaches the user alone.)
 ```
 
 | Field | Meaning |

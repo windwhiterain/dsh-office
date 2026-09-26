@@ -236,6 +236,8 @@ function makeInbox() {
 /** One fake Agent carrying its own tool scope, exactly as `agent.ctx.tools` does. */
 function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox()) {
   const tools = new Map()
+  /** Prompt sections registered into this agent's own scope, as `agent.ctx.systemPrompt` holds them. */
+  const promptSections = new Map()
   const sent = []
   /** Cancellations this agent received, so a check can tell an interrupt from a no-op. */
   const cancels = []
@@ -256,6 +258,7 @@ function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox()) {
     sent,
     cancels,
     tools,
+    promptSections,
     inbox,
     session: { header: { id: sessionId, cwd, ...(preset === undefined ? {} : { agentPreset: preset }) } },
     status,
@@ -268,6 +271,27 @@ function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox()) {
           tools.set(definition.name, definition)
           return () => tools.delete(definition.name)
         },
+      },
+      /**
+       * The scoped injection the office arms an agent with, as `agent.ctx.inject` does: the
+       * callback runs against a context carrying the injected services, and the returned fiber
+       * disposes everything that callback registered. The office contributes the delivery
+       * contract this way, so a fake without it would hide whether the contract is registered
+       * into the agent's own scope rather than globally.
+       * @param dependencies - the services the callback requires.
+       * @param callback - the scoped registration.
+       * @returns the fake fiber.
+       */
+      inject: (dependencies, callback) => {
+        callback({
+          systemPrompt: {
+            section: (section) => {
+              promptSections.set(section.name, section)
+              return () => promptSections.delete(section.name)
+            },
+          },
+        })
+        return { dispose: async () => { promptSections.clear() } }
       },
     },
     followup: message => sent.push({ via: 'followup', message: accept(message) }),
@@ -919,6 +943,16 @@ await check('adopting a live session installs the tools its role holds', async (
   assert.deepEqual(roster.colleagues.map(entry => entry.name).sort(), ['Alice Smith', 'bob'])
 })
 
+await check('an armed agent reads the delivery contract as standing prompt text', () => {
+  const contractOf = agent => agent.promptSections.get('office:delivery')?.text
+  // The rule a frame states one message at a time is the only office text a colleague's own
+  // system prompt would otherwise never carry: its preset knows nothing about the office.
+  assert.match(contractOf(boss), /only an office tool notifies a colleague/, 'the office talks to its boss too')
+  assert.match(contractOf(alice), /office_dm sends one colleague a private message/)
+  assert.match(contractOf(alice), /seen by the user alone/)
+  assert.equal(contractOf(outsider), undefined, 'a session the office never arms carries no office prompt text')
+})
+
 await check('every installed tool declares schemas the providers accept', () => {
   for (const agent of [boss, alice, bob]) {
     for (const [name, tool] of agent.tools) {
@@ -1000,7 +1034,7 @@ await check('office_post with a mention cold-resumes the colleague and delivers 
   assert.equal(message.role, 'user')
   assert.equal(message.source.kind, 'office-message')
   assert.equal(message.source.messageId, posted.message.messageId)
-  assert.match(message.content[0].text, /^\[office #general from Alice Smith/)
+  assert.match(message.content[0].text, /^\[office #general from colleague Alice Smith/)
 })
 
 await check('a mention that matches no session title fails loud', async () => {
@@ -1034,8 +1068,8 @@ await check('notify:turn-end holds a burst and hands over one merged turn when t
   assert.match(text, /^\[office office \| 2 messages arrived while you were working\]/)
   const frames = text.split('\n').filter(line => line.startsWith('[office ') && line.includes(' from '))
   assert.equal(frames.length, 2, 'each held message keeps its own header inside the one turn')
-  assert.match(frames[0], /^\[office DM from Alice Smith \| dm-sessionalice\+sessionbob-\d+\]$/)
-  assert.match(frames[1], /^\[office #general from Alice Smith \| general-\d+\]$/)
+  assert.match(frames[0], /^\[office DM from colleague Alice Smith \| dm-sessionalice\+sessionbob-\d+\]$/)
+  assert.match(frames[1], /^\[office #general from colleague Alice Smith \| general-\d+\]$/)
   assert.match(text, /private note/)
   assert.match(text, /public note, same burst/)
   assert.ok(
@@ -1242,10 +1276,10 @@ await check('office_read_notifications takes what is held for its own caller, mi
 
   const rendered = ada.tools.get('office_read_notifications').output.render({}, read)[0].text
   assert.match(rendered, /^\[office reading\] 2 notifications were held for you, read here on request:/)
-  assert.match(rendered, /\[office DM from chief \| dm-\S+\]\nthe step-boundary one/)
+  assert.match(rendered, /\[office DM from colleague chief \| dm-\S+\]\nthe step-boundary one/)
   assert.match(
     rendered,
-    /\[office #general from chief \| general-\d+\] \(held until the end of your turn\)/,
+    /\[office #general from colleague chief \| general-\d+\] \(held until the end of your turn\)/,
     'a notification held under the non-default timing says so',
   )
   assert.ok(
@@ -1616,30 +1650,30 @@ await check('a broadcast wakes every colleague except the sender', async () => {
   assert.ok(all.deliveries.every(entry => entry.status === 'delivered'))
 })
 
-await check('a delivery frame carries the message, not the answering rules', async () => {
+await check('a delivery frame names the sender, the message, and the one rule it carries', async () => {
   await call(alice, 'office_dm', { wake: ['@bob'], text: 'private note' })
   const dmText = bob.sent.at(-1).message.content[0].text
   assert.match(
     dmText,
-    /^\[office DM from Alice Smith \| dm-\S+\]\n\nprivate note$/,
-    'the frame is the destination, the identity, and the body, and nothing else',
+    /^\[office DM from colleague Alice Smith \| dm-\S+\]\n\nprivate note\n\n\(Only an office tool notifies a colleague; this reply reaches the user alone\.\)$/,
+    'the frame is the sender, the identity, the body, and the one line the next action depends on',
   )
   await call(alice, 'office_post', { text: 'public note', wake: ['@bob'] })
   const publicText = bob.sent.at(-1).message.content[0].text
-  assert.match(publicText, /^\[office #general from Alice Smith \| general-\d+\]\n\npublic note$/)
-  // The rule a wake used to carry is not lost: it moved to the tool that states it, because a
-  // frame is written into the colleague's session and re-sent with every later request for the
-  // life of that history, while a tool description is assembled into each request instead.
+  assert.match(publicText, /^\[office #general from colleague Alice Smith \| general-\d+\]\n\npublic note\n\n\(Only an office tool/)
+  // The paragraph that used to be appended here — silence is the normal answer, answer where the
+  // message stands, never post an acknowledgement — is standing context now: a frame is written
+  // into the colleague's session and re-sent with every later request for the life of that history.
   for (const [kind, text] of [['dm', dmText], ['public', publicText]]) {
     assert.ok(
       !/stays in this session|need no answer|everyone can learn from it|acknowledge a message/.test(text),
-      `the ${kind} frame appends no standing rule`,
+      `the ${kind} frame appends no paragraph of rules`,
     )
   }
   assert.match(
     bob.tools.get('office_post').description,
     /Silence is the normal answer to a delivered message/,
-    'the rule is standing context instead',
+    'the answering rules are in the tool that owns them',
   )
 })
 
@@ -1789,8 +1823,10 @@ await check('a disposed agent loses its office tools', async () => {
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
   assert.equal(temp.tools.size, 6)
+  assert.equal(temp.promptSections.size, 1, 'and the delivery contract with them')
   harness.dispose(temp)
   assert.equal(temp.tools.size, 0, 'the scoped registrations unwind with the agent')
+  assert.equal(temp.promptSections.size, 0, 'the prompt section unwinds with them')
 })
 
 await check('office_dismiss removes a colleague and withdraws its channel tools', async () => {
@@ -1798,9 +1834,11 @@ await check('office_dismiss removes a colleague and withdraws its channel tools'
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
   assert.equal(temp.tools.size, 6, 'adoption arms the session')
+  assert.equal(temp.promptSections.size, 1, 'and gives it the office delivery contract')
   const dismissed = await callBoss(boss, 'office', 'office_dismiss', { name: 'temp' })
   assert.deepEqual(dismissed.colleague, { name: 'temp', sessionId: 'session-temp' })
   assert.equal(temp.tools.size, 0, 'the channel tools withdraw from the live session')
+  assert.equal(temp.promptSections.size, 0, 'and so does the prompt section')
   const roster = await callBoss(boss, 'office', 'office_roster', {})
   assert.ok(!roster.colleagues.some(entry => entry.sessionId === 'session-temp'))
   await assert.rejects(() => callBoss(boss, 'office', 'office_dismiss', { name: 'temp' }), /does not match any colleague/)
@@ -2450,7 +2488,7 @@ await check('a wake says how far the channel had moved when the turn was queued'
   assert.deepEqual(posted.deliveries, [{ colleague: 'zed', status: 'delivered' }])
 
   const body = lagging.liveAgents.get('session-zed').sent.at(-1).message.content[0].text
-  assert.match(body, /^\[office #general from chief \| general-1\]/)
+  assert.match(body, /^\[office #general from colleague chief \| general-1\]/)
   assert.match(body, /#general had already reached general-2 when this turn was queued/)
   assert.match(body, /when this turn was queued; newer messages are not in it\./)
   assert.ok(!body.includes('office_read reads them'), 'the staleness line states the state, not where to read next')
@@ -2623,7 +2661,7 @@ await check('office_compact replaces a range in place, and reads back as one sum
   const body = iris.sent.at(-1).message.content[0].text
   assert.ok(!body.includes('plan a'), 'a wake carries its own message and never replays the channel')
   assert.ok(!body.includes('Everything so far'), 'not even the summary that now stands for it')
-  assert.match(body, /^\[office #general from chief \| general-4\]/)
+  assert.match(body, /^\[office #general from colleague chief \| general-4\]/)
   assert.ok(!toolNames(iris).includes('office_compact'), 'a member holds neither compaction nor interruption')
   // The summary is what a reader meets where the range used to be, so a range query over the
   // covered sequences answers with the summary rather than with nothing.

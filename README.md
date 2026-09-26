@@ -51,16 +51,20 @@ Delivery:
 Each colleague receives its own turn in its own conversation — not a line in a shared log:
 
 ```text
-[office #general from user | general-12]
+[office #general from the user | general-12]
 release is cut — review the diff before I tag it
+
+(Only an office tool notifies a colleague; this reply reaches the user alone.)
 ```
 
-The frame carries the message and nothing else. The rules that keep one post from waking the office
-again — silence is the normal answer, answer where the message stands, never post an
-acknowledgement — are stated once, in `office_post`'s own description. A frame is written into the
-colleague's session, so a rule appended to it would be copied into that history once per delivered
-message and re-sent with every later request; a tool description is assembled into each request
-instead.
+The frame names the sender as a colleague or as the user, and carries exactly one rule: what a
+colleague writes in its own turn is seen by the user alone, so reaching a colleague takes an office
+tool. The rules that keep one post from waking the office again — silence is the normal answer,
+answer where the message stands, never post an acknowledgement — are standing context instead, in
+`office_post`'s description and in a prompt section the office contributes to each armed colleague.
+A frame is written into the colleague's session, so a paragraph in it would be copied into that
+history once per delivered message and re-sent with every later request; the one line stays because
+the colleague reads it in the message it was just handed.
 
 A colleague that is mid-turn is **not interrupted**. By default it reads the message at its next
 step boundary — `steered`, above — so it hears about a correction while the work it corrects is
@@ -77,8 +81,10 @@ office_read_notifications  {}
 
 [office office] 1 notification was held for you, read here on request:
 
-[office #general from user | general-12]
+[office #general from the user | general-12]
 release is cut — review the diff before I tag it
+
+(Only an office tool notifies a colleague; this reply reaches the user alone.)
 ```
 
 Address the user and the message lands in the user's mailbox instead of waking anybody:
@@ -631,11 +637,20 @@ unauthenticated.
   shared record or answers privately, that the office has a history nothing replays, and where the
   notes for its seat are. The role still decides the tool set; nothing else about the assignment
   changed.
-- **A delivery frame carries the message and nothing else.** The rules that keep one post from
-  waking the office again are appended to no frame; they are stated once, in `office_post`'s
-  description, for the same reason. A frame is written into the receiving colleague's session once
-  per delivered message, so a rule inside it would be re-sent with every later request for the life
-  of that history. See [docs/delivery.md](docs/delivery.md#the-answering-rule).
+- **An office colleague gets office standing prompt text, because its preset knows nothing about
+  the office.** The office registers a delivery contract into each armed agent's own scope,
+  alongside its tools and withdrawn with them: the office delivers a colleague's message as a
+  private turn, what the colleague writes in its own turn is seen by the user alone, and only an
+  office tool notifies a colleague. Without it a colleague's system prompt is its ordinary coding
+  agent's, and the only office text it ever reads is a tool description it may not be reaching for.
+- **A delivery frame names the sender and carries exactly one rule.** A message the human sent says
+  `from the user`; every other sender says `from colleague <name>`. The trailing line states the one
+  fact the colleague's next action depends on — only an office tool notifies a colleague, and this
+  reply reaches the user alone. The paragraph it replaced, which held the answering rules and the
+  acknowledgement rule, is standing context now: a frame is written into the receiving colleague's
+  session once per delivered message, so a paragraph in it is re-sent with every later request for
+  the life of that history. See [docs/delivery.md](docs/delivery.md#the-answering-rule) for why the
+  one line stayed.
 - **Only a hire carries the leader's guide.** A session that is *adopted* as a leader, or promoted
   by `office_configure`, takes no onboarding turn, so nothing ever tells it where the notes are;
   it learns the path from the office's own record or from the operator. The path is resolved
