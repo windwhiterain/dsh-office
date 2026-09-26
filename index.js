@@ -309,10 +309,9 @@ function roleProperty() {
   return {
     type: 'string',
     enum: COLLEAGUE_ROLES,
-    description: `Predefined role: ${COLLEAGUE_ROLES.join(', ')}. The role decides which office tools `
-      + 'the colleague holds: member reads and writes to the office, leader also interrupts, compacts, '
-      + 'and configures, and consultant speaks like a member while its session runs read-only by default. '
-      + 'It also selects the session permission preset the office row maps it to.',
+    description: `${COLLEAGUE_ROLES.join(', ')}. member reads and writes to the office; leader also `
+      + 'interrupts, compacts, and configures; consultant speaks like a member under a read-only session. '
+      + 'The role also selects the session permission preset the office row maps it to.',
   }
 }
 
@@ -324,7 +323,21 @@ function descriptionProperty() {
   return {
     type: 'string',
     description: `What this colleague is for, in one or two sentences (at most ${String(DESCRIPTION_MAX_CHARS)} `
-      + 'characters). It reaches the colleague\'s onboarding message, the roster, and the Web panel.',
+      + 'characters); it reaches its onboarding message, the roster, and the Web panel.',
+  }
+}
+
+/**
+ * The `notify` property every tool that delivers a message declares: the timing a
+ * colleague that is already mid-turn receives the delivery under.
+ * @returns the property schema.
+ */
+function notifyProperty() {
+  return {
+    type: 'string',
+    enum: NOTIFY_TIMINGS,
+    description: '"step-end" (default) splices into a mid-turn colleague at its next step boundary; '
+      + '"turn-end" holds it and hands it over as one turn when that turn ends. An idle colleague receives it now either way.',
   }
 }
 
@@ -2866,8 +2879,8 @@ function officeArgument(role) {
     property: {
       type: 'string',
       description: role === 'boss'
-        ? 'The office to act on, named by its office name. office_list reports the offices this session runs.'
-        : 'Optional office name. Omit it to act on the office that adopted you; pass it only to choose when several offices hold you.',
+        ? 'Office name (required).'
+        : 'Omit unless several offices hold you.',
     },
     required: role === 'boss',
   }
@@ -3061,8 +3074,7 @@ function createManagementTools(agent, host, tool) {
     {
       name: 'office_list',
       description:
-        'List the offices this session runs. A boss preset may run several offices at once, and every other '
-        + 'office tool takes the office to act on by the name reported here.',
+        'List the offices this session runs; every other office tool takes the office by the name reported here.',
       parameters: { type: 'object', additionalProperties: false, properties: {} },
       output: {
         schema: {
@@ -3102,10 +3114,8 @@ function createManagementTools(agent, host, tool) {
     {
       name: 'office_roster',
       description:
-        'List the colleague roster and the available channels of one office. A colleague is an ordinary '
-        + 'session adopted by id, and it is addressed by that session\'s title — renaming the session renames '
-        + 'the colleague. Set include_unadopted to also see recent sessions that are not colleagues yet and '
-        + 'can be adopted with office_adopt.',
+        'List one office\'s colleagues and channels. A colleague is a session addressed by its title, so '
+        + 'renaming the session renames it. include_unadopted also lists recent sessions office_adopt can take.',
       parameters: tool.parameters([], {
         include_unadopted: {
           type: 'boolean',
@@ -3214,13 +3224,12 @@ function createManagementTools(agent, host, tool) {
     {
       name: 'office_adopt',
       description:
-        'Adopt an existing session as a colleague. The session keeps its own workspace, history, and tools. '
-        + 'A colleague is addressed by its session title, so supplying name renames that session and any '
-        + 'other rename changes how the colleague is addressed. The role decides the office tools the '
-        + 'colleague holds and the session permission preset the office row maps that role to.',
+        'Adopt an existing session as a colleague; it keeps its own workspace, history, and tools. Supplying '
+        + 'name renames that session, and a colleague is addressed by its title. The role decides the '
+        + 'colleague\'s office tools and its session permission preset.',
       parameters: tool.parameters(['session_id'], {
         session_id: { type: 'string', description: 'The session id to adopt.' },
-        name: { type: 'string', description: 'Optional new session title; a colleague is addressed by its session title.' },
+        name: { type: 'string', description: 'Optional new session title; a colleague is addressed by its title.' },
         role: roleProperty(),
         description: descriptionProperty(),
       }),
@@ -3278,34 +3287,32 @@ function createManagementTools(agent, host, tool) {
     {
       name: 'office_hire',
       description:
-        'Create a new session and adopt it as a colleague in one step, for when the colleague does not exist '
-        + 'yet. The session is created through the same host path the Web UI uses, so it appears in the '
-        + 'workspace sidebar, and name becomes its session title. Use office_adopt instead for a session that '
-        + 'already exists. The role decides the office tools the colleague holds and the session permission '
-        + 'preset the office row maps that role to.',
+        'Create a new session and adopt it as a colleague in one step; name becomes its session title, and it '
+        + 'appears in the workspace sidebar. Use office_adopt for a session that already exists. The role '
+        + 'decides the colleague\'s office tools and its session permission preset.',
       parameters: tool.parameters(['name'], {
         name: { type: 'string', description: 'Session title for the new colleague.' },
         role: roleProperty(),
         description: descriptionProperty(),
         workspace_id: {
           type: 'string',
-          description: 'Workspace to create the session in; defaults to the first registered workspace.',
+          description: 'Workspace; defaults to the first registered one.',
         },
         agent_preset: {
           type: 'string',
-          description: 'Agent preset id for the new session; defaults to the deployment default.',
+          description: 'Agent preset id; defaults to the deployment default.',
         },
         provider: {
           type: 'string',
-          description: 'Model provider route for the new colleague. Supply together with model.',
+          description: 'Model provider; with model.',
         },
         model: {
           type: 'string',
-          description: 'Model id for the new colleague. Supply together with provider.',
+          description: 'Model id; with provider.',
         },
         reasoning_effort: {
           type: 'string',
-          description: 'Adapter-owned reasoning effort for the chosen route.',
+          description: 'Adapter-owned reasoning effort.',
         },
       }),
       output: {
@@ -3375,8 +3382,8 @@ function createManagementTools(agent, host, tool) {
     {
       name: 'office_dismiss',
       description:
-        'Remove a colleague from the roster. The session itself is untouched: it keeps its history and its '
-        + 'workspace, and only loses its channel tools and its place in the roster.',
+        'Remove a colleague from the roster. Its session is untouched: it keeps its history and workspace, and '
+        + 'loses only its office tools.',
       parameters: tool.parameters(['name'], {
         name: { type: 'string', description: "The colleague's session title." },
       }),
@@ -3417,9 +3424,8 @@ function createManagementTools(agent, host, tool) {
     {
       name: 'office_rename',
       description:
-        'Rename one office. Only the stored name changes — the office keeps its colleagues, its channels, '
-        + 'and every message, and its storage stays where it is, so the office is addressed by the new name '
-        + 'afterwards.',
+        'Rename one office. Colleagues, channels, and messages are kept, and the office is addressed by the '
+        + 'new name afterwards.',
       parameters: tool.parameters(['name'], {
         name: { type: 'string', description: 'The new office name.' },
       }),
@@ -3457,17 +3463,15 @@ function createCompactTool(agent, tool) {
   return {
     name: 'office_compact',
     description:
-      'Replace a range of one channel\'s messages with a summary you wrote, so a long channel stays readable '
-      + 'and bounded. Read the range with office_read first, then pass the sequences you covered. The summary '
-      + 'takes the lowest sequence of the range and the covered messages are deleted, so anyone reading the '
-      + 'channel afterwards meets the summary exactly where they stood. Compact ranges nobody will need in '
-      + 'full; a colleague that has already been woken past the range never sees the summary. Compaction is '
-      + 'the record-keeping capability, so only the boss and the leaders hold it.',
+      'Replace a range of one channel\'s messages with a summary you wrote, so a long channel stays readable. '
+      + 'Read the range with office_read first; the summary takes the lowest sequence of the range and the '
+      + 'covered messages are deleted. Compact only what nobody will need in full — a colleague already woken '
+      + 'past the range never sees the summary. Only the boss and the leaders hold this.',
     parameters: tool.parameters(['from', 'to', 'summary'], {
-      channel: { type: 'string', description: 'Channel to compact: "#general" (the default), a channel you are a member of, or a colleague\'s session title for your DM with it.' },
+      channel: { type: 'string', description: 'Channel to compact: "#general" (the default), a channel you are a member of, or a colleague\'s title for your DM.' },
       from: { type: 'integer', description: 'First message sequence number to replace, inclusive.' },
       to: { type: 'integer', description: 'Last message sequence number to replace, inclusive.' },
-      summary: { type: 'string', description: 'The text that replaces the range. Say what happened and what was decided, not that a range was compacted.' },
+      summary: { type: 'string', description: 'The replacement text. Say what happened and what was decided, not that a range was compacted.' },
     }),
     output: {
       schema: {
@@ -3550,11 +3554,9 @@ function createInterruptTool(agent, tool) {
   return {
     name: 'office_interrupt',
     description:
-      'Cancel a colleague\'s running turn. The colleague is not left with a lost message: everything the '
-      + 'office held for it while that turn ran is handed over as one turn when it stops. Use it when a '
-      + 'colleague is working on the wrong thing and a message alone would arrive too late. A colleague that '
-      + 'is idle or not loaded has nothing to interrupt, which the result reports rather than treating as a '
-      + 'failure.',
+      'Cancel a colleague\'s running turn, for work on the wrong thing that a message alone would reach too '
+      + 'late. Everything the office held for it while it ran is handed over as one turn when it stops, so no '
+      + 'message is lost. An idle or unloaded colleague has nothing to interrupt, which the result reports.',
     parameters: tool.parameters(['name'], {
       name: { type: 'string', description: "The colleague's session title." },
     }),
@@ -3618,13 +3620,10 @@ function createColleaguesTool(tool) {
   return {
     name: 'office_colleagues',
     description:
-      'List every colleague of one office with its role, its description, and its current status: '
-      + '`running` while it works, `idle` when it is loaded and waiting, and `inactive` when its session is '
-      + 'not loaded at all. A loaded colleague also reports the permission preset its session runs under and '
-      + 'the model route its session is set to — the same value the Web UI shows, read from the session '
-      + 'rather than from the route its agent process was started with; every colleague reports how many '
-      + 'messages the office is holding for it and when the office last carried a message from it or to it. '
-      + 'Reading this never wakes anybody.',
+      'List every colleague with its role, its description, and its status: `running`, `idle` when it is '
+      + 'loaded and waiting, `inactive` when its session is not loaded. A loaded colleague also reports its '
+      + 'permission preset and model route; each reports how many messages the office holds for it and when it '
+      + 'last carried one. Never wakes anybody.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -3694,10 +3693,9 @@ function createConfigureTool(tool) {
   return {
     name: 'office_configure',
     description:
-      'Set a colleague\'s predefined role and/or its description. The role decides which office tools the '
-      + 'colleague holds and the session permission preset the office row maps it to, so the change is '
-      + 'refused when this deployment cannot enforce that preset. Passing description as an empty string '
-      + 'removes it. Omitted fields keep their stored value.',
+      'Set a colleague\'s predefined role and/or its description. The role decides the colleague\'s office '
+      + 'tools and its session permission preset, so a role whose preset this deployment cannot enforce is '
+      + 'refused. An empty description removes it; omitted fields keep their stored value.',
     parameters: tool.parameters(['name'], {
       name: { type: 'string', description: "The colleague's session title." },
       role: roleProperty(),
@@ -3780,10 +3778,9 @@ function createChannelsTool(agent, tool) {
   return {
     name: 'office_channels',
     description:
-      'List the channels this office holds that you can read: "#general", the direct channels you are a '
-      + 'party to, and every channel you are a member of — a boss reads all of them. Each channel names its '
-      + 'topic and its members, and office_read addresses one by the id reported here. Reading this never '
-      + 'wakes anybody.',
+      'List the channels you can read: "#general", your direct channels, and every channel you are a member '
+      + 'of — a boss reads all of them. Each names its topic and members, and office_read addresses one by the '
+      + 'id reported here.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -3890,13 +3887,13 @@ function createChannelManagementTools(tool) {
   definitions.push({
     name: 'office_channel_create',
     description:
-      'Create one group channel: a shared feed whose membership decides who reads it and who is woken by a post there. '
-      + 'Give it a topic so the roster can see what it is for, and name the colleagues who start on it. The channel '
-      + 'begins empty; the members you name are addressed by their session titles.',
+      'Create one group channel: a shared feed whose membership decides who reads it and who a post there '
+      + 'wakes. Give it a topic so the roster can see what it is for, and name the colleagues who start on it '
+      + 'by their session titles. The channel begins empty.',
     parameters: tool.parameters(['name'], {
-      name: { type: 'string', description: 'The new channel\'s name; it becomes the id the other tools address it by.' },
+      name: { type: 'string', description: 'Channel name; becomes the id other tools address it by.' },
       topic: { type: 'string', description: 'One sentence describing what this channel is for.' },
-      members: { type: 'array', items: { type: 'string' }, description: "Session titles of the colleagues that belong to it from the start." },
+      members: { type: 'array', items: { type: 'string' }, description: 'Session titles of its first members.' },
     }),
     output: {
       schema: {
@@ -3947,9 +3944,8 @@ function createChannelManagementTools(tool) {
   definitions.push({
     name: 'office_channel_delete',
     description:
-      'Delete one group channel the office created. Every message held in it goes with it — including what the office '
-      + 'still owed its members — so a channel nobody reads any more is the thing to delete. "#general", the mailbox, and '
-      + 'the direct channels are standing or private and cannot be deleted here.',
+      'Delete one group channel the office created; every message in it goes, including what the office still '
+      + 'owed its members. "#general", the mailbox, and direct channels cannot be deleted here.',
     parameters: tool.parameters(['channel'], {
       channel: { type: 'string', description: 'The channel\'s name, as office_channels reports it.' },
     }),
@@ -3980,8 +3976,8 @@ function createChannelManagementTools(tool) {
   definitions.push({
     name: 'office_channel_members',
     description:
-      'Edit the membership of one group channel. The members decide who reads it and who a post there wakes: add '
-      + 'colleagues to admit them, remove them to shut the door, or pass neither to read the current members back.',
+      'Edit one group channel\'s membership: add admits colleagues, remove shuts them out, and passing neither '
+      + 'reports the current members. The members decide who reads the channel and who a post there wakes.',
     parameters: tool.parameters(['channel'], {
       channel: { type: 'string', description: 'The channel\'s name, as office_channels reports it.' },
       add: { type: 'array', items: { type: 'string' }, description: "Session titles of colleagues to admit." },
@@ -4116,29 +4112,27 @@ function createReadTool(agent, tool, config) {
   return {
     name,
     description:
-      'Read office channel history, oldest first. Address a channel by "#general", by a channel name the '
-      + 'office_channels listing reports, by a colleague\'s session title for your direct-message channel with '
-      + 'that colleague, or by "*" for every channel you can read. Narrow it with from/to over message sequence '
-      + 'numbers, with sender, with contains over the body, with mentions, or with since/until over time. A wake '
-      + 'carries only what was addressed to you, so this is how you reach anything the office did not notify '
-      + 'you about.',
+      'Read channel history, oldest first. Address a channel by "#general", a name office_channels reports, a '
+      + 'colleague\'s session title for your direct-message channel with it, or by "*" for every channel you '
+      + 'can read. Narrow it with from/to over sequences, or by sender, contains, mentions, and since/until. A '
+      + 'wake carries only what was addressed to you, so this reaches everything else.',
     parameters: tool.parameters(['channel'], {
       channel: {
         type: 'string',
-        description: 'Channel to read: "#general", a channel name, a colleague\'s session title for a DM, or "*" for every channel you can read.',
+        description: 'Channel: "#general", a reported name, a colleague\'s title for your DM, or "*" for all.',
       },
-      from: { type: 'integer', description: 'First message sequence number to include, inclusive.' },
-      to: { type: 'integer', description: 'Last message sequence number to include, inclusive.' },
+      from: { type: 'integer', description: 'Start of the sequence range, inclusive.' },
+      to: { type: 'integer', description: 'End of the sequence range, inclusive.' },
       limit: {
         type: 'integer',
         description: `At most this many messages, newest kept (default ${String(config.readLimit)}, maximum ${String(config.readLimitMax)}).`,
       },
-      sender: { type: 'string', description: "Only messages from this colleague's session title, or from the user." },
-      contains: { type: 'string', description: 'Only messages whose body contains this text, ignoring case.' },
-      mentions: { type: 'string', description: 'Only messages that mention "me" or the named colleague\'s session title.' },
-      since: { type: 'integer', description: 'Only messages created at or after this Unix time in milliseconds.' },
-      until: { type: 'integer', description: 'Only messages created at or before this Unix time in milliseconds.' },
-      brief: { type: 'boolean', description: 'Return ids, channels, sequence numbers, senders, and times without the bodies.' },
+      sender: { type: 'string', description: "A colleague's session title, or the user." },
+      contains: { type: 'string', description: 'Body contains this text, ignoring case.' },
+      mentions: { type: 'string', description: 'Mentions "me", a colleague\'s title, or the user.' },
+      since: { type: 'integer', description: 'Created at or after this Unix time in ms.' },
+      until: { type: 'integer', description: 'Created at or before this Unix time in ms.' },
+      brief: { type: 'boolean', description: 'Ids, sequences, senders, and times without bodies.' },
     }),
     output: {
       schema: {
@@ -4297,11 +4291,9 @@ function createNotificationsTool(agent, tool) {
   return {
     name,
     description:
-      'Read the notifications the office is holding for you, and take them: they are no longer held, so '
-      + 'they will not also reach you as a turn. Use it in the middle of a turn to see what has been '
-      + 'addressed to you before you finish, rather than after. It carries only what was addressed to you, '
-      + 'and most notifications need no answer — office_read reads the channel record you were not notified '
-      + 'about.',
+      'Read and take the notifications the office holds for you: they are no longer held, so they will not '
+      + 'also arrive as a turn. Use it mid-turn to see what was addressed to you before you finish. It '
+      + 'carries only your own mail; office_read reads the rest of the record.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -4383,40 +4375,26 @@ function createCommunicationTools(agent, tool) {
     definitions.push({
       name: 'office_post',
       description:
-        'Post to a channel of the office. Without a channel argument it is "#general", the public record. '
-        + 'wake is required and decides who is woken: name the colleagues who need to read this, "@alice", '
-        + '"@bob", or pass one level — "#consultant" wakes every colleague, "#member" wakes the members and '
-        + 'the leaders, and "#leader" wakes the leaders alone — or pass an empty list to write to the record '
-        + 'without waking anyone, who can still read it with office_read. A post to "#general" spends a turn '
-        + 'of everyone it wakes, so post only what those colleagues should learn from, and never to '
-        + 'acknowledge a message, to agree with one, or to announce that you are working. Pass a channel name '
-        + 'to post to one you are a member of instead — a group channel wakes its own members among the ones '
-        + 'the wake addresses, so only those subscribed read a turn of it. notify decides what a colleague '
-        + 'that is mid-turn gets, and defaults to step-end — read at its next step boundary — so a post '
-        + 'reaches the busy colleagues who are working rather than waiting for them to stop; pass '
-        + 'notify:"turn-end" for a message that can wait and should be merged with whatever else arrives '
-        + 'before the turn ends. Use office_dm for short or private exchanges, and office_channels for the '
-        + 'channels you hold.',
+        'Post to "#general" (the default) or to a group channel you are a member of. wake is required and '
+        + 'decides who is woken; an empty list writes to the record without waking anyone, who can still read '
+        + 'it with office_read. A post spends a turn of everyone it wakes, so post only what those colleagues '
+        + 'should learn from — never to acknowledge a message, to agree with one, or to announce that you are '
+        + 'working. A group channel wakes its own members among the ones the wake addresses. Use office_dm for '
+        + 'short or private exchanges.',
       parameters: tool.parameters(['wake', 'text'], {
         channel: {
           type: 'string',
-          description: 'The channel to write to: "#general" (the default), or a channel you are a member of.',
+          description: 'Channel to write to: "#general" (the default), or one you are a member of.',
         },
         wake: {
           type: 'array',
-          description: 'Required. Who this post wakes: colleague session titles as "@alice", or exactly one '
-            + 'level — "#consultant" (every colleague), "#member" (members and leaders), "#leader" (leaders '
-            + 'only). An empty list wakes nobody. Waking is explicit and never inferred from the text.',
+          description: 'Required. Who this post wakes: colleagues as "@alice", or exactly one level — '
+            + '"#consultant" (every colleague), "#member" (members and leaders), "#leader" (leaders only). An '
+            + 'empty list wakes nobody. Waking is explicit and never inferred from the text.',
           items: { type: 'string' },
         },
         text: { type: 'string', description: 'The message body.' },
-        notify: {
-          type: 'string',
-          enum: NOTIFY_TIMINGS,
-          description: 'When a colleague that is mid-turn receives this: "step-end" (default) splices it into '
-            + 'the running turn at that turn\'s next step boundary; "turn-end" holds it and hands it over as one '
-            + 'turn when that turn ends. An idle colleague receives it now either way.',
-        },
+        notify: notifyProperty(),
       }),
       output: {
         schema: officePostSchema(),
@@ -4462,31 +4440,21 @@ function createCommunicationTools(agent, tool) {
     definitions.push({
       name: 'office_dm',
       description:
-        'Send a private message to one colleague, for short exchanges that do not need the whole '
-        + 'office. wake is required and names exactly one colleague, "@alice", or the user; a level is '
-        + 'refused here, because a private message is one conversation rather than a way to reach a rung of '
-        + 'the office — post to a channel with office_post for that. The message is stored in the office and '
-        + 'delivered into that colleague\'s session as a user turn, waking it if it is inactive. A colleague '
-        + 'that is mid-turn is not interrupted, and by default it reads this at the end of the step it is '
-        + 'running, so the message reaches it while it works; pass notify:"turn-end" to hold it instead, and '
-        + 'have it handed over as one turn when that turn ends. Every delivery outcome is reported: a wake '
-        + 'that could not happen is reported rather than silently dropped. Addressing the user writes to the '
-        + 'user mailbox instead: the user has no session, so nothing is woken and the message waits there.',
+        'Send one colleague a private message, for short exchanges that do not need the whole office. wake is '
+        + 'required and names exactly one colleague, "@alice", or the user; a level is refused — a private '
+        + 'message is one conversation, so use office_post to wake a level. The message is delivered into that '
+        + 'colleague\'s session as a user turn, waking it if it is inactive, and a colleague that is mid-turn '
+        + 'is not interrupted. Every delivery outcome is reported. Addressing the user writes to the user '
+        + 'mailbox, where nothing is woken.',
       parameters: tool.parameters(['wake', 'text'], {
         wake: {
           type: 'array',
-          description: 'Required. The one colleague this reaches: the session title as "@alice", or "@" and '
-            + 'the user\'s name for the user mailbox.',
+          description: 'Required. The one colleague this reaches, as "@alice", or "@" and the user\'s name '
+            + 'for the user mailbox.',
           items: { type: 'string' },
         },
         text: { type: 'string', description: 'The message body.' },
-        notify: {
-          type: 'string',
-          enum: NOTIFY_TIMINGS,
-          description: 'When a colleague that is mid-turn receives this: "step-end" (default) splices it into '
-            + 'the running turn at that turn\'s next step boundary; "turn-end" holds it and hands it over as one '
-            + 'turn when that turn ends. An idle colleague receives it now either way.',
-        },
+        notify: notifyProperty(),
       }),
       output: {
         schema: officePostSchema(),

@@ -105,6 +105,42 @@ pinning one machine's Git for Windows install into this package. The expression 
 the bare name, so a deployment whose bash is not on PATH loses the shell tool alone — not the
 office tools with it.
 
+### The model-facing text budget
+
+Everything this package puts in front of a model is billed on every request of the session that
+carries it, so the three surfaces are kept deliberately terse:
+
+| surface | where it lives | paid |
+|---|---|---|
+| the boss persona | `cordis.patch.yml`, the `persona` row's `prefix` | every boss request |
+| the office tool schemas | `index.js`, each tool's `description` and its parameter `description`s | every request of every office session |
+| the onboarding turn | `index.js`, `greet()` | every request of a hired colleague, for the life of its history |
+
+The split of responsibility is the rule that keeps them from growing back:
+
+- A tool's `description` says **when** to reach for the tool and what its result means. It does
+  not restate a parameter's allowed values, and it does not restate an error the tool already
+  reports.
+- A parameter's `description` says what the value is. A default or an enum is stated once, in the
+  parameter that declares it.
+- Recovery advice belongs in the thrown error, which is read exactly when it is needed and costs
+  nothing until then. `office_dm`'s refusal of a wake level, for instance, names `office_post` as
+  the tool that does take one.
+- Behaviour that is a *norm* rather than an interface — never post to acknowledge a message —
+  is stated once, in the onboarding turn, and only in the compressed form the tool description
+  needs.
+
+Shared parameters are declared once, by a builder, so a wording change lands in every tool that
+carries them: `officeArgument()`, `roleProperty()`, `descriptionProperty()`, and
+`notifyProperty()`. The `office` argument is the one worth watching, because a boss emits it in
+all eighteen tools.
+
+Measured with the description literals concatenated the way the model receives them: a boss's
+eighteen tools went from 14,725 to 9,061 characters, a member's six from 6,560 to 3,468, and the
+persona from 1,080 to 779 — roughly 1,500 characters off every boss request, and 770 off a
+member's. Output schemas are not part of this figure: a canonical request carries `parameters`
+only, so `output.schema` costs nothing outside PTC presentation.
+
 ## The profile patch
 
 The panel's create, delete, and rename routes edit the profile patch
