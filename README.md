@@ -61,18 +61,18 @@ of them spends a turn on it.)
 
 A colleague that is mid-turn is **not interrupted**. By default it reads the message at its next
 step boundary — `steered`, above — so it hears about a correction while the work it corrects is
-still running. `notify: "turn-end"` asks for the other timing instead: everything that arrives
-while a colleague works is held and handed over as **one** turn when it stops — nine messages cost
-one turn and one answer — and the hold is durable, so a message a colleague is waiting for survives
-a host restart. Two more exceptions are deliberate. A **leader** holds `office_interrupt`, which
-cancels a running turn and lets the office hand over everything held for that colleague at once.
-And a colleague that wants what is held for it *now* reads it itself with
-`office_read_notifications`, which takes the holds rather than waiting for the turn to end:
+still running; `notify: "turn-end"` holds the message instead, and hands over everything that
+arrived while the colleague worked as **one** turn when it stops, so nine messages cost one turn
+and one answer, and the hold is durable across a host restart. Two other ways a colleague changes
+what it is doing are deliberate: a **leader** holds `office_interrupt`, which cancels a running
+turn and lets the office hand over everything held for that colleague at once; and a colleague
+that wants what is held for it *now* takes it itself with `office_read_notifications`, rather than
+waiting for the turn to end:
 
 ```text
 office_read_notifications  {}
 
-[office office] 3 notifications were held for you, read here on request:
+[office office] 1 notification was held for you, read here on request:
 
 [office #general from user | general-12]
 release is cut — review the diff before I tag it
