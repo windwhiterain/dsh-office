@@ -354,9 +354,10 @@ panel treats the answered channel as the one to read. Publishing it therefore ma
 a channel the reader had left, ask for it, receive the answer to the channel they had chosen,
 follow that, and ask again — a ping-pong between two channels that never settles, because each
 answer legitimately contradicts the request the other one was for. Every round also threw the whole
-snapshot away, which is what a reader saw as the panel reloading without end, and the last round
-tripped the stored choice. The published snapshot is therefore tagged with the office and the
-channel it was asked for, and an answer that names anything else is dropped.
+snapshot away, which is what a reader saw as the panel reloading without end, and rewrote the stored
+choice, so the last round trip decided which channel the page reopened on. The published snapshot is
+therefore tagged with the office and the channel it was asked for, and an answer that names anything
+else is dropped.
 
 **The reader's choice is authoritative while its answer is on its way.** The column draws the
 channel that was chosen, not the last one answered, so the server's own fallback — a channel
