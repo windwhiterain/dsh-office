@@ -620,6 +620,14 @@ unauthenticated.
   office does not interrupt a working colleague — so a colleague that is running learns about held
   mail only by asking for it, with `office_read_notifications`. Nothing pushes it a notice that
   something is waiting.
+- **A `step-end` splice claims `source.kind: "user"` so the receiving Chat shows it.** The Chat
+  draws a message whose source is not `user` as injected context, and a context row is not a visible
+  one, so a frame read mid-turn would appear nowhere; claiming `user` is what makes it a pending
+  bubble and then an in-turn message. The cost is accepted and real: harness readers that take
+  `kind === "user"` for a human at the keyboard — the `/name` skill gesture, goal authority, the
+  jobs wake budget, the repeat-tool reminder, the session list's last-prompt time — now see office
+  traffic too. Every other delivery keeps `office-message` and stays a visible turn trigger.
+  [delivery.md](docs/delivery.md#what-the-receiving-sessions-chat-shows) has the details.
 - **Nothing bounds how many messages a burst merges, and nothing bounds the loop a burst can
   start.** Merging is a turn-count damper, not a brake, and it is no longer what a default call
   gets: `turn-end` is the merge, and the default `step-end` splices each message into every busy

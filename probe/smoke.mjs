@@ -1103,6 +1103,11 @@ await check('office_dm notify:step-end steers into the running turn, and the cla
   assert.equal(steered.deliveries[0].status, 'steered', 'a step-end wake reports the splice, not a hold')
   assert.equal(nina.sent.length, 1)
   assert.equal(nina.sent[0].via, 'steer', 'the message enters the running turn at its next step boundary')
+  assert.equal(
+    nina.sent[0].message.source.kind,
+    'user',
+    'a splice claims the kind the Web Chat draws as an in-turn message, which is what puts it in the conversation',
+  )
   assert.match(nina.sent[0].message.content[0].text, /stop: wrong branch/)
   assert.equal(nina.inbox.nextStep.length, 1, 'and the inbox carries it until a step claims it')
 

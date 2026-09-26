@@ -165,9 +165,11 @@ preference:
   make the owning session unreadable at its next open.
 
 Delivery into a colleague uses a standard `user/message` whose `source.kind` is
-`office-message`; the session read path requires a nonempty source `kind` and does not constrain
-its value, which makes this the only model-visible channel open to the plugin. See
-[delivery.md](delivery.md) for the payload and its JSON rules.
+`office-message`, except on a `step-end` splice, which claims `user` so the Web Chat draws it as an
+in-turn message instead of as invisible injected context; the session read path requires a nonempty
+source `kind` and does not constrain its value, which makes this the only model-visible channel open
+to the plugin. See [delivery.md](delivery.md) for the payload, its JSON rules, and what claiming
+`user` costs.
 
 ## Predefined colleague roles
 
@@ -353,6 +355,13 @@ the work it is about than after it. So the timing is offered on every carrying t
 to reaching the colleague, the merge is one argument away, and the same default reaches the panel
 route, which has no timing control of its own. A caller that broadcasts should expect every busy
 colleague to read it at its next step boundary.
+
+What each timing looks like to a human watching the receiving session is a presentation choice the
+office has to make, because the Web Chat draws a message whose source is not `user` as invisible
+injected context: the `step-end` splice therefore claims `user` to become an in-turn message, while
+every delivery that opens a turn keeps `office-message` and stays the visible trigger it already is.
+[delivery.md](delivery.md#what-the-receiving-sessions-chat-shows) records the trade that claim
+makes.
 
 ## Reading what is held, in the middle of a turn
 

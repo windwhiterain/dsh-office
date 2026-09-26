@@ -73,6 +73,47 @@ timing table is under [A wake is steered by default](#a-wake-is-steered-by-defau
 An idle colleague has no turn to steer, so it receives the message now either way, and the recorded
 outcome says which happened: `steered` for the splice, `delivered` for a turn.
 
+### What the receiving session's Chat shows
+
+A delivered frame is visible in the receiving session's Chat, and which row it becomes is decided by
+its `source.kind` ([The delivered turn](#the-delivered-turn)):
+
+| delivery | `source.kind` | what the receiving Chat draws |
+|---|---|---|
+| a `step-end` splice | `user` | a pending bubble the moment the office steers it, and an in-turn message row once a step boundary claims it |
+| a turn — an idle colleague, a merged `turn-end` burst, a recovered splice, an onboarding | `office-message` | the visible trigger row that opens that turn, and for `turn-end` a row in the queue strip while the merge waits |
+
+The split exists because the Web Chat draws a message whose source is **not** `user` as injected
+context, and a `context` node is not one of its visible rows; the pending tail filters the same way,
+taking only `source.kind === 'user'`. A splice is the one delivery that would therefore leave
+nothing in the conversation it belongs to — it is read by a colleague that is already working, so
+nothing else ever opens a turn for it — and it is also the office's default. So the splice claims
+`user`, and only the splice does: a delivery that opens a turn is already drawn, and disguising it
+too would make the office's own messages look like the human's in the sessions the human watches,
+the boss's included.
+
+**That claim is a deliberate trade, not a free one.** `kind === 'user'` is the harness's marker for
+"a human at this keyboard", and several harness readers act on it, so office traffic now reaches
+them:
+
+- `tool-skill` scans the text blocks of every `user` message for `/(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/`
+  and loads each named user-invocable skill into that step. Its own invariant is that *external
+  text cannot forge the gesture*, and a frame carries a colleague's text, so a body containing a
+  token like ` /deploy ` loads that skill in the receiving session.
+- `tool-goal`'s `requireDirectHuman` accepts a `user` message in the open turn as proof of a direct
+  human turn, so a colleague's private message mid-turn satisfies an operation meant to require the
+  human.
+- `tool-jobs` clears its `maxConsecutiveWakes` budget when a `user` message is claimed, so office
+  traffic refills the wake damper; `repeat-tool-reminder` clears its repeat chain on one; the
+  session list records `lastPromptAt` from one.
+
+The office accepts this because seeing what a working colleague was told is worth more to an
+operator than the isolation the honest kind buys. Two notes for anyone revisiting it. **Wrapping the
+body is not by itself enough**: the gesture regex accepts a slash token after any whitespace, so
+prefixing a line still matches — neutralizing it means escaping the slash (`\/`) or otherwise
+breaking that boundary. And the alternative fix is not in this package's tree: a Chat that drew an
+addressed peer message as an in-turn row would need a change to the harness's own classification.
+
 ### A step-end wake is held too
 
 A step-end wake is written to the `pending` table before it is steered, and that hold is what makes
@@ -170,7 +211,8 @@ browser that has it open.
 
 ## The delivered turn
 
-The wake is a standard `user/message` whose `source.kind` is `office-message`:
+The wake is a standard `user/message`. Its `source.kind` is `office-message`, except on a `step-end`
+splice, which claims `user`:
 
 ```js
 {
@@ -178,7 +220,9 @@ The wake is a standard `user/message` whose `source.kind` is `office-message`:
   role: 'user',
   content: [{ type: 'text', text: '<the frame>' }],
   source: {
-    kind: 'office-message',
+    // `user` on a step-end splice, `office-message` on every other delivery; the reason is under
+    // [What the receiving session's Chat shows](#what-the-receiving-sessions-chat-shows).
+    kind: steered ? 'user' : 'office-message',
     channelId, messageId, senderName, senderSessionId,
     batch: <count>,          // only when the turn carries more than one message
   },

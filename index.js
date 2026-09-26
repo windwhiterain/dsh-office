@@ -12,10 +12,11 @@
  *    the harness source and `Session.append` cannot stamp the envelope's
  *    `ignorable` marker, so a custom event type would make the owning session
  *    unreadable at its next open.
- * 2. Delivery into a colleague is a standard `user/message` whose `source.kind`
- *    is `office-message`. The session read path requires a nonempty source `kind`
- *    and does not constrain its value, which makes this the only model-visible
- *    channel open to this plugin.
+ * 2. Delivery into a colleague is a standard `user/message`. Its `source.kind` is
+ *    `office-message`, except on a step-end splice, which claims `user` so the Web Chat draws it
+ *    as an in-turn message rather than as invisible injected context. The session read path
+ *    requires a nonempty source `kind` and does not constrain its value, which makes this the only
+ *    model-visible channel open to this plugin.
  *
  * Waking is explicit and unconditional: a public post notifies the whole office unless the
  * caller narrows it to named colleagues, and a notification is always delivered. A colleague
@@ -148,6 +149,20 @@ const DEFAULT_NOTIFY = NOTIFY_STEP_END
 
 /** The identity prefix of the turn one office message becomes. */
 const WAKE_ID_PREFIX = 'office-'
+
+/** The source kind an ordinary delivered frame claims: the office's own. */
+const OFFICE_MESSAGE_KIND = 'office-message'
+
+/**
+ * The source kind a step-end splice claims instead.
+ *
+ * The Web Chat draws a message whose source is not `user` as injected context, and a context row
+ * is not one of its visible rows, so the splice — the delivery this office makes while a colleague
+ * works — would be read by the colleague and seen by nobody. Claiming `user` is what makes it a
+ * visible in-turn message. Only the splice does: a delivery that opens a turn is already drawn as
+ * a visible trigger under {@link OFFICE_MESSAGE_KIND}, so both kinds buy everything they can.
+ */
+const STEERED_MESSAGE_KIND = 'user'
 
 /** Why a step-end wake the running turn never took arrives as the office's own turn. */
 const STEP_END_RECOVERY_DETAIL = 'the running turn ended before it took this step-end wake; '
@@ -1577,9 +1592,11 @@ function createOffice(ctx, domain, config, hooks) {
    * @param batch - the batched messages, oldest first.
    * @param newestSeq - the newest sequence of the last message's channel, when known.
    * @param role - the receiving colleague's predefined role, which decides what the frame may suggest.
+   * @param sourceKind - the kind the payload's source claims: {@link OFFICE_MESSAGE_KIND} for a
+   *   delivery that opens a turn, {@link STEERED_MESSAGE_KIND} for a splice into a running one.
    * @returns the message payload to hand to the colleague's session.
    */
-  const batchPayload = (batch, newestSeq, role) => {
+  const batchPayload = (batch, newestSeq, role, sourceKind = OFFICE_MESSAGE_KIND) => {
     const newest = batch.at(-1)
     return {
       id: wakeIdOf(newest),
@@ -1591,7 +1608,7 @@ function createOffice(ctx, domain, config, hooks) {
       // and undefined; leaving it in fails the whole delivery with "carries
       // non-JSON-serializable data".
       source: compact({
-        kind: 'office-message',
+        kind: sourceKind,
         channelId: newest.channelId,
         messageId: newest.messageId,
         senderName: newest.senderName,
@@ -1808,7 +1825,7 @@ function createOffice(ctx, domain, config, hooks) {
     const agent = await ensureAgent(colleague.sessionId)
     if (agent.status !== 'idle' && notify === NOTIFY_STEP_END) {
       await holdWake(colleague.sessionId, message, NOTIFY_STEP_END)
-      agent.steer(batchPayload([message], undefined, canonicalRole(colleague.role)))
+      agent.steer(batchPayload([message], undefined, canonicalRole(colleague.role), STEERED_MESSAGE_KIND))
       await recordDelivery(key, colleague.sessionId, {
         status: 'steered',
         at: Date.now(),
@@ -2460,7 +2477,7 @@ function createOffice(ctx, domain, config, hooks) {
       // A source kind and identity are required on every delivered turn; this one belongs to no
       // channel, and says so rather than naming a channel it was never written to.
       source: compact({
-        kind: 'office-message',
+        kind: OFFICE_MESSAGE_KIND,
         channelId: 'office-onboarding',
         messageId: `onboarding-${colleague.sessionId}`,
         senderName: config.userName,
