@@ -151,7 +151,7 @@ office_dm    { "wake": ["@user"], "text": "blocked on ci" }   # mail for you, wa
 office_read  { "channel": "#general", "from": 1 }             # a query; never a wake
 office_read_notifications  {}                                 # what is held for you, taken now
 office_do_not_disturb  { "enabled": true }                    # be woken by nothing until released
-office_colleagues  { "office": "office" }                     # who is busy, and what is held for whom
+office_colleagues  { "office": "office" }                     # who is busy, who subscribes to what, what is held
 ```
 
 Then open **Office** in the Web sidebar: the panel lists every mounted office with its roster,
@@ -275,7 +275,9 @@ A level is scoped to the channel it is posted to, exactly as a channel's own bro
 `#general` it reaches the whole roster, and in a group channel only that channel's members among
 the rung it names. A channel token is scoped to the channel it names instead, wherever the message
 is posted, and it may name a channel its sender is not in: an address is not a read, exactly as
-naming a colleague is. A named colleague is not scoped at all, because naming one is addressing it.
+naming a colleague is. Writing is ungated for the same reason, so a post into a channel the sender
+does not subscribe to still wakes only that channel's subscribers; see [Channels](#channels). A
+named colleague is not scoped at all, because naming one is addressing it.
 `office_dm` names exactly one colleague and refuses a level and a channel alike: a private message
 is one conversation, and `office_post` is how a rung or a channel is reached.
 
@@ -388,7 +390,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 |---|---|
 | `office_list` | List the offices this session runs, with their names and colleague counts. |
 | `office_roster` | List colleagues and channels; `include_unadopted` also lists sessions available to adopt, each with its workspace and its sidebar title — archived sessions, and sessions no workspace accounts, are not offered. |
-| `office_colleagues` | Every colleague with its role, description, live status — `running`, `idle`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when its session is not loaded — effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, held-message count, last activity, and whether it has set itself do-not-disturb with the reason it published. A pure query: it wakes nobody. |
+| `office_colleagues` | Every colleague with its role, description, live status — `running`, `idle`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when its session is not loaded — effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, the channels it subscribes to, held-message count, last activity, and whether it has set itself do-not-disturb with the reason it published. A pure query: it wakes nobody. |
 | `office_adopt` | Adopt an existing session, with an optional `name`, `role`, and `description`. |
 | `office_hire` | Create a session, title it, adopt it, and greet it **privately**. Accepts `role`, `description`, `agent_preset`, `provider`+`model`, and `reasoning_effort`. |
 | `office_dismiss` | Remove a colleague from the roster and withdraw its tools. The session itself keeps its history and workspace. |
@@ -398,7 +400,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_channel_delete` | Delete a group channel the office created; its messages and the holds it owed go with it. The standing channels and the direct ones are refused. |
 | `office_channel_members` | Add or remove a group channel's members, named by session title — or read the current members back with neither list. |
 | `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. A colleague waiting out an exhausted account quota holds a turn like any other, so it can be stopped too — the result names that wait, and ending it does not end the exhaustion. |
-| `office_post` | Post to a channel: `#general` by default. `wake` **is required** and decides who hears it — names (`["@alice"]`), one level (`["$member"]`, `["$leader"]`), which wakes its rung and every rung above it, or one channel (`["#dev"]`), which wakes that channel's members wherever the post goes — and an empty list writes without waking anyone; naming the user files a copy in the mailbox. A group channel wakes only its own members among the ones the wake addresses. `notify` picks when a colleague that is **mid-turn** receives it: `step-end` (the default) splices it into the running turn to be read at its next step boundary, and `turn-end` holds it until the turn ends and hands it over merged with whatever else arrived. An idle colleague gets it now either way. See [Who a message wakes](#who-a-message-wakes). |
+| `office_post` | Post to a channel: `#general` by default, or any group channel the office holds — a subscription decides who reads a channel and whom a level posted there wakes, never who may write. `wake` **is required** and decides who hears it — names (`["@alice"]`), one level (`["$member"]`, `["$leader"]`), which wakes its rung and every rung above it, or one channel (`["#dev"]`), which wakes that channel's members wherever the post goes — and an empty list writes without waking anyone; naming the user files a copy in the mailbox. A group channel wakes only its own members among the ones the wake addresses. `notify` picks when a colleague that is **mid-turn** receives it: `step-end` (the default) splices it into the running turn to be read at its next step boundary, and `turn-end` holds it until the turn ends and hands it over merged with whatever else arrived. An idle colleague gets it now either way. See [Who a message wakes](#who-a-message-wakes). |
 | `office_dm` | Private message to one colleague named by `wake` (exactly one, no level or channel), or mail to the user, whose name writes to the mailbox. Takes the same `notify` as `office_post`. The delivery reports the colleague's own status too, as the office read it *before* delivering — `idle`, `running`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when this message is what woke it — so a sender learns why nothing comes back. |
 | `office_read` | Read channel history by sequence range and filters, addressed by name, by a colleague's title for a DM, or by `*` for everything you can read. Each message states the wake it was written with — `· wake $member`, `· wake @alice`, or `· wake nobody` for a message that woke nobody — so a reader who was not notified can still see whether the message was aimed at it. |
 | `office_read_notifications` | Take the notifications the office is holding for you, and read them now instead of at the end of your turn. Each is framed as a delivery, wake and all. |
@@ -471,11 +473,22 @@ to one office, so its result carries `offices` — every office it wrote — ins
 
 The office ships two standing feeds: `#general` (`kind: 'public'`), which every colleague shares,
 and the user's mailbox, which no tool reaches. The boss and the leaders build more with the
-`channels` capability: a **group** channel is a shared feed whose stored members decide everything
-about reach — a session reads it and is woken by a post there exactly as a member, `#general`'s
-"every colleague" default becomes that channel's own member list, and a boss is privy to all of
-them because it runs the office. A direct channel is created by the first message and needs no
-management: its members are the two sessions talking.
+`channels` capability: a **group** channel is a shared feed whose stored members are its
+**subscribers** — a session reads it and is woken by a post there exactly as one of them,
+`#general`'s "every colleague" default becomes that channel's own member list, and a boss is
+privy to all of them because it runs the office. A direct channel is created by the first
+message and needs no management: its members are the two sessions talking.
+
+**A subscription is an address, not a permission.** It decides who reads the
+channel and whom a level posted there wakes, and it is what `office_colleagues` reports for each
+colleague; it does not decide who may write, because **any colleague may write to any channel the
+office holds**, subscribed or not, whether through `office_post` or from the panel. A colleague
+writing outside its subscriptions therefore writes into a feed it cannot read back: what it
+posted is stored and reaches whoever the wake addressed, and any answer to it stays there until
+that colleague is subscribed or reached by `office_dm`. `office_channels` lists what the caller
+itself subscribes to, and `office_read` refuses every other channel by name; `office_compact` is
+the one write a subscription still gates, because it replaces a range the caller must be able to
+read first.
 
 Channels are addressed by name, `#` included or not, everywhere they are an argument:
 `office_read`, `office_post`, `office_compact`, and the channels the panel's switcher lists.

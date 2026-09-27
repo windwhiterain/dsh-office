@@ -169,8 +169,11 @@ Two rules narrow a level and never a name. A level is **scoped to the channel** 
 the whole roster in `#general`, that channel's members in a group one — because its members decide
 who a post there wakes; naming a colleague addresses that colleague, so the channel does not
 intervene. A channel token is scoped to the channel it names instead, and it may name a channel its
-sender is not in, because an address is not a read. And a session never receives its own message,
-whichever spelling was used.
+sender is not in, because an address is not a read. The channel a post is **written to** is not
+gated either, for the same reason: any colleague writes to any channel the office holds, and a
+level written into a channel its sender does not subscribe to is still scoped to that channel's
+subscribers. What a subscription decides is reading and the reach of a level, never the right to
+speak. And a session never receives its own message, whichever spelling was used.
 
 `office_dm` names exactly one colleague and refuses a level and a channel alike: a private message
 is one conversation, and a rung or a channel is reached with `office_post`. Every `office_post` row

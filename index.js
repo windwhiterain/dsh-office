@@ -55,12 +55,14 @@ const MAILBOX_CHANNEL = 'mailbox'
 /**
  * The kind of the channels the boss and the leaders build and manage.
  *
- * A `group` channel is a shared feed whose **members** decide who sees it: unlike the one
- * standing `public` channel every colleague belongs to, a group channel is visible to a
+ * A `group` channel is a shared feed whose **members** are its subscribers: unlike the one
+ * standing `public` channel every colleague subscribes to, a group channel is readable by a
  * session only when that session is one of its members (a boss, which runs the office, is
- * privy to all of them). Membership is stored in the channel record's `members` list —
- * sorted session ids, the same shape a direct channel carries — which is what keeps the
- * office from inventing a second roster table.
+ * privy to all of them), and a level posted there reaches only them. Writing needs no
+ * subscription — `office_post` reaches any channel the office holds — because a subscription
+ * is an address, not a permission. Membership is stored in the channel record's `members`
+ * list — sorted session ids, the same shape a direct channel carries — which is what keeps
+ * the office from inventing a second roster table.
  */
 const GROUP_CHANNEL_KIND = 'group'
 
@@ -1694,6 +1696,24 @@ function createOffice(ctx, domain, config, hooks) {
     if (channel.kind === GROUP_CHANNEL_KIND) return isBoss || channel.members.includes(sessionId)
     return true
   })
+
+  /**
+   * The channels one colleague subscribes to: the standing public channel, which holds every
+   * colleague, and every group channel that stores its session id.
+   *
+   * A subscription is what decides whether the colleague reads a channel and whether a level
+   * posted there reaches it. It is not a permission to write: any colleague writes to any
+   * channel the office holds. A direct channel is a conversation rather than a feed a colleague
+   * joins, so it is not reported as a subscription.
+   * @param sessionId - the subscribed colleague.
+   * @returns the channels it subscribes to, `#general` first.
+   */
+  const subscribedChannels = (sessionId) => listChannels()
+    .filter(channel => channel.kind === 'public'
+      || (channel.kind === GROUP_CHANNEL_KIND && channel.members.includes(sessionId)))
+    .sort((left, right) => (left.kind === right.kind
+      ? left.channelId.localeCompare(right.channelId)
+      : left.kind === 'public' ? -1 : 1))
 
   /**
    * Create one group channel: a shared feed whose members decide who reads it.
@@ -3695,6 +3715,7 @@ function createOffice(ctx, domain, config, hooks) {
     panelTick,
     listChannels,
     visibleChannels,
+    subscribedChannels,
     ensureChannel,
     createChannel,
     deleteChannel,
@@ -4837,8 +4858,10 @@ function createDoNotDisturbTool(agent, tool) {
  *
  * Every role holds it: a colleague cannot otherwise discover its peers at all, and the status
  * it reports is what makes "who is busy" and "who is waiting on what" answerable without
- * waking anybody. It is a query — it reads the registry and the office domain, and never
- * delivers, wakes, or cancels.
+ * waking anybody. Each colleague's channel subscriptions are part of that answer, because they
+ * are how a caller learns who reads a feed — and therefore who a level posted there reaches —
+ * without mistaking a subscription for a write permission. It is a query — it reads the
+ * registry and the office domain, and never delivers, wakes, or cancels.
  * @param tool - the caller's shared declaration helpers.
  * @returns the roster-status tool definition.
  */
@@ -4852,10 +4875,13 @@ function createColleaguesTool(tool) {
       + 'holds a turn it cannot finish until the account can be used again. A loaded colleague also reports '
       + 'its permission preset, the agent preset it is bound to with the number of tools it holds (`none` '
       + 'means it holds no preset tool at all, so it has no shell, files, or skills), and its model route; '
-      + 'each reports how many messages the office holds for it and when it last carried one. Never wakes '
-      + 'anybody. It also reports whether a colleague has set itself do-not-disturb, with the reason it '
-      + 'published: a message addressed to such a colleague is held rather than delivered, so a caller that '
-      + 'reads the roster knows why nothing will come back before it posts.',
+      + 'each reports how many messages the office holds for it and when it last carried one. Each also names '
+      + 'the channels it subscribes to — the standing public channel and the group channels that hold it — '
+      + 'which is what decides what it reads and whom a level posted there wakes. Writing is not gated by a '
+      + 'subscription, so a colleague may write into a channel it does not subscribe to and cannot read back. '
+      + 'Never wakes anybody. It also reports whether a colleague has set itself do-not-disturb, with the '
+      + 'reason it published: a message addressed to such a colleague is held rather than delivered, so a '
+      + 'caller that reads the roster knows why nothing will come back before it posts.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -4869,13 +4895,16 @@ function createColleaguesTool(tool) {
             items: {
               type: 'object',
               additionalProperties: false,
-              required: ['name', 'sessionId', 'role', 'status', 'pending', 'doNotDisturb'],
+              required: ['name', 'sessionId', 'role', 'status', 'channels', 'pending', 'doNotDisturb'],
               properties: {
                 name: { type: 'string' },
                 sessionId: { type: 'string' },
                 role: { type: 'string', enum: COLLEAGUE_ROLES },
                 description: { type: 'string' },
                 status: { type: 'string', enum: COLLEAGUE_STATUSES },
+                // The channels it subscribes to, by channel id: what it reads and what a level
+                // posted there wakes. Not a write permission; see the tool description.
+                channels: { type: 'array', items: { type: 'string' } },
                 permission: { type: 'string' },
                 agentPreset: { type: 'string' },
                 tools: { type: 'integer' },
@@ -4898,6 +4927,7 @@ function createColleaguesTool(tool) {
         if (value.colleagues.length === 0) return tool.text(`[${value.office}] No colleagues yet.`)
         const lines = value.colleagues.map((colleague) => {
           const details = [
+            `subscribes ${colleague.channels.map(channelId => `#${channelId}`).join(', ')}`,
             colleague.doNotDisturb === true
               ? 'do not disturb'
                 + `${colleague.doNotDisturbNote === undefined ? '' : ` (${colleague.doNotDisturbNote})`}`
@@ -4921,7 +4951,14 @@ function createColleaguesTool(tool) {
     },
     async execute(args) {
       const { office, name: officeName } = tool.entry(args, 'office_colleagues')
-      return { office: officeName, colleagues: await office.rosterStatus() }
+      // The subscriptions are composed here rather than inside `rosterStatus`, which the panel's
+      // snapshot also reads: that column draws the colleagues of one channel, so a subscription
+      // list is not a fact it shows.
+      const colleagues = (await office.rosterStatus()).map(colleague => ({
+        ...colleague,
+        channels: office.subscribedChannels(colleague.sessionId).map(channel => channel.channelId),
+      }))
+      return { office: officeName, colleagues }
     },
   }
 }
@@ -5015,7 +5052,7 @@ function createConfigureTool(tool) {
  *
  * Every role holds it: a colleague cannot take part in a channel it cannot find. The list is
  * what the session is actually allowed to read — the standing public channel, its own direct
- * channels, and the group channels its membership admits — so a refusal from `office_read`
+ * channels, and the group channels it subscribes to — so a refusal from `office_read`
  * later in the session cannot surprise it. A pure query: it wakes nobody.
  * @param agent - the agent whose scope receives the tool.
  * @param tool - the caller's shared declaration helpers.
@@ -5025,9 +5062,10 @@ function createChannelsTool(agent, tool) {
   return {
     name: 'office_channels',
     description:
-      'List the channels you can read: "#general", your direct channels, and every channel you are a member '
-      + 'of — a boss reads all of them. Each names its topic and members, and office_read addresses one by the '
-      + 'id reported here.',
+      'List the channels you can read: "#general", your direct channels, and every group channel you subscribe '
+      + 'to — a boss reads all of them. Each names its topic and members, and office_read addresses one by the '
+      + 'id reported here. A subscription is what admits you to this list and what a level posted there wakes; '
+      + 'office_post writes to any channel the office holds, subscribed or not.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -5645,7 +5683,8 @@ function createCommunicationTools(agent, tool) {
     definitions.push({
       name: 'office_post',
       description:
-        'Post to "#general" (the default) or to a group channel you are a member of. wake is required and '
+        'Post to "#general" (the default) or to any group channel the office holds: a subscription decides '
+        + 'who reads a channel and whom a level posted there wakes, never who may write. wake is required and '
         + 'decides who is woken; an empty list writes to the record without waking anyone, who can still read '
         + 'it with office_read. A level is scoped to the channel it is posted to, so a post inside a group '
         + 'channel wakes only that channel\'s own members among the colleagues the level reaches. '
@@ -5659,7 +5698,8 @@ function createCommunicationTools(agent, tool) {
       parameters: tool.parameters(['wake', 'text'], {
         channel: {
           type: 'string',
-          description: 'Channel to write to: "#general" (the default), or one you are a member of.',
+          description: 'Channel to write to: "#general" (the default), or any group channel the office holds. '
+            + 'Writing needs no subscription; a channel you do not subscribe to is written but not read back.',
         },
         wake: {
           type: 'array',
@@ -5687,7 +5727,12 @@ function createCommunicationTools(agent, tool) {
         // refused as such, whatever channel it was aimed at.
         const audience = await office.resolveWake(args?.wake, 'office_post', sender.sessionId)
         // The standing public channel keeps its spellings; anything else must name a channel the
-        // caller belongs to. Direct channels are office_dm's business, not a spelling of this.
+        // office holds. Direct channels are office_dm's business, not a spelling of this.
+        //
+        // A subscription is not a write permission: any colleague writes to any channel the office
+        // holds, member or not, because membership is what decides who reads a channel and whom a
+        // level posted there wakes. A writer outside the channel writes into a feed it cannot read
+        // back, which is why `office_colleagues` reports the subscriptions it does hold.
         const requested = typeof args?.channel === 'string' && args.channel.trim().length > 0
           ? args.channel.trim()
           : GENERAL_CHANNEL
@@ -5695,11 +5740,6 @@ function createCommunicationTools(agent, tool) {
         const channelId = isGeneral
           ? office.generalChannel
           : await resolveKnownChannel(office, sender, requested, 'office_post', { allowDirect: false })
-        const isBoss = tool.roleIn(resolved) === 'boss'
-        if (!isGeneral && !isBoss
-          && !office.visibleChannels(sender.sessionId, isBoss).some(channel => channel.channelId === channelId)) {
-          throw new Error('office_post: this session is not a member of that channel; the members decide who it holds')
-        }
         return toPostResult(await office.post({
           channel: channelId,
           sender,

@@ -4473,7 +4473,7 @@ await check('the reported model is the session selection, not the route the agen
   )
 })
 
-await check('the boss and the leaders manage channels, whose members decide who reads and who wakes', async () => {
+await check('channel membership is a subscription: it decides who reads and who wakes, never who writes', async () => {
   // A fresh office mounts into the shared harness, so the checks run on a roster of their own
   // while the one host keeps serving the routes the panel asks for.
   harness.ctx.fiber.entry.options.id = 'office_teams'
@@ -4540,7 +4540,8 @@ await check('the boss and the leaders manage channels, whose members decide who 
     'the boss is privy to every channel it manages',
   )
 
-  // The audience of a post is the channel's own members; the boss may write anywhere.
+  // The audience of a post is the channel's own subscribers, which is a scoping of the wake and
+  // not a gate on the write: anyone may write to any channel the office holds.
   await callBoss(chief, 'teams', 'office_channel_create', { name: 'wakecheck', members: ['mia'] })
   const before = [lea.sent.length, mia.sent.length]
   const broadcast = await callBoss(chief, 'teams', 'office_post', { channel: '#wakecheck', text: 'the release notes are ready', wake: ['$member'] })
@@ -4567,12 +4568,33 @@ await check('the boss and the leaders manage channels, whose members decide who 
   await assert.rejects(
     () => call(lea, 'office_read', { office: 'teams', channel: 'wakecheck' }),
     /not a channel this session is a member of/,
-    'a non-member is refused through any spelling it guesses',
+    'a non-member is refused a read through any spelling it guesses',
   )
-  await assert.rejects(
-    () => call(lea, 'office_post', { office: 'teams', channel: 'wakecheck', text: 'sneak post', wake: ['$member'] }),
-    /not a member of that channel/,
-    'and cannot reach the channel through writing either',
+  // The subscription decides the wake, never the write: a colleague writes into a feed it does
+  // not subscribe to, and cannot read back what it wrote.
+  const guest = await call(lea, 'office_post', {
+    office: 'teams',
+    channel: 'wakecheck',
+    text: 'a note from outside the channel',
+    wake: ['$member'],
+  })
+  assert.equal(guest.message.channelId, 'wakecheck', 'a non-subscriber writes to the channel it named')
+  assert.deepEqual(
+    guest.deliveries.map(entry => entry.colleague),
+    ['mia'],
+    'and the level is still scoped to that channel, so only its subscribers are woken',
+  )
+  const subscribed = await call(mia, 'office_colleagues', { office: 'teams' })
+  const channelsOf = (name) => subscribed.colleagues.find(entry => entry.name === name)?.channels
+  assert.deepEqual(
+    channelsOf('lea'),
+    ['general'],
+    'a colleague no group channel holds reports the standing feed alone',
+  )
+  assert.deepEqual(
+    channelsOf('mia'),
+    ['general', 'release-log', 'wakecheck'],
+    'and a subscriber reports the group channels that hold it, beside the standing feed',
   )
   const wildcard = await call(lea, 'office_read', { office: 'teams', channel: '*' })
   assert.ok(!wildcard.messages.some(message => message.messageId.startsWith('wakecheck-')),

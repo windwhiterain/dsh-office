@@ -93,7 +93,7 @@ switched afterwards is invisible in it.
 | `kind` | `public`, `group`, `dm`, or `mailbox`. |
 | `name` | The display name: the channel id for a `public` or `group` channel, `A ↔ B` for a direct channel. |
 | `topic` | A sentence describing the channel. |
-| `members` | The session ids of a direct channel, sorted; of a `group` channel, the colleagues that belong to it. Empty for `general` and `mailbox`. |
+| `members` | The session ids of a direct channel, sorted; of a `group` channel, its **subscribers** — the colleagues that read it and that a level posted there wakes. Empty for `general` and `mailbox`. |
 | `createdAt`, `nextSeq` | When the channel was created, and the next sequence number to allocate. |
 
 Two channels exist on activation: `general` (`kind: 'public'`) and `mailbox`
@@ -104,11 +104,14 @@ The **mailbox** kind exists beside `public` and `dm` so that the one channel eve
 refused is identifiable by kind rather than by name: `visibleChannels` filters on it, which is
 what keeps `office_read({ channel: '*' })` out of the user's mail.
 
-A **group** channel is one the boss or a leader created: it is a shared feed whose `members`
-decide who reads it and who a post there wakes, exactly as they do for a `dm` — a session sees a
-group channel only as one of its members, or as a boss that runs the office. Creating one refuses
-the two standing ids and the `dm-` idspace, so no created channel can shadow the office's own
-feeds or a direct channel.
+A **group** channel is one the boss or a leader created: it is a shared feed whose `members` decide
+who reads it and who a post there wakes, exactly as they do for a `dm` — a session sees a group
+channel only as one of its members, or as a boss that runs the office. The list is a
+**subscription**, so it decides reading and a level's reach and nothing else: any colleague writes
+to any channel the office holds, member or not, which is why the roster reports each colleague's
+subscriptions (`office_colleagues`) and no tool gates a write on them. Creating one refuses the two
+standing ids and the `dm-` idspace, so no created channel can shadow the office's own feeds or a
+direct channel.
 
 ### `messages`
 

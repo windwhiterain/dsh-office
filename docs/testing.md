@@ -72,8 +72,11 @@ What it covers, by area:
   `office_compact` while `channel: "*"` never reaches it.
 - **Group channels** — the `channels` capability per role, creating (and the reserved ids, the
   duplicates, and the unknown members it refuses), the membership-gated listings and reads, the
-  audience a post to a group channel wakes, membership edits, the panel routes that mirror them,
-  and a deletion taking its messages and its holds with it.
+  write that membership does not gate (a colleague posting into a channel it does not subscribe to,
+  while a level there still reaches only that channel's subscribers), the subscriptions
+  `office_colleagues` reports per colleague, the audience a post to a group channel wakes,
+  membership edits, the panel routes that mirror them, and a deletion taking its messages and its
+  holds with it.
 - **The idle notice** — the office asking its leaders once the last colleague stops, the audience it
   wakes (the row's `wake`: the leaders alone by default, and the rung it configures otherwise), the
   brake: a second idle transition with nothing new written sends nothing, and any new message

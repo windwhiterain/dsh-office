@@ -185,7 +185,9 @@ carries them: `officeArgument()`, `roleProperty()`, `descriptionProperty()`, and
 `notifyProperty()`. The `office` argument is the one worth watching, because a boss emits it in
 all eighteen tools.
 
-Measured with the literals concatenated the way the model receives them:
+Measured with the literals concatenated the way the model receives them, at that wording change —
+the figures are that comparison, not a claim about the current literals, which every later wording
+change moves again:
 
 | surface | before | after |
 |---|---:|---:|
@@ -426,12 +428,26 @@ the panel colors such a token only where it actually decided the wake (see
 ## Group channels and the `channels` capability
 
 Beside the standing `#general` and the mailbox, the boss and the leaders can build **group**
-channels: shared feeds whose stored `members` decide who may read them, who may write to them,
-and whom a post there wakes. A group channel is a `dm` with more than two people and a public
-name — the same membership record answers every question, `visibleChannels` is the same filter,
-and the wake audience is the same list. The boss is privy to every channel it manages, `#general`
-records no members because every colleague belongs to it, and the mailbox stays the one channel
-no colleague can read through a tool.
+channels: shared feeds whose stored `members` are their **subscribers** — the list that decides
+who may read them and whom a post there wakes. A group channel is a `dm` with more than two people
+and a public name — the same membership record answers both questions, `visibleChannels` is the
+same filter, and the wake audience is the same list. The boss is privy to every channel it
+manages, `#general` records no members because every colleague belongs to it, and the mailbox
+stays the one channel no colleague can read through a tool.
+
+**A subscription is not a permission to write.** `office_post` reaches any channel the office
+holds, whether or not the sender is one of its members, and the panel route already worked that
+way: the audience is derived from the `wake` argument and from the channel's membership, never
+from a right to address the channel at all. Gating the write on membership was the earlier rule,
+and it made two different questions one — "does this colleague read this feed?" and "may this
+colleague speak into it?" — with the second answering itself from the first. The consequence is
+deliberate: a colleague that writes outside its subscriptions writes into a feed it cannot read
+back, because reading is still gated, so a reply there reaches it only when it is subscribed or
+addressed by `office_dm`. `office_colleagues` therefore reports
+each colleague's subscriptions — `#general` and the group channels that hold it, never a direct
+channel, which is a conversation rather than a feed a colleague joins — because that is the fact a
+caller needs to know who a level posted somewhere will reach, and `office_channels` remains the
+caller's own readable list. A subscription is an address, exactly as a colleague's name is.
 
 The three management tools — `office_channel_create`, `office_channel_delete`, and
 `office_channel_members` — are the `channels` capability: the boss holds it because it runs the
