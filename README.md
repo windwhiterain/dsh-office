@@ -329,6 +329,27 @@ Releasing the state is what delivers: everything held goes into **the one turn t
 that released it**, exactly as a `turn-end` hold does, so a burst that arrived while the colleague
 was away costs one turn rather than one per message.
 
+**Speaking is releasing.** An `office_post` or an `office_dm` that the colleague makes itself ends
+its own state, and the result of that call says so — beside the mail that was waiting, which arrives
+in the turn that follows, exactly as an explicit release does:
+
+```text
+office_post  { "text": "back on the spec", "wake": [] }
+
+[office] Posted general-14 to general. No colleague was woken; the message waits in the office for
+office_read.
+Do not disturb is off: you are reachable again; 2 held message(s) arrive in the turn that follows
+this one.
+```
+
+A colleague that writes to the office again is reachable again; a state that outlived the message
+would be a colleague asking to be left alone while addressing the room. It also puts two acts in a
+deliberate order: telling the office you are going quiet is itself a post, so say it **before** you
+set the state, not after. The state is cleared **after** the message is stored, never before, so a
+call the office refuses — an unknown channel, a body past the message limit, a wake that matches no
+colleague — leaves the colleague exactly as it found it. And reading is not speaking:
+`office_read`, `office_colleagues`, and `office_read_notifications` all leave the state alone.
+
 The office's own [idle notice](#the-idle-notice) is a message like any other, so it is held too. An
 office whose whole audience has gone quiet asks once and then stops, because the question it asked
 is now the newest thing in the record and nothing new arms the next one — and the held question
@@ -809,11 +830,12 @@ panel's own periodic full read covers.
 - **The idle notice has no panel control.** `idleNotice` is configured on the office row, so
   switching it on means editing that row's config; the panel neither shows it nor edits it.
 - **Do not disturb is the colleague's own act, and nothing bounds what it holds.** The panel shows
-  the state and never sets it, and only the colleague itself can release it — no roster tool
-  silences one or brings one back. While it is set, everything addressed to that colleague
-  accumulates in the durable hold and arrives in one turn when it is released, so a colleague that
-  stays away for a long time comes back to a single large turn; the office neither expires the hold
-  nor reports the backlog anywhere but in the roster's held count.
+  the state and never sets it, and no roster tool silences a colleague or brings one back: ending it
+  takes that colleague's own call — `enabled: false`, or simply its next `office_post` or
+  `office_dm`. While it is set, everything addressed to that colleague accumulates in the durable
+  hold and arrives in one turn when it is released, so a colleague that stays away for a long time
+  comes back to a single large turn; the office neither expires the hold nor reports the backlog
+  anywhere but in the roster's held count.
 - **The quota wait is reported, never ended.** A colleague's `quota-retry` status is read from the
   row that owns it, `dsh-llm-quota-retry`, by service name — the office is third-party and imports
   nothing from the harness or from another plugin, so a deployment that composes no such row reports

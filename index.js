@@ -2571,7 +2571,7 @@ function createOffice(ctx, domain, config, hooks) {
    *   one the wake leaves behind. Only `office_dm` declares that field, so the projection in
    *   {@link toDeliveryResult} is what decides who sees it.
    */
-  const post = async ({
+  const writeMessage = async ({
     channel,
     sender,
     text,
@@ -2704,6 +2704,40 @@ function createOffice(ctx, domain, config, hooks) {
       }
     }
     return { message, deliveries }
+  }
+
+  /**
+   * Post one message and let the act of speaking end the sender's own do-not-disturb state.
+   *
+   * Speaking is participation: a colleague that writes to its colleagues is reachable again, and a
+   * state that outlived the message would be a colleague asking to be left alone while talking to
+   * the room. It is why announcing a quiet stretch and setting the state are two acts a colleague
+   * has to order itself — the announcement is itself a post.
+   *
+   * The state is cleared **after** the message is stored and delivered, never before: a call that
+   * is refused (an unknown channel, a body past the limit, a message that reaches nobody) must
+   * leave the colleague exactly as it found it, and a colleague made reachable by its own failed
+   * call would have been woken by an act that never happened.
+   *
+   * A sender that is not a session — the user posting from the panel, and the office's own idle
+   * notice — holds no state at all, so both take the path that has nothing to clear.
+   * @param request - the same request {@link writeMessage} takes; only its `sender` decides here.
+   * @returns the stored message and its deliveries, plus the released state when there was one:
+   *   the offices that held it and how much mail was waiting for the sender there.
+   */
+  const post = async (request) => {
+    const posted = await writeMessage(request)
+    const sessionId = request.sender?.sessionId
+    if (sessionId === undefined) return posted
+    const released = await clearDoNotDisturb(sessionId)
+    if (released.length === 0) return posted
+    return {
+      ...posted,
+      doNotDisturbReleased: {
+        offices: released.map(entry => entry.name),
+        held: heldAcross(released, sessionId),
+      },
+    }
   }
 
   /**
@@ -3763,6 +3797,17 @@ function officePostSchema(options = {}) {
           },
         },
       },
+      // Present only when this call ended the sender's own do-not-disturb state, which every
+      // `office_post` and `office_dm` a colleague makes does: see {@link createOffice}'s `post`.
+      doNotDisturbReleased: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['offices', 'held'],
+        properties: {
+          offices: { type: 'array', items: { type: 'string' } },
+          held: { type: 'integer' },
+        },
+      },
     },
   }
 }
@@ -3810,6 +3855,16 @@ function toPostResult(posted, officeName, options = {}) {
       text: posted.message.text,
     },
     deliveries: posted.deliveries.map(delivery => toDeliveryResult(delivery, options)),
+    // Named field by field like every other projection here, so a key added to the release later
+    // cannot reach a model by accident.
+    ...(posted.doNotDisturbReleased === undefined
+      ? {}
+      : {
+        doNotDisturbReleased: {
+          offices: posted.doNotDisturbReleased.offices,
+          held: posted.doNotDisturbReleased.held,
+        },
+      }),
   }
 }
 
@@ -3821,14 +3876,23 @@ function toPostResult(posted, officeName, options = {}) {
 function renderPostResult(value) {
   const destination = value.message.channelId === MAILBOX_CHANNEL ? "the user's mailbox" : value.message.channelId
   const head = `[${value.office}] Posted ${value.message.messageId} to ${destination}.`
+  // Speaking ends the sender's own do-not-disturb state, so the sender is told that here rather
+  // than left to find it in the roster: what it was holding arrives when this turn ends, which is
+  // the one thing its next step depends on.
+  const released = value.doNotDisturbReleased === undefined
+    ? ''
+    : '\nDo not disturb is off: you are reachable again'
+      + `${value.doNotDisturbReleased.held === 0
+        ? '.'
+        : `; ${String(value.doNotDisturbReleased.held)} held message(s) arrive in the turn that follows this one.`}`
   if (value.deliveries.length === 0) {
-    return `${head} No colleague was woken; the message waits in the office for office_read.`
+    return `${head} No colleague was woken; the message waits in the office for office_read.${released}`
   }
   const lines = value.deliveries
     .map(d => `- ${d.colleague}: ${d.status}${d.detail === undefined ? '' : ` (${d.detail})`}`
       + `${d.colleagueStatus === undefined ? '' : ` [colleague status: ${d.colleagueStatus}]`}`)
     .join('\n')
-  return `${head} Delivery:\n${lines}`
+  return `${head} Delivery:\n${lines}${released}`
 }
 
 /**
@@ -4058,6 +4122,47 @@ function findMountedOffice(wanted) {
   const key = nameKey(canonical)
   return [...mountedOffices.values()].find(entry => nameKey(entry.name) === key)
     ?? mountedOffices.get(canonical)
+}
+
+/**
+ * Every mounted office whose roster holds one session.
+ *
+ * The do-not-disturb state is the session's own, so it is written through the memberships rather
+ * than through the office one call resolved: a colleague that belongs to two offices and asked not
+ * to be disturbed means it in both. The roster is re-read at the call, exactly as every other tool
+ * re-reads the office it acts on, so a colleague adopted since is covered by its next call.
+ * @param sessionId - the session whose memberships to list.
+ * @returns the mounted offices that hold it, in mount order.
+ */
+function officesHolding(sessionId) {
+  return [...mountedOffices.values()]
+    .filter(entry => entry.office.colleagueBySession(sessionId) !== undefined)
+}
+
+/**
+ * Clear one session's do-not-disturb state in every office that has it set.
+ *
+ * Only the offices that actually hold the state are written, because the act of speaking runs this
+ * on every post while the state itself is rare: clearing nothing must not cost a durable write, and
+ * this write is what every reader of the roster sees.
+ * @param sessionId - the session that is reachable again.
+ * @returns the offices whose state was cleared, empty when none held one.
+ */
+async function clearDoNotDisturb(sessionId) {
+  const away = officesHolding(sessionId)
+    .filter(entry => entry.office.doNotDisturbOf(sessionId) !== undefined)
+  for (const entry of away) await entry.office.recordDoNotDisturb(sessionId, undefined)
+  return away
+}
+
+/**
+ * How many messages one session's offices are holding for it, across the offices named.
+ * @param offices - the mounted offices to count over.
+ * @param sessionId - the session whose holds to count.
+ * @returns the total number of held wakes.
+ */
+function heldAcross(offices, sessionId) {
+  return offices.reduce((total, entry) => total + entry.office.heldCount(sessionId), 0)
 }
 
 /**
@@ -4637,8 +4742,10 @@ function createDoNotDisturbTool(agent, tool) {
       + 'you, a level or a channel that reaches you, a private message, and the office\'s own idle notice are '
       + 'held rather than delivered, and each sender is told so — with the reason below — in the result of its '
       + 'own call. The hold is durable and it waits for you: releasing the state delivers everything it holds, '
-      + 'merged into the turn that follows this one, so nothing addressed to you is lost. Nothing else '
-      + 'changes: you keep your role and every office tool, and you may take what is held early with '
+      + 'merged into the turn that follows this one, so nothing addressed to you is lost. Speaking releases it '
+      + 'too — your next office_post or office_dm ends the state, and that result says so — so if you want to '
+      + 'tell the office you are going quiet, say it before you set this, not after. Nothing else changes: you '
+      + 'keep your role and every office tool, and you may take what is held early with '
       + 'office_read_notifications. It applies to every office that holds you at once. Set it while you work '
       + 'on something that must not be interrupted, and release it as soon as you are reachable.',
     parameters: {
@@ -4706,8 +4813,7 @@ function createDoNotDisturbTool(agent, tool) {
       // The write follows the membership rather than a resolved office: a colleague that is not on
       // any roster is refused here, because there would be no record to hold the state and because
       // nothing wakes such a session through the office anyway.
-      const holding = [...mountedOffices.values()]
-        .filter(entry => entry.office.colleagueBySession(sessionId) !== undefined)
+      const holding = officesHolding(sessionId)
       if (holding.length === 0) {
         throw new Error(`${name}: this session is on no office roster, so no office wakes it`)
       }
@@ -4720,7 +4826,7 @@ function createDoNotDisturbTool(agent, tool) {
         doNotDisturb: enabled,
         note,
         since: enabled ? at : undefined,
-        held: holding.reduce((total, entry) => total + entry.office.heldCount(sessionId), 0),
+        held: heldAcross(holding, sessionId),
       })
     },
   }

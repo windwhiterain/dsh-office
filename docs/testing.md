@@ -102,6 +102,13 @@ What it covers, by area:
   carries them, and the refusals are covered: a call that names no state, a state that is not a
   boolean, a note sent beside a release, and a note past the bound. A boss holds no such tool,
   because it is on no roster.
+- **How the state ends** — a colleague's own `office_post` clears it and reports the offices it
+  cleared with the mail that was waiting, which then arrives as the one turn following the turn that
+  spoke; a private message to the **user** does the same, on the one `office_dm` path that returns
+  before any delivery is attempted; a post the office refuses — past the message limit, or naming a
+  colleague that does not exist — releases nothing; a colleague that never set the state hears
+  nothing about one in its posts; and reading what is held leaves the state alone, so only the two
+  writing tools end it.
 - **The panel routes** — the state snapshot (roster, roles, mailbox, totals, the channel the feed
   asked for), the history page a folded row asks for, hire, configure, dismiss, and the connection
   policy each one applies. The snapshot's own token is covered by what it is for: a poll naming the

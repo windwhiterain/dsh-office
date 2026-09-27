@@ -1482,6 +1482,97 @@ await check('a colleague that sets do-not-disturb is not woken, and its senders 
   assert.notEqual(moved.payload.unchanged, true, 'releasing the state moves the token the panel holds')
 })
 
+await check('speaking ends the sender\'s own do-not-disturb state, and says what was waiting', async () => {
+  const talking = makeHarness({ officeName: 'talking' }, undefined, { rowId: 'office_talking' })
+  await talking.ready
+  const chief = talking.publish('session-talking-boss', { preset: 'office-boss' })
+  talking.titles.set('session-rhea', 'rhea')
+  talking.titles.set('session-sol', 'sol')
+  const rhea = talking.publish('session-rhea')
+  const sol = talking.publish('session-sol')
+  for (const sessionId of ['session-rhea', 'session-sol']) {
+    await callBoss(chief, 'talking', 'office_adopt', { session_id: sessionId })
+  }
+
+  const plain = await call(sol, 'office_post', { text: 'nothing to release', wake: [] })
+  assert.equal(
+    plain.doNotDisturbReleased,
+    undefined,
+    'a colleague that never set the state hears nothing about one',
+  )
+
+  rhea.status = 'running'
+  await call(rhea, 'office_do_not_disturb', { enabled: true, note: 'deep in the parser' })
+  await call(sol, 'office_post', { text: 'rhea, the spec moved', wake: ['@rhea'] })
+  await call(sol, 'office_dm', { wake: ['@rhea'], text: 'and a private word' })
+  assert.equal(
+    talking.tables.get('colleagues').get('session-rhea').doNotDisturb,
+    true,
+    'the state is set before the colleague speaks',
+  )
+
+  const spoke = await call(rhea, 'office_post', { text: 'spec ack, back at it', wake: [] })
+  assert.deepEqual(
+    spoke.doNotDisturbReleased,
+    { offices: ['talking'], held: 2 },
+    'the post reports the state it ended and how much mail was waiting for it',
+  )
+  assert.equal(
+    talking.tables.get('colleagues').get('session-rhea').doNotDisturb,
+    undefined,
+    'and the record is cleared, not marked false',
+  )
+
+  // What was held waits for the turn that released it to end: speaking does not splice the backlog
+  // into the turn that is speaking.
+  const before = rhea.sent.length
+  assert.equal(before, 0, 'nothing was delivered while the state was set')
+  await talking.setStatus('session-rhea', 'idle')
+  assert.equal(rhea.sent.length, before + 1)
+  assert.equal(rhea.sent.at(-1).message.source.batch, 2, 'and it arrives as the one turn that follows')
+
+  // The release is what makes the next message arrive, which is the part a colleague acts on.
+  const after = await call(sol, 'office_dm', { wake: ['@rhea'], text: 'good' })
+  assert.equal(after.deliveries[0].status, 'delivered', 'a colleague that spoke is woken again')
+})
+
+await check('only a message that was stored ends the state: mail to the user does, a refusal does not', async () => {
+  const paths = makeHarness({ officeName: 'paths' }, undefined, { rowId: 'office_paths' })
+  await paths.ready
+  const chief = paths.publish('session-paths-boss', { preset: 'office-boss' })
+  paths.titles.set('session-tam', 'tam')
+  const tam = paths.publish('session-tam')
+  await callBoss(chief, 'paths', 'office_adopt', { session_id: 'session-tam' })
+
+  tam.status = 'running'
+  await call(tam, 'office_do_not_disturb', { enabled: true })
+  const stored = () => paths.tables.get('colleagues').get('session-tam').doNotDisturb
+
+  // A call the office refuses is a call that never happened: a colleague made reachable by its own
+  // failed post would have been woken by an act that never reached the room.
+  await assert.rejects(
+    () => call(tam, 'office_post', { text: 'x'.repeat(20000), wake: [] }),
+    /the limit is/,
+  )
+  assert.equal(stored(), true, 'a post past the message limit releases nothing')
+  await assert.rejects(
+    () => call(tam, 'office_post', { text: 'to nobody', wake: ['@nobody'] }),
+    /does not match any colleague/,
+  )
+  assert.equal(stored(), true, 'nor does a wake that matches no colleague')
+
+  // Mail to the user is still the colleague speaking, and it is the one office_dm path that returns
+  // before any delivery is attempted.
+  const mailed = await call(tam, 'office_dm', { wake: ['@user'], text: 'blocked on the spec' })
+  assert.deepEqual(mailed.deliveries.map(entry => entry.status), ['mailbox'])
+  assert.deepEqual(
+    mailed.doNotDisturbReleased,
+    { offices: ['paths'], held: 0 },
+    'a private message to the user ends the state too',
+  )
+  assert.equal(paths.tables.get('colleagues').get('session-tam').doNotDisturb, undefined)
+})
+
 await check('a release hands over everything the state held, and the state never resumes the colleague', async () => {
   const held = makeHarness({ officeName: 'held' }, undefined, { rowId: 'office_held' })
   await held.ready
@@ -1501,6 +1592,11 @@ await check('a release hands over everything the state held, and the state never
   // does not take it away: it answers "do not wake me", not "do not tell me".
   const taken = await call(pia, 'office_read_notifications', {})
   assert.deepEqual(taken.notifications.map(notification => notification.text), ['first'])
+  assert.equal(
+    held.tables.get('colleagues').get('session-pia').doNotDisturb,
+    true,
+    'reading what is held is not speaking: only office_post and office_dm end the state',
+  )
   await call(quinn, 'office_post', { text: 'second', wake: ['@pia'] })
   await call(quinn, 'office_dm', { wake: ['@pia'], text: 'third' })
 

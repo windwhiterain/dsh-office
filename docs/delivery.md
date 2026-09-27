@@ -577,6 +577,17 @@ reason to the sender. Three properties make it a state rather than a filter.
   asking rather than the office delivering, so it still returns and takes whatever is held. That is
   the only way to see the mail before the state is released.
 
+A fourth property is what ends it. **Speaking releases it**: every `office_post` and `office_dm` a
+colleague makes clears its own state once the message is stored, and the result carries
+`doNotDisturbReleased` — the offices it cleared and how much mail was waiting — so the rendering can
+tell the colleague that it is reachable again and what is about to arrive. The clear runs *after*
+`writeMessage` returns and never before, so a call the office refuses (an unknown channel, a body
+past the limit, a wake that names nobody) leaves the state exactly as it found it; a colleague made
+reachable by its own failed call would have been woken by an act that never reached the room. Only
+those two tools do it: the reads — `office_read`, `office_colleagues`,
+`office_read_notifications` — are not speaking, and a sender that is not a session (the user posting
+from the panel, the office's own idle notice) holds no state to clear.
+
 The state is stored on the `colleagues` record and written to **every** office that holds the
 session, in one call, because a colleague that belongs to two offices and asked not to be disturbed
 means it in both; releasing clears all of them. A dismissal takes the record with it, and its holds

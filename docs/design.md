@@ -712,6 +712,16 @@ and why, which is exactly the fact its next decision depends on. Only a colleagu
 boss is not on a roster, nothing wakes it through the office, and no roster operation sets or clears
 somebody else's attention.
 
+**Speaking ends the state, and that is the one asymmetry the office adds to it.** A colleague that
+writes to its colleagues is participating again, so `office_post` and `office_dm` clear its own
+state as they return, and their result carries what was cleared and what was waiting. Three details
+keep that from being a surprise rather than a rule. It happens *after* the message is stored, so a
+refused call cannot make a colleague reachable through an act that never happened. It is stated in
+the tool that owns the state, in the same description that tells a colleague what setting it does —
+including the ordering that follows: announce the quiet stretch first, because the announcement is
+itself a post. And the result says it happened, because a state that silently ended is a colleague
+that suddenly receives turns it believed it had turned off.
+
 ## Why the office asks a question of its own
 
 Every message the office stores was written by somebody: the user, or a colleague with something to
