@@ -1451,6 +1451,49 @@ await check('office_read_notifications takes what is held for its own caller, mi
   )
 })
 
+await check('a leader reading its held mail is told the office it is reading it in', async () => {
+  const ticker = makeHarness({ officeName: 'ticker' })
+  await ticker.ready
+  const chief = ticker.publish('session-ticker-boss', { preset: 'office-boss' })
+  ticker.titles.set('session-ticker-boss', 'chief')
+  ticker.titles.set('session-ticker-lead', 'lead')
+  ticker.titles.set('session-ticker-hand', 'hand')
+  const lead = ticker.publish('session-ticker-lead')
+  const hand = ticker.publish('session-ticker-hand')
+  await callBoss(chief, 'ticker', 'office_adopt', { session_id: 'session-ticker-lead', role: 'leader' })
+  await callBoss(chief, 'ticker', 'office_adopt', { session_id: 'session-ticker-hand' })
+
+  // Both are mid-turn, so both read their own mail; the leader is handed the office as it is at
+  // the call, which is the office it is deciding in.
+  lead.status = 'running'
+  hand.status = 'running'
+  await callBoss(chief, 'ticker', 'office_post', { text: 'lead, this can wait', wake: ['@lead'], notify: 'turn-end' })
+  await callBoss(chief, 'ticker', 'office_post', { text: 'hand, this too', wake: ['@hand'], notify: 'turn-end' })
+
+  const read = await call(lead, 'office_read_notifications', {})
+  assert.equal(
+    read.parallelism,
+    'Office parallelism: 2/2 — 2 colleague(s) in the roster, 2 working.',
+    'the figure is read in the turn that asks for the mail',
+  )
+  const rendered = lead.tools.get('office_read_notifications').output.render({}, read)[0].text
+  assert.match(rendered, /Office parallelism: 2\/2 — 2 colleague\(s\) in the roster, 2 working\./)
+  assert.ok(
+    rendered.endsWith('(What you write yourself reaches only the user; only an office tool notifies a colleague.)'),
+    'the rule a frame ends with stays last',
+  )
+
+  const memberRead = await call(hand, 'office_read_notifications', {})
+  assert.deepEqual(
+    Object.keys(memberRead).sort(),
+    ['notifications', 'office'],
+    'a member is handed its mail and nothing about the office',
+  )
+  assert.ok(
+    !hand.tools.get('office_read_notifications').output.render({}, memberRead)[0].text.includes('Office parallelism'),
+  )
+})
+
 await check('a step-end wake held when the process stops is recovered after it restarts', async () => {
   const stopping = makeHarness({ officeName: 'stepping' }, undefined, { rowId: 'office_stepping' })
   await stopping.ready
@@ -1792,6 +1835,85 @@ await check('a delivery frame names the sender, the message, and the one rule it
     bob.tools.get('office_post').description,
     /Silence is the normal answer to a delivered message/,
     'the answering rules are in the tool that owns them',
+  )
+})
+
+await check('a leader is told how loaded the office is, and a member is not', async () => {
+  const floor = makeHarness({ officeName: 'load' })
+  await floor.ready
+  const chief = floor.publish('session-load-boss', { preset: 'office-boss' })
+  floor.titles.set('session-load-boss', 'chief')
+  for (const [sessionId, title] of [
+    ['session-load-lead', 'lead'],
+    ['session-load-hand', 'hand'],
+    ['session-load-away', 'away'],
+    ['session-load-plain', 'plain'],
+  ]) {
+    floor.titles.set(sessionId, title)
+  }
+  const lead = floor.publish('session-load-lead')
+  const hand = floor.publish('session-load-hand')
+  const away = floor.publish('session-load-away')
+  const plain = floor.publish('session-load-plain')
+  await callBoss(chief, 'load', 'office_adopt', { session_id: 'session-load-lead', role: 'leader' })
+  for (const sessionId of ['session-load-hand', 'session-load-away', 'session-load-plain']) {
+    await callBoss(chief, 'load', 'office_adopt', { session_id: sessionId })
+  }
+  // An unloaded colleague is still one of the office's people: it is counted in the roster, and it
+  // is not something the office can report as working.
+  floor.dispose(away)
+
+  // A leader that is idle is handed the message now, and reads the office as it was handed over.
+  hand.status = 'running'
+  await callBoss(chief, 'load', 'office_dm', { wake: ['@lead'], text: 'hand is on the parser' })
+  const first = lead.sent.at(-1).message.content[0].text
+  assert.match(
+    first,
+    /Office parallelism: 1\/4 — 4 colleague\(s\) in the roster, 1 working\./,
+    'the roster is everyone, and the working are the ones mid-turn',
+  )
+  assert.match(
+    first,
+    /\(What you write yourself reaches only the user; only an office tool notifies a colleague\.\)$/,
+    'the load line sits above the one rule a frame carries',
+  )
+
+  // The line is composed per frame rather than stored with the message or cached for the office:
+  // the same leader is told a different office a moment later, and the frame it already holds
+  // keeps the office it was written in.
+  lead.status = 'running'
+  await callBoss(chief, 'load', 'office_dm', { wake: ['@lead'], text: 'while you are working' })
+  assert.equal(lead.sent.at(-1).via, 'steer')
+  assert.match(
+    lead.sent.at(-1).message.content[0].text,
+    /Office parallelism: 2\/4 — 4 colleague\(s\) in the roster, 2 working\./,
+    'a leader reading a splice into its own turn is one of the working',
+  )
+  assert.match(first, /Office parallelism: 1\/4/, 'and the earlier frame is not rewritten')
+  assert.equal(floor.claim('session-load-lead').length, 1, 'the leader takes the splice at its next step')
+
+  // A burst held for the leader while it worked is handed over as one turn, which carries the line
+  // once rather than once per message.
+  await callBoss(chief, 'load', 'office_dm', { wake: ['@lead'], text: 'held one', notify: 'turn-end' })
+  await callBoss(chief, 'load', 'office_post', { wake: ['@lead'], text: 'held two', notify: 'turn-end' })
+  await floor.setStatus('session-load-lead', 'idle')
+  const merged = lead.sent.at(-1)
+  assert.equal(merged.via, 'followup')
+  assert.match(merged.message.content[0].text, /^\[office load \| 2 messages arrived while you were working\]/)
+  assert.equal(
+    merged.message.content[0].text.match(/Office parallelism/g).length,
+    1,
+    'the merged turn states the office once, however many messages it carries',
+  )
+  assert.match(merged.message.content[0].text, /Office parallelism: 1\/4 — 4 colleague\(s\) in the roster, 1 working\./)
+
+  // A member is told nothing about the office: its frame is the message it has to answer.
+  await callBoss(chief, 'load', 'office_dm', { wake: ['@plain'], text: 'plain, take a look' })
+  const memberFrame = plain.sent.at(-1).message.content[0].text
+  assert.match(memberFrame, /^\[office DM from colleague chief \| dm-\S+\]\n\nplain, take a look\n\n/)
+  assert.ok(
+    !memberFrame.includes('Office parallelism'),
+    'the office load is a leader\'s context, not a line every colleague reads',
   )
 })
 

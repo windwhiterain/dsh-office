@@ -117,6 +117,7 @@ carries it, so the surfaces are kept deliberately terse:
 | the delivery contract | `index.js`, `OFFICE_DELIVERY_CONTRACT`, a prompt section in each armed agent's scope | every request of every office session |
 | the onboarding turn | `index.js`, `greet()` | every request of a hired colleague, for the life of its history |
 | one line per delivery frame | `index.js`, `OFFICE_DELIVERY_NOTE` | every request that carries the frame, for the life of that history |
+| the load line, on a leader's frame | `index.js`, `parallelismLine` | every request that carries a leader's frame, for the life of that history |
 
 The split of responsibility is the rule that keeps them from growing back:
 
@@ -138,14 +139,15 @@ The split of responsibility is the rule that keeps them from growing back:
   rule would be paid on every later request. The role still decides the tool set; the turn only
   stops restating it.
 
-**A frame carries the message, the sender, and exactly one line — and that line is a measured
-exception to the rest of this section.** An earlier version of this budget moved every rule out of
-the frames and into the schema and the onboarding turn, on the argument that a frame is appended to
-the receiving colleague's history and re-sent with every later request. A colleague running a weak
-free model then read a delivered message, spent forty tool calls on the work, and wrote its answer
-as its own turn: the schema statement was in its request and it never reached for the tool, and the
-frame it had been handed said nothing about what a reply reaches. The lesson is worth keeping: a
-rule has to be where the model is when it acts, and the budget is not the only consideration.
+**A frame carries the message, the sender, and one line — two for a leader — and those lines are
+measured exceptions to the rest of this section.** An earlier version of this budget moved every
+rule out of the frames and into the schema and the onboarding turn, on the argument that a frame is
+appended to the receiving colleague's history and re-sent with every later request. A colleague
+running a weak free model then read a delivered message, spent forty tool calls on the work, and
+wrote its answer as its own turn: the schema statement was in its request and it never reached for
+the tool, and the frame it had been handed said nothing about what a reply reaches. The lesson is
+worth keeping: a rule has to be where the model is when it acts, and the budget is not the only
+consideration.
 
 So the frame states the single fact its next action depends on — what you write in your own turn is
 seen by the user alone, and only an office tool notifies a colleague — and the paragraph it used to
@@ -153,6 +155,17 @@ carry stays in standing context, stated once per request instead of once per mes
 incident is why the contract is a prompt section and not only a tool description: the description
 was already being sent, and a colleague reads a section as instruction rather than as documentation
 for a tool it is not currently reaching for.
+
+**A leader's frame also says how loaded the office is**, because a leader is the colleague whose
+next action is usually a decision about the office rather than about the message: how many of the
+office's people are mid-turn is the fact it would otherwise have to spend a call on
+`office_colleagues` to get. It is a line rather than a section for the reason above — the reader is
+holding the message when it decides — and it is taken fresh at each hand-over rather than cached or
+stored, so every frame states the office it was written in instead of a reading that could go stale
+in the history that keeps re-sending it. Only a leader is told, so the cost lands on the seat that
+reads it and not on every colleague's history: 66 characters for a single-digit roster, 70 for a
+two-digit one, plus the blank line it is joined with. The line is in
+[delivery.md](delivery.md#the-load-line).
 
 Shared parameters are declared once, by a builder, so a wording change lands in every tool that
 carries them: `officeArgument()`, `roleProperty()`, `descriptionProperty()`, and
@@ -170,6 +183,7 @@ Measured with the literals concatenated the way the model receives them:
 | a leader's onboarding turn | 2,248 | 857 |
 | the delivery contract, once per request | 0 | 323 |
 | one frame's rule tail | 396 | 90 |
+| the load line, on a leader's frame | 0 | 66 |
 
 The tool figures include 182 characters that moved *into* `office_post`. The frame tail came down
 from the full paragraph to the one line, so a colleague woken twenty times carries roughly 6,300

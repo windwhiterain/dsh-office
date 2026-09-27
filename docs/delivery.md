@@ -308,6 +308,37 @@ The frame carries **only** the messages it names. The office does not replay the
 wake and a colleague has no read position: `office_read` is how anyone sees what they were not
 notified about, which keeps a turn's cost proportional to the messages in it.
 
+### The load line
+
+A **leader**'s frame carries a second line, taken from the live registry as the frame is composed:
+
+```text
+[office #general from colleague carol | general-9]
+the build is green again
+
+Office parallelism: 2/5 — 5 colleague(s) in the roster, 2 working.
+
+(What you write yourself reaches only the user; only an office tool notifies a colleague.)
+```
+
+The figure is the office at the instant the office handed the turn over: five colleagues adopted,
+two of them mid-turn. It is taken **then** rather than when the message was written or held, so a
+message that waited for a turn to end states the office it was handed over in; and it is neither
+stored with the message nor cached on the office, so the next frame takes a fresh tally while the
+frame already written keeps the office it was written in. That is what makes it a snapshot rather
+than a reading — a leader re-reading an old frame sees the office as it was, which is why the line
+names the roster instead of claiming to be current.
+
+Only a leader is told. The figure is what a colleague deciding what the office does next reads,
+and a member's frame is the message it has to answer rather than a status board. The roster count
+is **every** colleague, loaded or not: a colleague whose session is not loaded cannot be at work,
+and it is still one of the office's people, so the reader is given both numbers rather than a
+ratio that hides which of the two it is.
+
+The line costs 66 characters for a single-digit roster and 70 for a two-digit one, and it is the
+only delivered text a frame adds besides its own rule line; the budget it belongs to is in
+[design.md](design.md#the-model-facing-text-budget).
+
 ## The answering rule
 
 Any caller can address the whole office with one level, and a colleague that answers every wake in
@@ -436,6 +467,9 @@ release is cut
 - **It is not a substitute for `office_read`.** A wake carries only what was addressed to the
   colleague, so a notification read this way is exactly that and no more; the channel record the
   colleague was not notified about is still read with `office_read`.
+- **A leader's read carries [the load line](#the-load-line).** The tool is held by every role, but
+  the figure is read at the call and reported only to a leader, because the reader is deciding in
+  the office it is reading about. The rest of the frame is what a delivery would have handed over.
 
 ## Delivery statuses
 

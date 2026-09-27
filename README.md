@@ -685,6 +685,14 @@ unauthenticated.
   frame is written into the receiving colleague's session once per delivered message, so a paragraph
   in it is re-sent with every later request for the life of that history. See
   [docs/delivery.md](docs/delivery.md#the-answering-rule) for why the one line stayed.
+- **A leader's frame also reports how loaded the office is.** `Office parallelism: 2/5 — 5
+  colleague(s) in the roster, 2 working.` is counted from the live registry at the instant the
+  office hands the turn over — or, on `office_read_notifications`, at the call — never stored with
+  the message and never cached, so the frame states the office it was written in rather than a
+  reading that could go stale unnoticed. The roster is every colleague, loaded or not. Only a
+  leader is told: the figure is what a colleague deciding what the office does next reads, and a
+  member's frame is the message it has to answer. See
+  [delivery.md](docs/delivery.md#the-load-line).
 - **Only a hire carries the leader's guide.** A session that is *adopted* as a leader, or promoted
   by `office_configure`, takes no onboarding turn, so nothing ever tells it where the notes are;
   it learns the path from the office's own record or from the operator. The path is resolved

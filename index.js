@@ -1122,14 +1122,15 @@ function channelLabel(message) {
 }
 
 /**
- * The one line every frame carries.
+ * The one line every frame carries, whatever else a frame adds.
  *
  * The office's rules for answering are standing context — {@link OFFICE_DELIVERY_CONTRACT} in the
  * prompt, and the answering rules in `office_post`'s description — because a frame is written into
  * the receiving colleague's session and re-sent with every later request for the life of that
  * history. This line is the exception, and it is one sentence rather than a paragraph: it is the
  * single fact the colleague's next action depends on, and the colleague reads it in the message it
- * was just handed.
+ * was just handed. A frame can carry one more line — the load line a leader is told, which is
+ * {@link parallelismLine} — and this one stays last, because it is the one the reader acts on.
  *
  * It replaced "Your reply stays in this session and reaches nobody", which was wrong in the way
  * that matters: the user does see the reply. A colleague told that nothing reaches anybody has no
@@ -1167,6 +1168,26 @@ const OFFICE_DELIVERY_SECTION = 'office:delivery'
 const OFFICE_DELIVERY_ORDER = 1650
 
 /**
+ * The line a frame carries about how loaded the office is, for the readers told it.
+ *
+ * It is a snapshot rather than a reading. The office takes the tally at the instant it composes
+ * the frame — when it hands the turn over, or when the reader takes its held mail — and the text
+ * then lives in that session's history, so a leader reading an old frame sees the office as it was
+ * when the frame was written. That is why the line names the roster instead of claiming to be the
+ * current state, and why {@link officeParallelism} is counted at the frame rather than cached.
+ *
+ * The tally is verbless on purpose. "1 of 1 colleagues are working" is what a sentence would have
+ * to say, and a grammatical fault in a line every delivery repeats is worse than a fragment.
+ * @param parallelism - how many colleagues are mid-turn, and how many the roster holds.
+ * @returns the model-visible line.
+ */
+function parallelismLine(parallelism) {
+  const { working, total } = parallelism
+  return `Office parallelism: ${String(working)}/${String(total)} — ${String(total)} colleague(s) `
+    + `in the roster, ${String(working)} working.`
+}
+
+/**
  * Compose the model-visible framing of one delivered office message.
  *
  * The frame names the sender as a colleague or as the user, the destination, and the message
@@ -1179,9 +1200,10 @@ const OFFICE_DELIVERY_ORDER = 1650
  * @param message - the stored message record that triggered the wake.
  * @param newestSeq - the channel's newest sequence when this turn was queued, when known.
  * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
+ * @param parallelism - the office's load line, when this reader is told it.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameDelivery(message, newestSeq, userName) {
+function frameDelivery(message, newestSeq, userName, parallelism) {
   const freshness = newestSeq === undefined || newestSeq <= message.seq
     ? undefined
     : `(${channelLabel(message)} had already reached ${message.channelId}-${String(newestSeq)} when this turn was queued; newer messages are not in it.)`
@@ -1189,6 +1211,7 @@ function frameDelivery(message, newestSeq, userName) {
     `[office ${whereOf(message, userName)} | ${message.messageId}]`,
     message.text,
     freshness,
+    parallelism,
     OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined)
     .join('\n\n')
@@ -1206,10 +1229,11 @@ function frameDelivery(message, newestSeq, userName) {
  * @param messages - the batched messages, oldest first.
  * @param newestSeq - the newest sequence of the last message's channel, when known.
  * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
+ * @param parallelism - the office's load line, when this reader is told it.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameBatch(officeName, messages, newestSeq, userName) {
-  if (messages.length === 1) return frameDelivery(messages[0], newestSeq, userName)
+function frameBatch(officeName, messages, newestSeq, userName, parallelism) {
+  if (messages.length === 1) return frameDelivery(messages[0], newestSeq, userName, parallelism)
   const last = messages.at(-1)
   const freshness = newestSeq === undefined || newestSeq <= last.seq
     ? undefined
@@ -1218,6 +1242,7 @@ function frameBatch(officeName, messages, newestSeq, userName) {
     `[office ${officeName} | ${String(messages.length)} messages arrived while you were working]`,
     ...messages.map(message => `[office ${whereOf(message, userName)} | ${message.messageId}]\n${message.text}`),
     freshness,
+    parallelism,
     OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined).join('\n\n')
 }
@@ -1234,9 +1259,10 @@ function frameBatch(officeName, messages, newestSeq, userName) {
  * @param officeName - the office the notifications came from.
  * @param notifications - the read notifications, oldest first, as the tool reported them.
  * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
+ * @param parallelism - the office's load line, when this reader is told it.
  * @returns the framed text of the tool result.
  */
-function frameNotifications(officeName, notifications, userName) {
+function frameNotifications(officeName, notifications, userName, parallelism) {
   const headline = notifications.length === 1
     ? '1 notification was held for you, read here on request:'
     : `${String(notifications.length)} notifications were held for you, read here on request:`
@@ -1246,7 +1272,9 @@ function frameNotifications(officeName, notifications, userName) {
       : ''
     return `[office ${whereOf(notification, userName)} | ${notification.messageId}]${held}\n${notification.text}`
   })
-  return [ `[office ${officeName}] ${headline}`, ...frames, OFFICE_DELIVERY_NOTE ].join('\n\n')
+  return [ `[office ${officeName}] ${headline}`, ...frames, parallelism, OFFICE_DELIVERY_NOTE ]
+    .filter(line => line !== undefined)
+    .join('\n\n')
 }
 
 /** Distinguishing short form of a session id, for an unnamed sender in a transcript. */
@@ -1681,16 +1709,21 @@ function createOffice(ctx, domain, config, hooks) {
    * single delivery; every message keeps its own header inside the body.
    * @param batch - the batched messages, oldest first.
    * @param newestSeq - the newest sequence of the last message's channel, when known.
+   * @param recipient - the colleague the turn is for, whose role decides whether the frame also
+   *   carries the office's load line.
    * @param sourceKind - the kind the payload's source claims: {@link OFFICE_MESSAGE_KIND} for a
    *   delivery that opens a turn, {@link STEERED_MESSAGE_KIND} for a splice into a running one.
    * @returns the message payload to hand to the colleague's session.
    */
-  const batchPayload = (batch, newestSeq, sourceKind = OFFICE_MESSAGE_KIND) => {
+  const batchPayload = (batch, newestSeq, recipient, sourceKind = OFFICE_MESSAGE_KIND) => {
     const newest = batch.at(-1)
+    // The line is composed here — at the moment the office hands the turn over — rather than when
+    // the message was written or held, and never stored: see {@link parallelismLine}.
+    const parallelism = parallelismFor(recipient?.role)
     return {
       id: wakeIdOf(newest),
       role: 'user',
-      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, config.userName) }],
+      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, config.userName, parallelism) }],
       // Every field here reaches the session log, which is JSON, and the harness rejects a
       // value JSON cannot round-trip — `undefined` among them. A message the user posted
       // from the panel has no sender session, so that field must be absent rather than present
@@ -1732,7 +1765,7 @@ function createOffice(ctx, domain, config, hooks) {
   /** Release one colleague's held wakes: the records go only after their turn is queued. */
   const releaseWakes = async (sessionId, held, agent) => {
     const colleague = colleagueBySession(sessionId)
-    agent.followup(batchPayload(held.map(entry => entry.message), undefined))
+    agent.followup(batchPayload(held.map(entry => entry.message), undefined, colleague))
     for (const entry of held) await recordReleased(entry, sessionId, held.length)
   }
 
@@ -1914,7 +1947,7 @@ function createOffice(ctx, domain, config, hooks) {
     const agent = await ensureAgent(colleague.sessionId)
     if (agent.status !== 'idle' && notify === NOTIFY_STEP_END) {
       await holdWake(colleague.sessionId, message, NOTIFY_STEP_END)
-      agent.steer(batchPayload([message], undefined, STEERED_MESSAGE_KIND))
+      agent.steer(batchPayload([message], undefined, colleague, STEERED_MESSAGE_KIND))
       await recordDelivery(key, colleague.sessionId, {
         status: 'steered',
         at: Date.now(),
@@ -1934,7 +1967,7 @@ function createOffice(ctx, domain, config, hooks) {
     const held = await recoverStepEndWakes(colleague.sessionId, heldWakes(colleague.sessionId), agent)
     const batch = [...held.map(entry => entry.message), message]
     const newest = readMessages(message.channelId, 1).at(-1)
-    agent.followup(batchPayload(batch, newest?.seq))
+    agent.followup(batchPayload(batch, newest?.seq, colleague))
     for (const entry of held) await recordReleased(entry, colleague.sessionId, batch.length)
     await recordDelivery(key, colleague.sessionId, {
       status: 'delivered',
@@ -2334,6 +2367,40 @@ function createOffice(ctx, domain, config, hooks) {
 
   /** The live agent of one session, or undefined when that session is not loaded. */
   const liveAgent = (sessionId) => ctx.agents.get(sessionId)
+
+  /**
+   * How loaded the office is at this instant: how many colleagues of the roster are mid-turn.
+   *
+   * "Working" is read from the live registry, because it is a property of a running session and of
+   * nothing the office stores: a colleague whose session is not loaded cannot be at work, and it
+   * is still one of the people the office holds. The roster count is therefore every colleague,
+   * loaded or not, and a reader of the line is told both numbers rather than a ratio that hides
+   * which of the two it is.
+   * @returns how many colleagues are running a turn, and how many the roster holds.
+   */
+  const officeParallelism = () => {
+    let working = 0
+    let total = 0
+    for (const [sessionId] of colleagues.entries()) {
+      total += 1
+      if (liveAgent(sessionId)?.status === 'running') working += 1
+    }
+    return { working, total }
+  }
+
+  /**
+   * The load line one reader's frame carries, or undefined when that reader is told nothing.
+   *
+   * Only a leader is told, because the figure is what a colleague deciding what the office does
+   * next reads, and a member's frame is the message it has to answer rather than a status board.
+   * The tally is taken per frame and never cached, so the reader sees the office as it was when
+   * the office handed the turn over.
+   * @param role - the recipient's stored role, in this office.
+   * @returns the model-visible line, or undefined.
+   */
+  const parallelismFor = (role) => (canonicalRole(role) === ROLE_LEADER
+    ? parallelismLine(officeParallelism())
+    : undefined)
 
   /**
    * The roster with each colleague's live status, for the roster tools and the panel.
@@ -2762,6 +2829,7 @@ function createOffice(ctx, domain, config, hooks) {
     configure,
     applyRolePermission,
     rosterStatus,
+    parallelismFor,
     liveAgent,
     dismiss,
     rename,
@@ -4340,6 +4408,10 @@ function createNotificationsTool(agent, tool, userName) {
         required: ['office', 'notifications'],
         properties: {
           office: { type: 'string' },
+          // The office's load line, present only for a leader and only when something was held:
+          // the render below puts it in the frame rather than leaving it as a separate fact beside
+          // it, because what the reader is handed is one piece of mail, not a status report.
+          parallelism: { type: 'string' },
           notifications: {
             type: 'array',
             items: {
@@ -4364,7 +4436,7 @@ function createNotificationsTool(agent, tool, userName) {
       },
       render: (_args, value) => (value.notifications.length === 0
         ? text(`[office ${value.office}] Nothing was held for you.`)
-        : text(frameNotifications(value.office, value.notifications, userName))),
+        : text(frameNotifications(value.office, value.notifications, userName, value.parallelism))),
     },
     async execute(args) {
       const resolved = tool.entry(args, name)
@@ -4373,8 +4445,11 @@ function createNotificationsTool(agent, tool, userName) {
       // The caller is executing a tool inside its own turn, so its agent is live: the handle is
       // read rather than resumed, because taking a hold must never be what loads a session.
       const taken = await office.takeWakes(sender.sessionId, office.liveAgent(sender.sessionId))
-      return {
+      return compact({
         office: officeName,
+        // Read at the call, so the figure is the office the leader is reading its mail in; an
+        // empty read carries none, because the render hands back a sentence and no frame.
+        parallelism: taken.length === 0 ? undefined : office.parallelismFor(tool.roleIn(resolved)),
         notifications: taken.map(({ message, stepEnd }) => compact({
           messageId: message.messageId,
           channelId: message.channelId,
@@ -4386,7 +4461,7 @@ function createNotificationsTool(agent, tool, userName) {
           notify: stepEnd ? NOTIFY_STEP_END : NOTIFY_TURN_END,
           text: message.text,
         })),
-      }
+      })
     },
   }
 }

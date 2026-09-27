@@ -39,10 +39,14 @@ What it covers, by area:
   as an in-turn message, `office-message` on the turn it draws as a trigger), `turn-end` merging a
   burst into one turn, a durable hold surviving a simulated restart, cold resume on the route the
   session last logged, delivery statuses, and the frames, which name the sender as a colleague or as
-  the user and carry the one delivery line. A `step-end` wake is covered too: the steer into a
-  running turn, the hold released when the harness claims the message, the recovery of a wake
-  nothing claimed (still pending, discarded, or carried across a restart), and the hold deleted with
-  a deleted channel. Every cold resume the suite performs is also checked for its **owning context**:
+  the user and carry the one delivery line. A **leader's frame** also carries the office's load line:
+  the tally counted at each hand-over rather than stored or cached, an unloaded colleague counted in
+  the roster and never among the working, the leader reading a splice into its own turn counted in
+  it, a member's frame carrying no line, a merged turn stating it once, and the same line on
+  `office_read_notifications` for a leader and not for a member. A `step-end` wake is covered too: the
+  steer into a running turn, the hold released when the harness claims the message, the recovery of a
+  wake nothing claimed (still pending, discarded, or carried across a restart), and the hold deleted
+  with a deleted channel. Every cold resume the suite performs is also checked for its **owning context**:
   the fakes accept a resume only on the process context (`ctx.root`) and refuse one on an office row,
   because a row-owned colleague is what a plugin reload would dispose mid-turn.
 - **`office_read_notifications`** — taking a steered and a held notification in one read, the inbox
