@@ -272,10 +272,10 @@ const DEFAULT_IDLE_NOTICE = {
   enabled: false,
   channel: GENERAL_CHANNEL,
   wake: [`${WAKE_LEVEL_TRIGGER}${ROLE_LEADER}`],
-  text: 'The office is idle. Leaders, decide what happens next — post the work and who takes it, '
-    + 'waking whoever it concerns. If nothing should happen, answer nothing: the office asks again '
-    + 'only after something new is written.',
-}
+  text:
+    "The office is idle. Leaders, decide what happens next — post the work and who takes it, " +
+    "waking whoever it concerns. If nothing should happen, ask user whats next",
+};
 
 /** The one record the `notices` table holds: the idle notice the office sent last. */
 const IDLE_NOTICE_KEY = 'idle'
