@@ -156,6 +156,7 @@ once.
 | `office_interrupt` | — | yes | — |
 | `office_compact`, `office_configure` | — | yes | — |
 | `office_channel_create`, `office_channel_delete`, `office_channel_members` | — | yes | — |
+| `ask_user_question` (the harness's own tool, not the office's) | — | yes | — |
 
 The boss holds everything, because it runs the office. A colleague's tool set is the **union**
 of the roles it holds across the offices that adopted it, and every gated tool re-checks the
@@ -184,6 +185,28 @@ is your own act, and the roster reports each colleague's effective permission so
 visible rather than assumed. If your deployment's preset table has no entry for a mapped name,
 the hire or configure is **refused** rather than storing a role whose restriction cannot be
 enforced.
+
+**Which roles may ask the user a blocking question.** A colleague's session inherits the harness's
+own tools from its preset, and one of them — `ask_user_question` — pauses the turn until a human
+answers it. A colleague's turn is started by a delivered message and you are reading the office
+rather than that colleague's Chat, so a question asked inside it waits for a human who is not in the
+room. The office row's `askUserRoles` is therefore the list of roles whose sessions **keep** that
+tool:
+
+```yaml
+askUserRoles:
+  - leader                   # the default
+```
+
+Every other role asks by `office_dm` to your name, which writes the question to your mailbox where
+nothing blocks on it; listing all three roles keeps the tool everywhere, and an empty list takes it
+from every colleague. The list is a list of *withdrawals*, not of grants: the office never mounts the
+tool, so a role listed here in an office whose preset carries no `tool-ask-user` still holds none.
+Across offices the lists vote as a union, the way the roles' capabilities do — a colleague keeps the
+tool as soon as one office that adopted it lists the role it holds there, and loses it only when
+every one of them leaves the role out. A boss is not in the list and cannot be: it runs the office,
+and which global tools its own preset gives it is that preset's business. An entry that names no
+predefined colleague role is **refused** at activation rather than ignored.
 
 Details, including how a stale stored role migrates and why the two axes are separate, are in
 [docs/design.md](docs/design.md).
@@ -291,12 +314,15 @@ Installed into every colleague's session, and into a session the moment it is ad
 | `office_compact` | — | yes | — |
 | `office_configure` | — | yes | — |
 | `office_channel_create`, `office_channel_delete`, `office_channel_members` | — | yes | — |
+| `ask_user_question` (the harness's own tool, which the office withdraws) | — | yes | — |
 
 ### Installation lifetime
 
 The host installs each agent's set once, reinstalls it when a role change moves that agent to a
-different set, and withdraws it when the agent holds no office role at all. Nothing else installs
-or withdraws anything: an office mounting or unmounting, and a roster gaining, losing, or
+different set, and withdraws it when the agent holds no office role at all. The withdrawal of the
+harness's `ask_user_question` is part of that set: it is installed with the office tools and lifted
+with them, so dismissing a colleague hands the session back its own preset's tools. Nothing else
+installs or withdraws anything: an office mounting or unmounting, and a roster gaining, losing, or
 re-roling a session, each only ask the host to bring the affected agents back in line.
 
 ### Result shape
@@ -420,6 +446,7 @@ refused, not ignored.
 | `bossPreset` | `"office-boss"` | Agent preset id whose sessions are this office's boss. |
 | `userName` | `"user"` | The name that reaches **you**: `office_dm({ wake: ["@user"] })`, `@…` in a post, and the sender name the panel posts under. Any script. |
 | `rolePermissions` | `{ consultant: read-only }` | Role → session permission preset. A role absent from the map keeps its session's own permission, and a name your deployment does not define is refused. |
+| `askUserRoles` | `["leader"]` | Roles whose sessions **keep** the harness's `ask_user_question`. Every other role asks the user with `office_dm`, which reaches the mailbox instead of holding its turn open. The list withdraws rather than grants: an office whose preset mounts no such tool still gives none. Across offices the lists vote as a union, and a `boss` is not one of the roles — its preset decides its globals. An entry that names no predefined colleague role is refused. |
 | `maxMessageChars` | `16384` | Maximum length of one message body. |
 | `wakesEnabled` | `true` | When false, messages are stored and no session is ever woken. |
 | `idleNotice` | `{ enabled: false, channel: "general", wake: ["#leader"] }` | The office's own question, asked when the whole roster has stopped and something was written since the office last asked; see [The idle notice](#the-idle-notice). `enabled` opts in per office, `channel` is where the question is posted, `wake` is who is asked — the same spellings `office_post` takes, and the leaders by default — and `text` is its body. The mailbox and the `dm-` idspace are refused, an unknown key inside the object is refused, and a `wake` that could reach nobody is refused rather than stored: an enabled notice that asks nothing of anyone is a mistake, not a setting. |

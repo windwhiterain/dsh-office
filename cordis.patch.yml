@@ -42,6 +42,16 @@
         # here is left alone, and an override of this row must restate this whole map.
         rolePermissions:
           consultant: read-only
+        # The roles whose sessions keep the harness's own `ask_user_question`. A colleague's turn
+        # is started by a delivered message rather than by a person, so a question asked inside it
+        # waits for a human who is not in that Chat; every other role asks the user with
+        # `office_dm`, which reaches the mailbox and holds no turn open. The list withdraws the
+        # tool rather than granting it, so it does nothing in a deployment whose presets mount no
+        # `tool-ask-user`. Writing all three roles keeps it everywhere, and an empty list takes it
+        # from every colleague; a boss is not one of the roles, because its own preset decides its
+        # globals.
+        askUserRoles:
+          - leader
 
     - id: preset-office-boss
       name: '@deepseek-ai/dsh-agent-preset'

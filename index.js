@@ -342,6 +342,15 @@ function notifyProperty() {
 }
 
 /**
+ * The harness's own blocking question tool.
+ *
+ * Named here because the office WITHDRAWS it rather than registers it: the schema, the UI that
+ * renders it, and the answerer behind it are the harness's, and the only thing this plugin owns
+ * about the tool is the name a colleague's scope has to lose. See {@link keepsAskUserTool}.
+ */
+const ASK_USER_TOOL = 'ask_user_question'
+
+/**
  * Deployment defaults for the office HOST row.
  *
  * The host owns everything that exists once per deployment rather than once per office:
@@ -362,6 +371,10 @@ const DEFAULT_OFFICE_CONFIG = {
   userName: 'user',
   bossPreset: 'office-boss',
   rolePermissions: { ...DEFAULT_ROLE_PERMISSIONS },
+  // The leaders keep the harness's blocking question tool by default, because a leader is the
+  // colleague expected to decide something with the user; every other role's question belongs in
+  // the user's mailbox, where it does not hold a turn open. See {@link keepsAskUserTool}.
+  askUserRoles: [ROLE_LEADER],
   idleNotice: { ...DEFAULT_IDLE_NOTICE },
   // Both are listed so the unknown-key check accepts them, and neither carries a value here.
   // They are the two halves of an office's identity: `officeName` is the name people and the
@@ -753,6 +766,26 @@ function resolveRowConfig(raw, defaults, label, rowId) {
     mapping[role] = preset.trim()
   }
   config.rolePermissions = mapping
+  // Which roles keep the harness's own question tool. A name that is not a predefined colleague
+  // role is refused rather than ignored: `boss` in particular is not a colleague role, and a boss
+  // session holds whatever globals its own preset gives it, which no office row decides. The list
+  // is a set, so a role repeated in it means nothing more than the role.
+  const askUserRoles = config.askUserRoles
+  if (!Array.isArray(askUserRoles)) {
+    throw new TypeError(
+      `dsh-office: config.askUserRoles must be an array of roles, got ${JSON.stringify(askUserRoles)}`,
+    )
+  }
+  for (const role of askUserRoles) {
+    if (!COLLEAGUE_ROLES.includes(role)) {
+      throw new TypeError(
+        `dsh-office: config.askUserRoles names no predefined colleague role: ${JSON.stringify(role)}; `
+        + `it takes ${COLLEAGUE_ROLES.join(', ')}. A boss is not one of them: its preset decides which `
+        + 'global tools it holds.',
+      )
+    }
+  }
+  config.askUserRoles = [...new Set(askUserRoles)]
   // The idle notice is one object rather than three fields, because its keys only mean anything
   // together: a notice with no channel or no body is not a notice. An object that names only some
   // of them completes against the defaults, and an unknown key is refused for the same reason a
@@ -4508,18 +4541,50 @@ function createOfficeTools(agent, host) {
 }
 
 /**
+ * Whether the harness's blocking question tool stays with one armed agent.
+ *
+ * `ask_user_question` is the harness's, not the office's: a preset mounts it, and the office only
+ * ever decides whether to withdraw it from the session it arms. The reason it must decide is the
+ * same reason the harness refuses the tool to an agent owned by another agent — a caller with
+ * nobody at the keyboard can only block on an answer that never comes. A colleague's turn is
+ * started by a delivered message, and the user is reading the office, not that colleague's Chat,
+ * so a question asked inside the turn waits for a human who is not in the room. A question the
+ * user should answer belongs in the mailbox, which `office_dm` reaches and nothing blocks on.
+ *
+ * `askUserRoles` is the list of roles an office LEAVES the tool with: the office never grants it,
+ * so a role listed in an office whose preset mounts no such tool still holds none. The mounted
+ * offices vote as a union, the way their capabilities already do — a colleague keeps the tool as
+ * soon as one office that adopted it lists the role it holds there, and loses it only when every
+ * one of them leaves it out. A boss is untouched: it runs the office, and the globals it holds
+ * are its own preset's business.
+ * @param agent - the agent whose scope is being armed.
+ * @returns whether the tool stays with this agent.
+ */
+function keepsAskUserTool(agent) {
+  const acting = actingOffices(agent)
+  if (acting.role === 'boss') return true
+  return acting.offices.some(entry => entry.config.askUserRoles.includes(roleInOffice(agent, entry)))
+}
+
+/**
  * The signature of the office tool set one agent holds.
  *
- * A tool set is a function of the acting role and the capabilities the agent's roles hold, so
- * this is what {@link syncOfficeTools} compares to notice that a roster change moved an
- * agent to a different set. `undefined` means the agent holds no office role at all.
+ * A tool set is a function of the acting role, the capabilities the agent's roles hold, and the
+ * one harness tool the office may withdraw ({@link keepsAskUserTool}), so this is what
+ * {@link syncOfficeTools} compares to notice that a roster change moved an agent to a different
+ * set. `undefined` means the agent holds no office role at all.
+ *
+ * The question tool is part of the signature even where a role change already moves the
+ * capabilities: `member` and `consultant` hold the same office capabilities and differ only in the
+ * session permission they run under, so a signature built from capabilities alone could not say
+ * whether the two owe different globals.
  * @param agent - the agent whose set is described.
  * @returns the signature, or undefined when the agent holds no office tool.
  */
 function officeToolSignature(agent) {
   const acting = actingOffices(agent)
   if (acting.offices.length === 0) return undefined
-  return `${acting.role}:${[...acting.capabilities].sort().join(',')}`
+  return `${acting.role}:${[...acting.capabilities].sort().join(',')}:${keepsAskUserTool(agent) ? 'ask' : 'no-ask'}`
 }
 
 /**
@@ -4536,6 +4601,14 @@ function officeToolSignature(agent) {
  * it is the same fact: an agent that holds office tools is one the office talks to. `inject` is
  * what scopes the section to this agent and what makes a late-activating `systemPrompt` still
  * receive it; a deployment without that service arms the tools and contributes no prompt text.
+ *
+ * The harness's question tool is WITHDRAWN here rather than registered, and withdrawn with the
+ * same disposers, so a colleague's globals follow its role exactly as its office tools do.
+ * `restrict()` filters what a scope inherits — its preset's and the deployment's tools — and never
+ * what that scope registers itself, which is why the office's own registrations above survive it.
+ * The tool is only withdrawn where the agent actually holds it: a deployment that mounts no
+ * `tool-ask-user` has no such name, and asking the scope is how this plugin reads that fact instead
+ * of depending on the harness's error text.
  * @param agent - the agent to arm.
  */
 function installOfficeTools(agent) {
@@ -4548,6 +4621,9 @@ function installOfficeTools(agent) {
   if (signature === undefined) return
   const definitions = createOfficeTools(agent, officeHost) ?? []
   const disposers = definitions.map(definition => agent.ctx.tools.register(definition))
+  if (!keepsAskUserTool(agent) && agent.ctx.tools.get(ASK_USER_TOOL, agent) !== undefined) {
+    disposers.push(agent.ctx.tools.restrict({ deny: [ASK_USER_TOOL] }))
+  }
   const promptFiber = agent.ctx.inject(['systemPrompt'], (runtimeCtx) => {
     runtimeCtx.systemPrompt.section({
       name: OFFICE_DELIVERY_SECTION,

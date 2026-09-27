@@ -23,8 +23,10 @@ What it covers, by area:
   operator's comments preserved.
 - **Roles** — the tool set each predefined role holds, the union across two memberships and the
   per-call capability check that narrows it, a role change withdrawing tools from the live
-  session, the `rolePermissions` map and its fail-closed refusal, and the migration of a stored
-  role that is no longer predefined.
+  session, the `rolePermissions` map and its fail-closed refusal, the migration of a stored
+  role that is no longer predefined, and `askUserRoles` withdrawing the harness's question tool —
+  per role, across a role change, across two offices that vote as a union, on a session the office
+  never armed, and in a deployment that mounts no such tool at all.
 - **The wake** — the required `wake` argument and its two spellings: each level reaching its own
   rung and every rung above it, a named wake staying exactly the colleagues it names, the sender
   never woken by its own post, an empty list waking nobody, and the refusals: an omitted or

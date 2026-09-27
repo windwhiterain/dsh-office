@@ -234,10 +234,18 @@ function makeInbox() {
 }
 
 /** One fake Agent carrying its own tool scope, exactly as `agent.ctx.tools` does. */
-function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox()) {
+function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox(), inherited = new Map()) {
   const tools = new Map()
   /** Prompt sections registered into this agent's own scope, as `agent.ctx.systemPrompt` holds them. */
   const promptSections = new Map()
+  /**
+   * Restrictions this agent's scope carries, in the order they were installed.
+   *
+   * They intersect, exactly as the real registry's do, and they filter what this scope INHERITS:
+   * the deployment's tools and never the scope's own registrations. That exemption is what the
+   * office relies on when it withdraws a harness tool from a colleague it has just armed.
+   */
+  const restrictions = []
   const sent = []
   /** Cancellations this agent received, so a check can tell an interrupt from a no-op. */
   const cancels = []
@@ -270,6 +278,44 @@ function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox()) {
         register: (definition) => {
           tools.set(definition.name, definition)
           return () => tools.delete(definition.name)
+        },
+        /**
+         * Resolve one tool the way this agent's scope sees it: its own registrations shadow an
+         * inherited name, and a restricted-away inherited name reads as absent.
+         * @param name - the tool name as registered.
+         * @returns the definition this scope resolves, or undefined.
+         */
+        get: (name) => {
+          const own = tools.get(name)
+          if (own !== undefined) return own
+          const admitted = restrictions.every(filter =>
+            (filter.allow === undefined || filter.allow.has(name))
+            && (filter.deny === undefined || !filter.deny.has(name)))
+          return admitted ? inherited.get(name) : undefined
+        },
+        /**
+         * Mask inherited tools for this agent's scope, with the real registry's refusals: a
+         * filter that names nothing, and a name this scope does not inherit, both throw. A fake
+         * that accepted an unknown name would hide the deployment that mounts no question tool.
+         * @param filter - the `allow`/`deny` mask.
+         * @returns the exact disposer that lifts this restriction.
+         */
+        restrict: (filter) => {
+          assert.ok(
+            filter.allow !== undefined || filter.deny !== undefined,
+            'restrict() requires allow and/or deny',
+          )
+          const unknown = [...filter.allow ?? [], ...filter.deny ?? []].filter(name => !inherited.has(name))
+          assert.deepEqual(unknown, [], `restrict() names unknown global tool ${unknown.join(', ')}`)
+          const compiled = {
+            ...filter.allow !== undefined ? { allow: new Set(filter.allow) } : {},
+            ...filter.deny !== undefined ? { deny: new Set(filter.deny) } : {},
+          }
+          restrictions.push(compiled)
+          return () => {
+            const index = restrictions.indexOf(compiled)
+            if (index >= 0) restrictions.splice(index, 1)
+          }
         },
       },
       /**
@@ -346,6 +392,20 @@ const inboxClaimListeners = []
 function makeHarness(rawConfig, loggedRoute, features = {}) {
   const tables = new Map()
   const globalTools = new Map()
+  /**
+   * The tools every agent of this deployment already inherits — the preset's contribution stands
+   * in for it here. The office never registers into this map; it only reads it, which is how a
+   * check tells "the colleague lost the harness tool" from "the office never had one to lose".
+   */
+  const inheritedTools = new Map()
+  if (features.askUserTool === true) {
+    inheritedTools.set('ask_user_question', {
+      name: 'ask_user_question',
+      description: 'Ask the user a concise question before proceeding.',
+      parameters: { type: 'object', additionalProperties: true, properties: {} },
+      output: { schema: { type: 'object' }, render: () => [] },
+    })
+  }
   const routes = new Map()
   const liveAgents = new Map()
   /** Warnings the office logged, so a check can tell a quiet success from a swallowed failure. */
@@ -405,7 +465,14 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
   }
 
   function publish(sessionId, options = {}) {
-    const agent = makeAgent(sessionId, options.status ?? 'idle', options.cwd, options.preset, inboxOf(sessionId))
+    const agent = makeAgent(
+      sessionId,
+      options.status ?? 'idle',
+      options.cwd,
+      options.preset,
+      inboxOf(sessionId),
+      inheritedTools,
+    )
     liveAgents.set(sessionId, agent)
     for (const listener of createdListeners) listener({ agent })
     return agent
@@ -797,6 +864,16 @@ const officeRoute = (verb, officeName) => `/dsh-office/offices/${verb}?office=${
 const toolNames = (agent) => {
   assert.ok(agent, 'the agent must be live')
   return [...agent.tools.keys()].sort()
+}
+
+/**
+ * Whether one live agent still resolves the harness's blocking question tool.
+ * @param agent - the agent whose scope is read, exactly as the tool registry reads it.
+ * @returns whether that scope sees `ask_user_question`.
+ */
+const seesAskUser = (agent) => {
+  assert.ok(agent, 'the agent must be live')
+  return agent.ctx.tools.get('ask_user_question', agent) !== undefined
 }
 
 const checks = []
@@ -2314,6 +2391,11 @@ await check('each row kind refuses the other kind\'s fields', async () => {
     /config\.readLimitMax has no meaning on an office row/,
     'a row that names an office is an office row, so a host field on it is refused there',
   )
+  await assert.rejects(
+    () => makeHarness(undefined, undefined, { host: true, hostConfig: { askUserRoles: ['leader'] } }).ready,
+    /config\.askUserRoles has no meaning on an office host row/,
+    'the host owns the tool set, but which roles keep a harness tool is each office row\'s own decision',
+  )
 })
 
 await check('an office name in any script mounts, is addressed by name, and stores under an ASCII key', async () => {
@@ -2890,6 +2972,106 @@ await check('a capability is checked against the office a call resolved, not the
     () => call(kim, 'office_interrupt', { office: 'leadbeta', name: 'kim' }),
     /the "member" role in office "leadbeta" holds no interrupt permission/,
     'and the membership that does not hold it cannot use it there',
+  )
+})
+
+await check('the office leaves the harness question tool with the roles it is told to', async () => {
+  const questions = makeHarness({ officeName: 'questions' }, undefined, { rowId: 'office_questions', askUserTool: true })
+  await questions.ready
+  const chief = questions.publish('session-q-boss', { preset: 'office-boss' })
+  const sessions = {}
+  for (const role of ['member', 'leader', 'consultant']) {
+    questions.titles.set(`session-q-${role}`, role)
+    sessions[role] = questions.publish(`session-q-${role}`)
+  }
+  // A session the office never armed keeps whatever its own preset gives it: this row's list
+  // decides what the office TAKES AWAY, and it takes nothing from a session it does not talk to.
+  const bystander = questions.publish('session-q-bystander')
+  for (const role of ['member', 'leader', 'consultant']) {
+    await callBoss(chief, 'questions', 'office_adopt', { session_id: `session-q-${role}`, role })
+  }
+
+  assert.ok(seesAskUser(sessions.leader), 'a leader keeps the tool the row leaves it with')
+  assert.ok(seesAskUser(chief), 'and a boss is untouched: the office leaves whatever its own preset gives it')
+  assert.ok(seesAskUser(bystander), 'a session with no office role is never armed, so nothing is withdrawn from it')
+  assert.ok(!seesAskUser(sessions.member), 'a member asks in the user\'s mailbox, where no turn is held open')
+  assert.ok(!seesAskUser(sessions.consultant), 'and a consultant, which speaks like a member, does the same')
+  assert.ok(
+    sessions.member.tools.has('office_post') && sessions.member.tools.has('office_dm'),
+    'the withdrawal reaches the harness tool alone, not the office tools registered beside it',
+  )
+
+  // The withdrawal belongs to the office's tool set, so it is lifted with it: a session the office
+  // no longer talks to is an ordinary session of the user's, and its own preset decides its tools.
+  await callBoss(chief, 'questions', 'office_dismiss', { name: 'member' })
+  assert.ok(seesAskUser(sessions.member), 'a dismissed colleague gets its inherited tools back with its office tools gone')
+})
+
+await check('a role change moves the question tool with the role', async () => {
+  const moves = makeHarness({ officeName: 'moves' }, undefined, { rowId: 'office_moves', askUserTool: true })
+  await moves.ready
+  const chief = moves.publish('session-m-boss', { preset: 'office-boss' })
+  moves.titles.set('session-mia', 'mia')
+  const mia = moves.publish('session-mia')
+  await callBoss(chief, 'moves', 'office_adopt', { session_id: 'session-mia' })
+  assert.ok(!seesAskUser(mia), 'a colleague with no role given starts as a member, which asks by mail')
+
+  await callBoss(chief, 'moves', 'office_configure', { name: 'mia', role: 'leader' })
+  assert.ok(seesAskUser(mia), 'a promotion is armed in the same call, so the tool comes back with the role')
+  await callBoss(chief, 'moves', 'office_configure', { name: 'mia', role: 'consultant' })
+  assert.ok(!seesAskUser(mia), 'and a demotion takes it away again, rather than leaving it to refuse at call time')
+})
+
+await check('the offices that leave the question tool vote as a union', async () => {
+  const ask = makeHarness({ officeName: 'askunion' }, undefined, { rowId: 'office_askunion', askUserTool: true })
+  const quiet = makeHarness({ officeName: 'quietunion', askUserRoles: [] }, undefined, { rowId: 'office_quietunion' })
+  await ask.ready
+  await quiet.ready
+  const askBoss = ask.publish('session-qa-boss', { preset: 'office-boss' })
+  const quietBoss = quiet.publish('session-qq-boss', { preset: 'office-boss' })
+  ask.titles.set('session-noa', 'noa')
+  quiet.titles.set('session-noa', 'noa')
+  const noa = ask.publish('session-noa')
+  quiet.adoptAgent(noa)
+  await callBoss(askBoss, 'askunion', 'office_adopt', { session_id: 'session-noa', role: 'leader' })
+  await callBoss(quietBoss, 'quietunion', 'office_adopt', { session_id: 'session-noa', role: 'member' })
+
+  assert.ok(
+    seesAskUser(noa),
+    'one office that lists the role keeps the tool, the way one office that grants a capability grants it',
+  )
+  await callBoss(askBoss, 'askunion', 'office_configure', { name: 'noa', role: 'member' })
+  assert.ok(
+    !seesAskUser(noa),
+    'and the tool goes once every office that adopted the colleague leaves the role out',
+  )
+})
+
+await check('a deployment with no question tool is armed without a word about it', async () => {
+  const bare = makeHarness({ officeName: 'noquestions' }, undefined, { rowId: 'office_noquestions' })
+  await bare.ready
+  const chief = bare.publish('session-nq-boss', { preset: 'office-boss' })
+  bare.titles.set('session-nda', 'nda')
+  const nda = bare.publish('session-nda')
+  await callBoss(chief, 'noquestions', 'office_adopt', { session_id: 'session-nda' })
+
+  assert.ok(!seesAskUser(nda), 'there is no such tool to hold')
+  assert.deepEqual(
+    toolNames(nda),
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
+    'and the colleague is armed exactly as before: a name the deployment never mounted is not an error',
+  )
+})
+
+await check('an office row refuses a question-role list that names no colleague role', async () => {
+  await assert.rejects(
+    () => makeHarness({ askUserRoles: ['boss'] }).ready,
+    /config\.askUserRoles names no predefined colleague role.*its preset decides/s,
+    'a boss is not a colleague role: no office row decides which globals a boss holds',
+  )
+  await assert.rejects(
+    () => makeHarness({ askUserRoles: 'leader' }).ready,
+    /config\.askUserRoles must be an array of roles/,
   )
 })
 

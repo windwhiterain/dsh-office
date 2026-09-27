@@ -276,6 +276,40 @@ preset instead, so the drift stays visible. A mapping the deployment cannot enfo
 `permissionPresets` service, or a name it does not define — is refused rather than skipped: a
 restriction that did not apply must not look like one that did.
 
+### The one harness tool a role decides
+
+Every other tool a colleague holds is either this plugin's own, built per agent, or inherited from
+its preset with nothing to say about it. `ask_user_question` is the exception: the harness's tool,
+mounted by a preset, that pauses the calling turn until a human answers. A colleague's turn is
+started by a delivered message and the user is reading the office rather than that colleague's Chat,
+so a question asked inside it waits for a human who is not in the room. The harness already refuses
+the tool to an agent owned by another agent (`DELEGATED_CALLER`) for exactly this reason; a
+colleague needs the same rule, and is invisible to that check because the session controller created
+it and `ctx.agents.resume` wakes it, which makes it a live runtime root.
+
+`askUserRoles` is therefore a list of roles an office **leaves** the tool with, not one it grants:
+the office never mounts it, so a listed role in an office whose preset carries no `tool-ask-user`
+still holds none. The default is `['leader']` — the colleague expected to decide something with the
+user — while every other role asks by `office_dm` to the user's name, which writes the question to
+the mailbox and holds no turn open. A boss cannot appear in the list: it runs the office, and which
+tools its own preset gives it is that preset's business — the shipped boss preset mounts no question
+tool, and the row that hides every global covers a deployment that mounts one globally.
+
+The withdrawal is a scope restriction installed by `installOfficeTools`, because that is the one
+mechanism that both hides the schema and refuses the call — the office's rule that a role's tools are
+withdrawn rather than left to refuse at call time applies to a harness tool the same way. It rides
+the same disposers as the office tools, so a promotion or demotion moves it in the same call. Two
+properties of `ctx.tools.restrict()` make it safe here: it filters what a scope *inherits* and never
+what that scope registers itself (which is how the office's own tools survive it), and it is
+re-evaluated per name at lookup, so a name the preset mounts later is filtered too. What the office
+must not do is name a tool the deployment never mounted — `restrict()` refuses an unknown global name
+— so the office asks the scope whether this agent holds the tool before it withdraws it.
+
+Nothing tells the model where the question should go instead, and that is deliberate. The delivery
+contract states what reaches whom, and `office_dm`'s own description says that addressing the user
+writes to the mailbox: the replacement is documented where a colleague would reach for it, and a
+sentence in the standing prompt is re-sent on every request for the life of that session's history.
+
 ### The union grants the tool, the office decides the right
 
 A session may be a colleague of several offices, and it holds a different predefined role in
@@ -288,14 +322,25 @@ holds `office_interrupt` but is refused when it aims that call at the second off
 argument is likewise resolved against the registry as it is *now*, not against the set the tools
 were built from, because a session can join or leave an office between two calls.
 
+The `askUserRoles` lists vote the same way: a colleague keeps the harness's question tool as soon as
+one office that adopted it lists the role it holds there, and loses it only when every one of them
+leaves the role out. The union is what one scope can express — a tool is either in the agent's scope
+or it is not — and taking the intersection instead would make a session's globals depend on the
+strictest office it happens to belong to, which is not a rule the roster could show.
+
 ### A role change reinstalls the tool set
 
-`installOfficeTools` compares a signature of the agent's acting role and capability union and
-reinstalls when it changes. A demoted leader must lose `office_interrupt` and `office_compact`
-from its scope, not merely be refused by them: a tool a model can see but cannot use spends a
-turn, and the refusal is invisible until the model tries. Every roster event — adopted,
-configured, dismissed — and every office mount or unmount therefore only asks the host to resync
-the affected agents; only the host installs or withdraws.
+`installOfficeTools` compares a signature of the agent's acting role, capability union, and whether
+the harness's question tool stays with it, and reinstalls when it changes. A demoted leader must
+lose `office_interrupt` and `office_compact` from its scope, not merely be refused by them: a tool a
+model can see but cannot use spends a turn, and the refusal is invisible until the model tries.
+Every roster event — adopted, configured, dismissed — and every office mount or unmount therefore
+only asks the host to resync the affected agents; only the host installs or withdraws.
+
+The question tool belongs in that signature even where the capabilities already move: `member` and
+`consultant` hold the same office capabilities and differ only in the session permission they run
+under, so a signature built from capabilities alone could not say which of them the row leaves a
+harness tool with.
 
 ## One required wake, and the ladder a level climbs
 
