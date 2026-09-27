@@ -2221,7 +2221,7 @@ await check('a delivery frame names the sender, the wake, the message, and the o
   const publicText = bob.sent.at(-1).message.content[0].text
   assert.match(
     publicText,
-    /^\[office #general from colleague Alice Smith \| wake @bob \| general-\d+\]\n\npublic note\n\n\(What you write yourself/,
+    /^\[office #general from colleague Alice Smith \| wake @bob \| general-\d+\]\n\npublic note\n\n\(if you need reply to your colleagues, use office tool with `wake` parameter\.\)$/,
     'and a public post states the mention it was woken by, not the level it did not use',
   )
 
