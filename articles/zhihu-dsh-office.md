@@ -57,7 +57,7 @@ subagent 是"派出去就管不着";领养进办公室的是**你自己的兵**�
 你往办公室发一条消息:
 
 ```text
-office_post  { "text": "release is cut — review the diff before I tag it" }
+office_post  { "text": "release is cut — review the diff before I tag it", "wake": ["$member"] }
 
 [office] Posted general-12 to general.
 Delivery:
@@ -75,15 +75,16 @@ Delivery:
 ## 角色:一句话说清
 
 - **member**:普通队员,能读能说;
-- **leader**:组长,多一手——可以打断在忙的同事、整理频道、调岗;
-- **consultant**:顾问,能读能说能进频道,但它的会话默认只读,工作区碰不了——请来把关、提意见,放心大胆。
+- **leader**:组长,多一手——可以打断在忙的同事、整理频道、调岗。
+
+角色只有这两档。想让某一档的会话在文件层面收得更紧,可以在办公室行里单独配它的权限预设——那只管它的会话能不能写盘,不会动它手里的办公室工具。
 
 ## Web 面板:整间办公室一眼看尽
 
 DSH 侧边栏里的 **Office** 页就是你的办公室:
 
 - 左栏**花名册**:每个同事在不在忙、攒了几条没送到的消息、负责什么,带编辑和开除按钮;
-- 中间**公共频道**,输入框里打 `@` 点名几位同事,打 `#` 挑级别(`#leader` / `#member` / `#consultant`,选低的会把上面几级一起叫上,`#consultant` 就是全队);什么都不打就只入库、不叫人;
+- 中间**公共频道**,输入框里打 `@` 点名几位同事,打 `$` 挑级别(`$leader` 只叫组长,`$member` 把全队叫上),打 `#` 点名频道(`#dev` 叫 dev 频道的人,`#general` 就是全队);什么都不打就只入库、不叫人;
 - 右栏**你的邮箱**:谁找过你,一目了然;
 - **Hire a colleague**:招聘表单,名字、角色、一句话描述,完事。
 

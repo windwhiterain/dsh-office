@@ -71,10 +71,9 @@ const GROUP_CHANNEL_KIND = 'group'
  */
 const ROLE_MEMBER = 'member'
 const ROLE_LEADER = 'leader'
-const ROLE_CONSULTANT = 'consultant'
 
 /** Every predefined colleague role, in the order the Web panel offers them. */
-const COLLEAGUE_ROLES = [ROLE_MEMBER, ROLE_LEADER, ROLE_CONSULTANT]
+const COLLEAGUE_ROLES = [ROLE_MEMBER, ROLE_LEADER]
 
 /**
  * Office capabilities each predefined role holds. A capability is one group of tools, and
@@ -89,7 +88,6 @@ const COLLEAGUE_ROLES = [ROLE_MEMBER, ROLE_LEADER, ROLE_CONSULTANT]
 const ROLE_CAPABILITIES = {
   [ROLE_MEMBER]: ['read', 'colleagues', 'post', 'dm'],
   [ROLE_LEADER]: ['read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure', 'channels'],
-  [ROLE_CONSULTANT]: ['read', 'colleagues', 'post', 'dm'],
 }
 
 /** Capabilities a boss holds: it runs the office, so it holds every capability there is. */
@@ -113,26 +111,44 @@ const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
 const LEADER_GUIDE_PATH = fileURLToPath(new URL('experience/README.md', import.meta.url))
   .replaceAll('\\', '/')
 
+/** The trigger a wake level is written with, as a tool argument and as a token in a body. */
+const WAKE_LEVEL_TRIGGER = '$'
+
+/** The trigger a channel wake is written with — the same one that spells a channel everywhere. */
+const WAKE_CHANNEL_TRIGGER = '#'
+
 /**
- * The ladder a `#` wake level climbs.
+ * The ladder a `$` wake level climbs.
  *
  * A level addresses its own rung and every rung above it, so the lowest-privilege level reaches
- * the whole office: `#consultant` wakes everybody, `#member` wakes the members and the leaders,
- * and `#leader` wakes the leaders alone. The rung is the authority a role's session runs under,
- * which is why the consultant sits below the member even though the two hold the same office
- * tools — a consultant session is read-only by default; see {@link DEFAULT_ROLE_PERMISSIONS}.
+ * the whole office: `$member` wakes the members and the leaders, and `$leader` wakes the leaders
+ * alone. The rung is the authority a role's session runs under; a row may map a rung to a session
+ * permission preset, which is what keeps the two axes apart — see {@link DEFAULT_ROLE_PERMISSIONS}.
  */
 const ROLE_PRIVILEGE = {
-  [ROLE_CONSULTANT]: 1,
-  [ROLE_MEMBER]: 2,
-  [ROLE_LEADER]: 3,
+  [ROLE_MEMBER]: 1,
+  [ROLE_LEADER]: 2,
 }
 
-/** The levels a `#` wake token may name, lowest rung first. */
-const WAKE_LEVELS = [ROLE_CONSULTANT, ROLE_MEMBER, ROLE_LEADER]
+/** The levels a `$` wake token may name, lowest rung first. */
+const WAKE_LEVELS = [ROLE_MEMBER, ROLE_LEADER]
 
-/** The `#` spellings of {@link WAKE_LEVELS}, as a caller writes them. */
-const WAKE_LEVEL_TOKENS = WAKE_LEVELS.map(level => `#${level}`)
+/** The `$` spellings of {@link WAKE_LEVELS}, as a caller writes them. */
+const WAKE_LEVEL_TOKENS = WAKE_LEVELS.map(level => `${WAKE_LEVEL_TRIGGER}${level}`)
+
+/**
+ * The level spellings this office took before levels moved to `$`, and the level that replaced
+ * each of them.
+ *
+ * A caller that learned the old token is told what replaced it rather than that its token names
+ * no channel: `#name` addresses a channel now, and the consultant rung is gone, so the lowest
+ * level is the one that reaches the whole office.
+ */
+const RETIRED_WAKE_LEVELS = {
+  consultant: ROLE_MEMBER,
+  member: ROLE_MEMBER,
+  leader: ROLE_LEADER,
+}
 
 /** Longest description one colleague may carry. It reaches the roster, the greeting, and the panel. */
 const DESCRIPTION_MAX_CHARS = 2000
@@ -212,7 +228,7 @@ const OFFICE_SENDER_NAME = 'office'
 const DEFAULT_IDLE_NOTICE = {
   enabled: false,
   channel: GENERAL_CHANNEL,
-  wake: ['#leader'],
+  wake: [`${WAKE_LEVEL_TRIGGER}${ROLE_LEADER}`],
   text: 'The office is idle. Leaders, decide what happens next — post the work and who takes it, '
     + 'waking whoever it concerns. If nothing should happen, answer nothing: the office asks again '
     + 'only after something new is written.',
@@ -228,10 +244,11 @@ const IDLE_NOTICE_KEY = 'idle'
  * the DSH permission preset its session runs under (sandbox mode plus approval policy, owned
  * by `ctx.permissionPresets` and enforced by every confined capability). A preset governs the
  * session's own disk writes, never the office's storage, which is this plugin's domain — so
- * every role speaks into the office, and `consultant` is read-only by default so that what it
- * cannot do is touch anything outside the office.
+ * every role speaks into the office whatever preset it runs under, and the map ships empty:
+ * a deployment that wants a role confined, or a rung run under a narrower sandbox than the rest
+ * of the office, maps it here.
  */
-const DEFAULT_ROLE_PERMISSIONS = { [ROLE_CONSULTANT]: 'read-only' }
+const DEFAULT_ROLE_PERMISSIONS = {}
 
 /**
  * The predefined role a stored value names, or the default.
@@ -308,8 +325,8 @@ function roleProperty() {
     type: 'string',
     enum: COLLEAGUE_ROLES,
     description: `${COLLEAGUE_ROLES.join(', ')}. member reads and writes to the office; leader also `
-      + 'interrupts, compacts, and configures; consultant speaks like a member under a read-only session. '
-      + 'The role also selects the session permission preset the office row maps it to.',
+      + 'interrupts, compacts, and configures. The role also selects the session permission preset '
+      + 'the office row maps it to.',
   }
 }
 
@@ -519,7 +536,7 @@ let officeHost
  */
 const officeToolInstalls = new Map()
 
-/** What may not follow a mentioned name or a wake level: a longer word is prose, not a token. */
+/** What may not follow a mentioned name or a wake token: a longer word is prose, not a token. */
 const MENTION_BOUNDARY_RE = /[\p{L}\p{N}_]/u
 
 /**
@@ -553,19 +570,19 @@ function mentionsIn(text, names) {
 }
 
 /**
- * Resolve the `#` wake levels one message addresses in its text.
+ * Resolve the `$` wake levels one message addresses in its text.
  *
  * A level token has the shape a mention has — a trigger at the message start or after whitespace,
  * the level's exact name, and a boundary — so a body posted from the panel derives its audience
- * the same way whichever kind of token it carries. `#general` is a channel, not a level, and no
- * level is a prefix of another, so the two spellings never resolve into each other.
+ * the same way whichever kind of token it carries. A channel is spelled with the other trigger,
+ * and no level is a prefix of another, so the two spellings never resolve into each other.
  * @param text - the message body.
  * @returns the levels the text addresses, in the order they appear, without duplicates.
  */
 function levelsIn(text) {
   const found = []
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] !== '#') continue
+    if (text[index] !== WAKE_LEVEL_TRIGGER) continue
     if (index > 0 && !/\s/.test(text[index - 1])) continue
     const rest = text.slice(index + 1)
     const level = WAKE_LEVELS.find(candidate => rest.toLowerCase().startsWith(candidate)
@@ -578,69 +595,148 @@ function levelsIn(text) {
 }
 
 /**
+ * Resolve the `#channel` wake tokens one message addresses in its text.
+ *
+ * A channel token has the shape a mention has — a trigger at the message start or after
+ * whitespace, the channel's exact id, and a boundary — and only an id the caller passes can match,
+ * so the office's own addressable channels are the whole vocabulary and `#anything-else` is prose.
+ * Longest id first, so a channel whose id extends another's is never read as the shorter one.
+ * @param text - the message body.
+ * @param channelIds - the ids of the channels a wake may name.
+ * @returns the channel ids the text addresses, in the order they appear, without duplicates.
+ */
+function channelsIn(text, channelIds) {
+  const ordered = [...new Set(channelIds)]
+    .filter(id => typeof id === 'string' && id.length > 0)
+    .sort((left, right) => right.length - left.length)
+  const found = []
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== WAKE_CHANNEL_TRIGGER) continue
+    if (index > 0 && !/\s/.test(text[index - 1])) continue
+    const rest = text.slice(index + 1)
+    const id = ordered.find((candidate) => {
+      if (!rest.toLowerCase().startsWith(candidate.toLowerCase())) return false
+      return rest.length === candidate.length || !MENTION_BOUNDARY_RE.test(rest[candidate.length])
+    })
+    if (id === undefined) continue
+    if (!found.includes(id)) found.push(id)
+    index += id.length
+  }
+  return found
+}
+
+/**
  * The wake tokens one message body carries.
  *
  * The panel sends the body alone and the office derives the audience from it, so this is the one
  * place where what was written becomes what a `wake` argument would have said.
  * @param text - the message body.
  * @param names - the roster's colleague names, plus the user's name.
+ * @param channelIds - the ids of the channels a wake may name.
  * @returns the tokens, names first, as `wake` spells them.
  */
-function wakeTokensIn(text, names) {
+function wakeTokensIn(text, names, channelIds) {
   return [
     ...mentionsIn(text, names).map(name => `@${name}`),
-    ...levelsIn(text).map(level => `#${level}`),
+    ...channelsIn(text, channelIds).map(id => `${WAKE_CHANNEL_TRIGGER}${id}`),
+    ...levelsIn(text).map(level => `${WAKE_LEVEL_TRIGGER}${level}`),
   ]
 }
 
 /**
  * Parse one `wake` argument into the audience it asks for.
  *
- * A wake is either the colleagues it names — `@alice`, `@bob` — or exactly one level,
- * {@link WAKE_LEVEL_TOKENS}; the two spellings are never mixed, because a level already decides
- * the whole audience. An empty list is the caller stating that nobody is woken, which is a
- * decision rather than an omission: `wake` is required precisely so that no message wakes the
- * office by default.
+ * A wake is one of three spellings and they are never mixed, because each of them already decides
+ * a whole audience: the colleagues it names — `@alice`, `@bob`; exactly one level,
+ * {@link WAKE_LEVEL_TOKENS}, which climbs the ladder; or exactly one channel, `#dev`, which
+ * addresses that channel's own members wherever the message is written. An empty list is the
+ * caller stating that nobody is woken, which is a decision rather than an omission: `wake` is
+ * required precisely so that no message wakes the office by default.
  * @param value - the caller's wake argument: a tool call, a request body, or a row's config.
  * @param tool - the name a refusal is prefixed with: a registered tool, or a config key.
- * @returns the level the argument names, if any, and the colleague names it lists.
+ * @returns the level and the channel the argument names, if any, and the colleague names it lists.
  * @throws {TypeError} when the argument is absent, is not an array, or names something unusable.
  */
 function parseWake(value, tool) {
   const spelled = WAKE_LEVEL_TOKENS.join(', ')
   if (!Array.isArray(value)) {
     throw new TypeError(
-      `${tool}: wake is required and must be an array of "@name" entries or one level (${spelled}), `
-      + `got ${JSON.stringify(value)}`,
+      `${tool}: wake is required and must be an array of "@name" entries, one level (${spelled}), `
+      + `or one channel ("${WAKE_CHANNEL_TRIGGER}dev"), got ${JSON.stringify(value)}`,
+    )
+  }
+  /** A level and a channel each state the whole audience, so neither may share the list. */
+  const standsAlone = (kind, token) => {
+    if (value.length === 1) return
+    throw new TypeError(
+      `${tool}: ${kind} stands alone, because it already decides the whole audience; "${token}" `
+      + `cannot be combined with the other ${String(value.length - 1)} wake entries`,
     )
   }
   let level
+  let channel
   const names = []
   for (const raw of value) {
     if (typeof raw !== 'string' || raw.trim().length === 0) {
       throw new TypeError(`${tool}: every wake entry must be a non-empty string, got ${JSON.stringify(raw)}`)
     }
     const token = raw.trim()
-    if (token.startsWith('#')) {
+    if (token.startsWith(WAKE_LEVEL_TRIGGER)) {
       const candidate = token.slice(1).toLowerCase()
       if (!WAKE_LEVELS.includes(candidate)) {
-        throw new TypeError(`${tool}: "${token}" is not a wake level; wake takes ${spelled}`)
-      }
-      if (value.length > 1) {
         throw new TypeError(
-          `${tool}: a level stands alone, because it already decides the whole audience; "${token}" `
-          + `cannot be combined with the other ${String(value.length - 1)} wake entries`,
+          `${tool}: "${token}" is not a wake level; a level is written ${spelled}, and `
+          + `"${WAKE_CHANNEL_TRIGGER}name" addresses a channel`,
         )
       }
+      standsAlone('a level', token)
       level = candidate
       continue
     }
+    if (token.startsWith(WAKE_CHANNEL_TRIGGER)) {
+      const candidate = parseChannelToken(token, tool)
+      standsAlone('a channel', token)
+      channel = candidate
+      continue
+    }
     if (!token.startsWith('@') || token.length === 1) {
-      throw new TypeError(`${tool}: wake addresses colleagues as "@name" and levels as ${spelled}, got ${JSON.stringify(token)}`)
+      throw new TypeError(
+        `${tool}: wake addresses colleagues as "@name", a level as ${spelled}, or a channel as `
+        + `"${WAKE_CHANNEL_TRIGGER}name", got ${JSON.stringify(token)}`,
+      )
     }
     names.push(token.slice(1))
   }
-  return { level, names }
+  return { level, channel, names }
+}
+
+/**
+ * Read one `#channel` wake token into the channel id it names.
+ *
+ * The id is normalized the way every channel spelling is, so `#Dev` and `#dev` are one address.
+ * Existence is not checked here: this function is also the row validation, which runs before any
+ * office holds channels, so a wake names an id and the office refuses an id it does not hold.
+ * @param token - the caller's spelling, trigger included.
+ * @param tool - the name a refusal is prefixed with.
+ * @returns the normalized channel id.
+ * @throws {TypeError} when the token names no channel, or spells a retired wake level.
+ */
+function parseChannelToken(token, tool) {
+  const candidate = normalizeName(token.slice(1))
+  if (Object.hasOwn(RETIRED_WAKE_LEVELS, candidate)) {
+    throw new TypeError(
+      `${tool}: "${token}" is the old spelling of a wake level; that level is now written `
+      + `"${WAKE_LEVEL_TRIGGER}${RETIRED_WAKE_LEVELS[candidate]}", and "${WAKE_CHANNEL_TRIGGER}name" `
+      + 'addresses a channel',
+    )
+  }
+  if (candidate.length === 0) {
+    throw new TypeError(
+      `${tool}: "${token}" names no channel; a channel token keeps letters or digits, as in `
+      + `"${WAKE_CHANNEL_TRIGGER}dev"`,
+    )
+  }
+  return candidate
 }
 
 /**
@@ -820,20 +916,24 @@ function resolveRowConfig(raw, defaults, label, rowId) {
     throw new TypeError('dsh-office: config.idleNotice.text must be a non-empty message body')
   }
   // The notice's audience is validated here and resolved at every idle transition, because who a
-  // level reaches follows from the roster of the moment, not from the row.
+  // level reaches follows from the roster of the moment and whether a channel exists follows from
+  // the office, not from the row.
   const noticeWake = parseWake(notice.wake, 'config.idleNotice.wake')
-  if (noticeWake.level === undefined && noticeWake.names.length === 0) {
+  if (noticeWake.level === undefined && noticeWake.channel === undefined && noticeWake.names.length === 0) {
     throw new TypeError(
       'dsh-office: config.idleNotice.wake must address somebody; an enabled notice that wakes '
       + 'nobody would ask nothing of anyone',
     )
   }
+  const noticeAudience = noticeWake.level !== undefined
+    ? `${WAKE_LEVEL_TRIGGER}${noticeWake.level}`
+    : noticeWake.channel === undefined ? undefined : `${WAKE_CHANNEL_TRIGGER}${noticeWake.channel}`
   config.idleNotice = {
     enabled: notice.enabled,
     channel: noticeChannel,
-    wake: noticeWake.level === undefined
+    wake: noticeAudience === undefined
       ? noticeWake.names.map(colleagueName => `@${colleagueName}`)
-      : [`#${noticeWake.level}`],
+      : [noticeAudience],
     text: notice.text.trim(),
   }
   return config
@@ -1106,12 +1206,18 @@ function validateMessage(value) {
  * as what it is: `colleague <name>` for a peer, `the user` for the human at the keyboard. The name
  * decides it, because that is the office's own identity for the user — a message the office
  * carries from the human names the deployment's `userName`.
+ *
+ * `message.wake` is stated beside the destination when the caller resolved one, because what a
+ * message addressed is not in its body: a post takes its audience as an argument, so a reader that
+ * saw only the text would guess at whether it was named, reached as a rung, or woke nobody — and
+ * that guess decides whether the message is the reader's to answer.
  */
 function whereOf(message, userName) {
   const sender = nameKey(String(message.senderName)) === nameKey(userName)
     ? 'the user'
     : `colleague ${message.senderName}`
-  return message.kind === 'dm' ? `DM from ${sender}` : `#${message.channelName} from ${sender}`
+  const where = message.kind === 'dm' ? `DM from ${sender}` : `#${message.channelName} from ${sender}`
+  return message.wake === undefined ? where : `${where} | wake ${message.wake}`
 }
 
 /** How a line talks about the channel itself, rather than about who sent what. */
@@ -1401,6 +1507,33 @@ function createOffice(ctx, domain, config, hooks) {
   const colleagueBySession = (sessionId) => {
     const record = colleagues.get(sessionId)
     return record === undefined ? undefined : validateColleague(record)
+  }
+
+  /**
+   * How one batch of stored messages states the wake each was written with, keyed by message id.
+   *
+   * Every reader-facing surface states the same thing about the same record — a delivered frame, an
+   * `office_read` page, a notification — so the label is resolved in one place, against the roster
+   * of the moment the reader asks; a colleague dismissed since is named by the short id its own
+   * record fell back to. The label is derived rather than stored, so a record written before levels
+   * moved to `$` reads in the spelling that addresses its audience today.
+   * @param records - the stored message records to label.
+   * @returns message id → the wake to state, or undefined for a record that states none.
+   */
+  const wakeLabels = async (records) => {
+    if (records.length === 0) return new Map()
+    // Only a wake that named colleagues records sessions instead of a token, so the roster is read
+    // for the names only when a record actually states one: a page of levels, channels, and empty
+    // wakes is labelled without listing the corpus.
+    const named = records.some(message => message.audience === undefined
+      && Array.isArray(message.recipients) && message.recipients.length > 0)
+    const view = {
+      nameBySession: named
+        ? new Map((await listColleagues()).map(entry => [entry.sessionId, entry.name]))
+        : new Map(),
+      userName: config.userName,
+    }
+    return new Map(records.map(message => [message.messageId, wakeLabelOf(message, view)]))
   }
 
   /**
@@ -1861,10 +1994,23 @@ function createOffice(ctx, domain, config, hooks) {
     // The lines are composed here — at the moment the office hands the turn over — and the roster
     // revision this reader has been told advances with them: see {@link leaderLines}.
     const lines = await leaderLines(recipient)
+    // The wake each message was written with travels into the frame beside its sender, so a
+    // colleague reads who a message addressed instead of inferring it from the body; the label is
+    // resolved here, once per turn, rather than carried in the stored record.
+    const wakes = await wakeLabels(batch)
     return {
       id: wakeIdOf(newest),
       role: 'user',
-      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, config.userName, lines) }],
+      content: [{
+        type: 'text',
+        text: frameBatch(
+          name(),
+          batch.map(message => compact({ ...message, wake: wakes.get(message.messageId) })),
+          newestSeq,
+          config.userName,
+          lines,
+        ),
+      }],
       // Every field here reaches the session log, which is JSON, and the harness rejects a
       // value JSON cannot round-trip — `undefined` among them. A message the user posted
       // from the panel has no sender session, so that field must be absent rather than present
@@ -2173,22 +2319,73 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
+   * The colleagues one channel wake addresses: that channel's own members, wherever the message
+   * is written.
+   *
+   * The standing public channel records no members, because the whole roster is in it by
+   * definition; a group channel addresses exactly the colleagues it holds. The mailbox is refused
+   * rather than resolved — it is the user's mail, and the user has no session to wake.
+   *
+   * A wake may name a channel its sender is not in, exactly as it may name a colleague the sender
+   * cannot see: an address is not a read, and every colleague is already addressable by name.
+   * @param channelId - the channel the wake named, already normalized.
+   * @param senderSessionId - the sending session, never woken by its own message.
+   * @param tool - the registered tool name, prefixed onto a refusal.
+   * @returns the colleagues to wake, in roster order.
+   * @throws {Error} when the office holds no such channel, or it is not addressable.
+   */
+  const channelAudience = async (channelId, senderSessionId, tool) => {
+    const record = channels.get(channelId)
+    if (record === undefined) {
+      // A direct channel lands here rather than in the refusal below, and that is the whole story
+      // of it: its stored id joins two stripped session ids with `+`, which no token spelling can
+      // carry, so naming one is naming an id the office does not hold.
+      throw new Error(
+        `${tool}: "${WAKE_CHANNEL_TRIGGER}${channelId}" is not a channel of office "${name()}"; a `
+        + 'channel wake names the public channel or a group channel, and one colleague is addressed '
+        + 'with office_dm',
+      )
+    }
+    const channel = validateChannel(record)
+    if (channel.kind === 'mailbox') {
+      throw new Error(
+        `${tool}: "${WAKE_CHANNEL_TRIGGER}${channelId}" is not an addressable channel; the mailbox is `
+        + "the user's mail, which no session wakes, and one colleague is addressed with office_dm",
+      )
+    }
+    const roster = await listColleagues()
+    return channel.kind === GROUP_CHANNEL_KIND
+      ? roster.filter(colleague => channel.members.includes(colleague.sessionId)
+        && colleague.sessionId !== senderSessionId)
+      : roster.filter(colleague => colleague.sessionId !== senderSessionId)
+  }
+
+  /**
    * Resolve one `wake` argument into the audience it addresses.
    *
-   * A level is returned unresolved: who it reaches follows from the roster and from the channel
-   * the message is written to, which is what {@link post} already reads, so resolving it here
-   * would be a second answer to the same question. The names are resolved now, because a name
-   * that matches nobody is a refusal rather than a wake nobody receives.
+   * A level is returned unresolved: who it reaches follows from the roster and from the channel the
+   * message is written to, which is what {@link post} already reads, so resolving it here would be
+   * a second answer to the same question. A name and a channel are resolved now, because each
+   * decides its recipients outright and one that reaches nobody is a refusal rather than a silence.
    * @param value - the caller's wake argument.
    * @param tool - the registered tool name, prefixed onto a refusal.
-   * @returns the level, when the argument named one, the resolved colleagues, and whether the
-   *   user was addressed.
+   * @param senderSessionId - the sending session, which a channel wake never includes.
+   * @returns the level and the channel when the argument named one, the resolved colleagues, and
+   *   whether the user was addressed.
    */
-  const resolveWake = async (value, tool) => {
-    const { level, names } = parseWake(value, tool)
-    if (level !== undefined) return { level, colleagues: [], toUser: false }
+  const resolveWake = async (value, tool, senderSessionId) => {
+    const { level, channel, names } = parseWake(value, tool)
+    if (level !== undefined) return { level, channel: undefined, colleagues: [], toUser: false }
+    if (channel !== undefined) {
+      return {
+        level: undefined,
+        channel,
+        colleagues: await channelAudience(channel, senderSessionId, tool),
+        toUser: false,
+      }
+    }
     const { colleagues, toUser } = await resolveRecipients(names, tool)
-    return { level: undefined, colleagues, toUser }
+    return { level: undefined, channel: undefined, colleagues, toUser }
   }
 
   /**
@@ -2243,8 +2440,9 @@ function createOffice(ctx, domain, config, hooks) {
    * being writable, and a failure to copy is reported instead of losing the message.
    * @param request - the destination, the sender identity, the body, the audience the caller's
    *   wake resolved to, and when those recipients should receive it if they are mid-turn.
-   *   `notify` is ignored for a message that only addresses the user: the user has no session to
-   *   steer.
+   *   `wakeLevel` and `wakeChannel` are the token the caller addressed, when it addressed one, and
+   *   are recorded with the message. `notify` is ignored for a message that only addresses the
+   *   user: the user has no session to steer.
    * @returns the stored message and one delivery outcome per recipient.
    */
   const post = async ({
@@ -2254,6 +2452,7 @@ function createOffice(ctx, domain, config, hooks) {
     recipients,
     kind,
     wakeLevel,
+    wakeChannel,
     toUser = false,
     notify = DEFAULT_NOTIFY,
   }) => {
@@ -2280,10 +2479,11 @@ function createOffice(ctx, domain, config, hooks) {
         throw new Error(`dsh-office: unknown channel "${channelId}"; it is not a channel of office "${name()}"`)
       }
     }
-    // A named wake addresses exactly the colleagues it names; a level addresses every colleague
-    // at its rung or above, scoped to the channel the message is written to — the whole roster
-    // for the standing public channel, which records no members of its own, and exactly the
-    // subscribed colleagues for a group one. Either way a session never receives its own message.
+    // A named wake addresses exactly the colleagues it names; a channel wake addresses exactly the
+    // members the channel it names resolved to; a level addresses every colleague at its rung or
+    // above, scoped to the channel the message is written to — the whole roster for the standing
+    // public channel, which records no members of its own, and exactly the subscribed colleagues
+    // for a group one. Either way a session never receives its own message.
     const roster = await listColleagues()
     const audience = wakeLevel === undefined
       ? recipients
@@ -2316,9 +2516,16 @@ function createOffice(ctx, domain, config, hooks) {
       senderName: sender.name,
       senderSessionId: sender.sessionId,
       recipients: audience.map(colleague => colleague.sessionId),
-      // The level a post addressed, when it addressed one: the audience itself is stored as
-      // session ids, and this is what says the post was aimed at a rung rather than at names.
-      ...(wakeLevel === undefined ? {} : { audience: `#${wakeLevel}` }),
+      // The token a post addressed, when it addressed one: the audience itself is stored as session
+      // ids, and this is what says the post was aimed at a level or at a channel rather than at
+      // names. A level is stored as the caller spelled it (`$`), a channel as `#name`.
+      ...(wakeLevel === undefined && wakeChannel === undefined
+        ? {}
+        : {
+          audience: wakeLevel === undefined
+            ? `${WAKE_CHANNEL_TRIGGER}${wakeChannel}`
+            : `${WAKE_LEVEL_TRIGGER}${wakeLevel}`,
+        }),
       text,
       createdAt: Date.now(),
       deliveries: {},
@@ -2840,7 +3047,7 @@ function createOffice(ctx, domain, config, hooks) {
    *
    * The notice is a message in a channel rather than a private word to each colleague, because
    * the audience is meant to decide together and the office's record is where a decision belongs.
-   * It carries the row's own wake, which is `#leader` by default, so only those colleagues are
+   * It carries the row's own wake, which is `$leader` by default, so only those colleagues are
    * woken, and it is authored by the office itself, which no colleague's name or the user's name
    * would describe.
    * @param sessionId - the colleague whose turn just ended, or undefined for the activation check.
@@ -2862,11 +3069,10 @@ function createOffice(ctx, domain, config, hooks) {
       // Who hears the question is the row's own wake — the leaders, by default. It is resolved
       // here as well as in `post` because an audience nobody is in is a question not worth
       // asking: the notice spends a turn, so it is sent only when it would reach somebody.
-      const { level, names } = parseWake(settings.wake, 'config.idleNotice.wake')
+      const { level, channel, names } = parseWake(settings.wake, 'config.idleNotice.wake')
       const noticeChannel = channels.get(settings.channel)
-      const waiting = level === undefined
-        ? await resolveRecipients(names, 'config.idleNotice.wake')
-        : {
+      const waiting = level !== undefined
+        ? {
           colleagues: levelAudience(
             roster,
             level,
@@ -2877,6 +3083,12 @@ function createOffice(ctx, domain, config, hooks) {
           ),
           toUser: false,
         }
+        : channel === undefined
+          ? await resolveRecipients(names, 'config.idleNotice.wake')
+          : {
+            colleagues: await channelAudience(channel, undefined, 'config.idleNotice.wake'),
+            toUser: false,
+          }
       if (waiting.colleagues.length === 0 && !waiting.toUser) return undefined
       const stored = notices.get(IDLE_NOTICE_KEY)
       if (!activitySince(stored === undefined ? undefined : requireRecord('notice', stored))) return undefined
@@ -2890,6 +3102,7 @@ function createOffice(ctx, domain, config, hooks) {
         recipients: waiting.colleagues,
         kind: 'public',
         wakeLevel: level,
+        wakeChannel: channel,
         toUser: waiting.toUser,
       })
       await notices.put(IDLE_NOTICE_KEY, { messageId: posted.message.messageId })
@@ -3238,9 +3451,20 @@ function createOffice(ctx, domain, config, hooks) {
     restoreWakes,
     noteIdle,
     senderOf,
+    wakeLabels,
     generalChannel: GENERAL_CHANNEL,
     mailboxChannel: MAILBOX_CHANNEL,
     userName: config.userName,
+    /**
+     * The ids of the channels a wake may name: the standing public one and every group channel.
+     *
+     * The mailbox and the direct channels are left out rather than refused one by one, so a body
+     * that happens to spell one of them is prose: they are addresses of a different kind, and
+     * `office_dm` is how one colleague is reached.
+     */
+    wakeableChannelIds: () => listChannels()
+      .filter(channel => channel.kind === 'public' || channel.kind === GROUP_CHANNEL_KIND)
+      .map(channel => channel.channelId),
   }
 }
 
@@ -4624,7 +4848,9 @@ function createReadTool(agent, tool, config) {
       'Read channel history, oldest first. Address a channel by "#general", a name office_channels reports, a '
       + 'colleague\'s session title for your direct-message channel with it, or by "*" for every channel you '
       + 'can read. Narrow it with from/to over sequences, or by sender, contains, mentions, and since/until. A '
-      + 'wake carries only what was addressed to you, so this reaches everything else.',
+      + 'wake carries only what was addressed to you, so this reaches everything else. Each message states the '
+      + 'wake it was written with — the level or channel its sender addressed, or the colleagues it named — so '
+      + 'you can see whether a message was aimed at you.',
     parameters: tool.parameters(['channel'], {
       channel: {
         type: 'string',
@@ -4670,6 +4896,9 @@ function createReadTool(agent, tool, config) {
                 createdAt: { type: 'integer' },
                 text: { type: 'string' },
                 covers: { type: 'array', items: { type: 'integer' } },
+                // The wake the message was written with, in the spelling that addresses it today.
+                // Stated here rather than left to the body, which need not spell it at all.
+                wake: { type: 'string' },
               },
             },
           },
@@ -4683,6 +4912,7 @@ function createReadTool(agent, tool, config) {
         }
         const lines = value.messages.map((message) => {
           const head = `[${message.messageId}] ${message.senderName}`
+            + `${message.wake === undefined ? '' : ` · wake ${message.wake}`}`
           const labelled = message.kind === 'summary'
             ? `${head} (summary of ${String(message.covers[0])}-${String(message.covers[1])})`
             : head
@@ -4762,6 +4992,7 @@ function createReadTool(agent, tool, config) {
         || left.channelId.localeCompare(right.channelId)
         || left.seq - right.seq)
       const selected = matched.slice(-limit)
+      const wakes = await office.wakeLabels(selected)
       return {
         office: officeName,
         channelId: everyChannel ? '*' : channelIds[0],
@@ -4776,6 +5007,7 @@ function createReadTool(agent, tool, config) {
           createdAt: message.createdAt,
           text: args?.brief === true ? undefined : message.text,
           covers: message.kind === 'summary' ? message.covers : undefined,
+          wake: wakes.get(message.messageId),
         })),
       }
     },
@@ -4833,6 +5065,8 @@ function createNotificationsTool(agent, tool, userName) {
                 // The timing this was held under, which is the timing its sender asked for.
                 notify: { type: 'string', enum: NOTIFY_TIMINGS },
                 text: { type: 'string' },
+                // The wake the message was written with, as {@link frameDelivery} states it.
+                wake: { type: 'string' },
               },
             },
           },
@@ -4855,6 +5089,7 @@ function createNotificationsTool(agent, tool, userName) {
       // Read at the call, so the lines describe the office the leader is reading its mail in. An
       // empty read takes nothing, so it is handed no frame and composes no lines.
       const lines = taken.length === 0 ? {} : await office.leaderLines(office.colleagueBySession(sender.sessionId))
+      const wakes = await office.wakeLabels(taken.map(entry => entry.message))
       return compact({
         office: officeName,
         rosterChanges: lines.rosterChanges,
@@ -4869,6 +5104,7 @@ function createNotificationsTool(agent, tool, userName) {
           createdAt: message.createdAt,
           notify: stepEnd ? NOTIFY_STEP_END : NOTIFY_TURN_END,
           text: message.text,
+          wake: wakes.get(message.messageId),
         })),
       })
     },
@@ -4895,7 +5131,8 @@ function createCommunicationTools(agent, tool) {
       description:
         'Post to "#general" (the default) or to a group channel you are a member of. wake is required and '
         + 'decides who is woken; an empty list writes to the record without waking anyone, who can still read '
-        + 'it with office_read. A group channel wakes its own members among the ones the wake addresses. '
+        + 'it with office_read. A level is scoped to the channel it is posted to, so a post inside a group '
+        + 'channel wakes only that channel\'s own members among the colleagues the level reaches. '
         + 'A post spends a turn of everyone it wakes, so post only what those colleagues should learn from — '
         + 'and answer a message where it stands: in its channel when it was public, with office_dm when it was '
         + 'private. Silence is the normal answer to a delivered message, and a burst of them is one answer '
@@ -4908,9 +5145,10 @@ function createCommunicationTools(agent, tool) {
         },
         wake: {
           type: 'array',
-          description: 'Required. Who this post wakes: colleagues as "@alice", or exactly one level — '
-            + '"#consultant" (every colleague), "#member" (members and leaders), "#leader" (leaders only). An '
-            + 'empty list wakes nobody. Waking is explicit and never inferred from the text.',
+          description: 'Required. Who this post wakes, in one of three spellings: colleagues as "@alice", '
+            + 'exactly one level — "$member" (the whole office), "$leader" (leaders only) — or exactly one '
+            + 'channel, "#dev", which wakes that channel\'s members wherever the post goes. An empty list wakes '
+            + 'nobody. Waking is explicit and never inferred from the text.',
           items: { type: 'string' },
         },
         text: { type: 'string', description: 'The message body.' },
@@ -4925,10 +5163,11 @@ function createCommunicationTools(agent, tool) {
         const { office, name: officeName } = resolved
         tool.require(resolved, 'post', 'office_post')
         const body = requireText(args, 'office_post')
+        // The sender comes first: a channel wake never includes the session that wrote it.
+        const sender = await office.senderOf(agent)
         // The arguments are settled before the destination is: a call that names no audience is
         // refused as such, whatever channel it was aimed at.
-        const audience = await office.resolveWake(args?.wake, 'office_post')
-        const sender = await office.senderOf(agent)
+        const audience = await office.resolveWake(args?.wake, 'office_post', sender.sessionId)
         // The standing public channel keeps its spellings; anything else must name a channel the
         // caller belongs to. Direct channels are office_dm's business, not a spelling of this.
         const requested = typeof args?.channel === 'string' && args.channel.trim().length > 0
@@ -4950,6 +5189,7 @@ function createCommunicationTools(agent, tool) {
           recipients: audience.colleagues,
           kind: 'public',
           wakeLevel: audience.level,
+          wakeChannel: audience.channel,
           toUser: audience.toUser,
           notify: requireNotify(args?.notify, 'office_post'),
         }), officeName)
@@ -4961,11 +5201,11 @@ function createCommunicationTools(agent, tool) {
       name: 'office_dm',
       description:
         'Send one colleague a private message, for short exchanges that do not need the whole office. wake is '
-        + 'required and names exactly one colleague, "@alice", or the user; a level is refused — a private '
-        + 'message is one conversation, so use office_post to wake a level. The message is delivered into that '
-        + 'colleague\'s session as a user turn, waking it if it is inactive, and a colleague that is mid-turn '
-        + 'is not interrupted. Every delivery outcome is reported. Addressing the user writes to the user '
-        + 'mailbox, where nothing is woken.',
+        + 'required and names exactly one colleague, "@alice", or the user; a level and a channel are refused — '
+        + 'a private message is one conversation, so use office_post to wake a level or a channel. The message '
+        + 'is delivered into that colleague\'s session as a user turn, waking it if it is inactive, and a '
+        + 'colleague that is mid-turn is not interrupted. Every delivery outcome is reported. Addressing the '
+        + 'user writes to the user mailbox, where nothing is woken.',
       parameters: tool.parameters(['wake', 'text'], {
         wake: {
           type: 'array',
@@ -4987,11 +5227,15 @@ function createCommunicationTools(agent, tool) {
         const body = requireText(args, 'office_dm')
         const notify = requireNotify(args?.notify, 'office_dm')
         const sender = await office.senderOf(agent)
-        const audience = await office.resolveWake(args?.wake, 'office_dm')
-        if (audience.level !== undefined) {
+        const audience = await office.resolveWake(args?.wake, 'office_dm', sender.sessionId)
+        if (audience.level !== undefined || audience.channel !== undefined) {
+          const named = audience.level === undefined
+            ? `${WAKE_CHANNEL_TRIGGER}${audience.channel}`
+            : `${WAKE_LEVEL_TRIGGER}${audience.level}`
           throw new Error(
-            `office_dm: wake names one colleague, and "#${audience.level}" is a level; a private message `
-            + 'cannot address a rung of the office — use office_post to wake a level',
+            `office_dm: wake names one colleague, and "${named}" is `
+            + `${audience.level === undefined ? 'a channel' : 'a level'}; a private message is one `
+            + 'conversation — use office_post to wake a level or a channel',
           )
         }
         if (audience.colleagues.length + (audience.toUser ? 1 : 0) !== 1) {
@@ -5077,9 +5321,9 @@ function keepsAskUserTool(agent) {
  * set. `undefined` means the agent holds no office role at all.
  *
  * The question tool is part of the signature even where a role change already moves the
- * capabilities: `member` and `consultant` hold the same office capabilities and differ only in the
- * session permission they run under, so a signature built from capabilities alone could not say
- * whether the two owe different globals.
+ * capabilities: `askUserRoles` belongs to the office row, so the same capability set can owe
+ * different globals in two offices one agent belongs to at once — one lists the role and another
+ * leaves it out — and a signature built from capabilities alone could not tell the two sets apart.
  * @param agent - the agent whose set is described.
  * @returns the signature, or undefined when the agent holds no office tool.
  */
@@ -5258,15 +5502,75 @@ function officeRowId(name) {
 }
 
 /**
+ * How one stored message states the wake it was written with, for the panel's message bubble.
+ *
+ * The token is shown as the caller wrote it, because that is the act: a level reaches different
+ * colleagues as the roster changes, and a bubble is a record of who was addressed rather than of
+ * who happened to be there. A wake that named colleagues stores the sessions it resolved to, so
+ * those are named here; a wake recorded as reaching nobody says so.
+ * @param message - the stored message record.
+ * @param view - what the panel resolves a message against; see {@link panelView}.
+ * @returns the wake to display, or undefined for a record that states no wake at all.
+ */
+function wakeLabelOf(message, view) {
+  // A summary is not a message anybody addressed: the office writes it to replace a range, so it
+  // states no wake even though its record carries the empty recipient list that shape implies.
+  if (message.kind === 'summary') return undefined
+  if (typeof message.audience === 'string' && message.audience.length > 0) {
+    return currentWakeToken(message.audience)
+  }
+  if (!Array.isArray(message.recipients)) return undefined
+  if (message.recipients.length === 0) {
+    // A mailbox record woke no session: it was written for the user, who has none.
+    return message.kind === 'mailbox' ? `@${view.userName}` : 'nobody'
+  }
+  return message.recipients
+    .map(sessionId => `@${view.nameBySession.get(sessionId) ?? shortSessionId(sessionId)}`)
+    .join(' ')
+}
+
+/**
+ * The token a stored message states, in the spelling that addresses it today.
+ *
+ * A message stored before levels moved to `$` recorded `#leader` and its like, which `#` no longer
+ * means: a channel cannot be woken under a role's name, because that spelling is refused as
+ * retired, so an old `#level` is unambiguous and is shown as the level it reached.
+ * @param token - the `audience` a stored message carries.
+ * @returns the token to display.
+ */
+function currentWakeToken(token) {
+  if (!token.startsWith(WAKE_CHANNEL_TRIGGER)) return token
+  const level = RETIRED_WAKE_LEVELS[token.slice(1)]
+  return level === undefined ? token : `${WAKE_LEVEL_TRIGGER}${level}`
+}
+
+/**
+ * What every message view of one answer resolves against, built once per read.
+ *
+ * @param mounted - the mounted office entry.
+ * @param colleagues - the roster as the answer reports it.
+ * @returns the colleague names a body may mention (the user's included), the ids of the channels a
+ *   wake may name, the display name of each colleague session, and the user's own name.
+ */
+function panelView(mounted, colleagues) {
+  return {
+    names: [...colleagues.map(entry => entry.name), mounted.config.userName],
+    channelIds: mounted.office.wakeableChannelIds(),
+    nameBySession: new Map(colleagues.map(entry => [entry.sessionId, entry.name])),
+    userName: mounted.config.userName,
+  }
+}
+
+/**
  * Project one stored message onto the shape the panel renders.
  *
  * One projection for the snapshot and the history page, so a message cannot read one way while
  * it is the newest page and another way after the reader unfolds the older ones.
  * @param message - the stored message record.
- * @param names - the colleague names, so the panel colors exactly the mentions that resolved.
+ * @param view - what the panel resolves the body and the wake against; see {@link panelView}.
  * @returns the panel's message view.
  */
-function panelMessage(message, names) {
+function panelMessage(message, view) {
   return compact({
     messageId: message.messageId,
     // The sequence number is what the panel's folded row asks below when it unfolds older
@@ -5278,12 +5582,16 @@ function panelMessage(message, names) {
     text: message.text,
     covers: Array.isArray(message.covers) ? message.covers : undefined,
     recipients: message.recipients,
-    // The level the post addressed, when it addressed one, so the panel colors a level token only
-    // where it decided the wake rather than wherever one appears in prose.
+    // The token the post addressed, when it addressed one, so the panel colors a level or a channel
+    // token only where it decided the wake rather than wherever one appears in prose.
     audience: message.audience,
+    // What the bubble states as the wake: the token the caller addressed, or — since a wake that
+    // named colleagues records no token — the colleagues it resolved to.
+    wake: wakeLabelOf(message, view),
     // Where a mailbox copy came from, so the panel can say it was also said in a channel.
     origin: message.origin,
-    mentions: mentionsIn(message.text, names),
+    mentions: mentionsIn(message.text, view.names),
+    channels: channelsIn(message.text, view.channelIds),
   })
 }
 
@@ -5417,7 +5725,7 @@ async function officeState(ctx, mounted, requestedChannel, since) {
   const colleagues = await office.rosterStatus(records)
   // The user name is a mention target like a colleague name, so the panel colors it in the same
   // pass: a body that named the user is exactly what the mailbox exists to collect.
-  const names = [...colleagues.map(entry => entry.name), mounted.config.userName]
+  const view = panelView(mounted, colleagues)
   const limit = hostConfig().readLimit
   const mailbox = office.readMessages(office.mailboxChannel, Infinity)
   const selected = office.readMessages(channelId, Infinity)
@@ -5451,9 +5759,9 @@ async function officeState(ctx, mounted, requestedChannel, since) {
     // The selected channel's newest page, general when the selected channel *is* general. The
     // two totals travel with their lists, because the panel renders the newest page and folds
     // the rest behind one row.
-    messages: selected.slice(-limit).map(m => panelMessage(m, names)),
+    messages: selected.slice(-limit).map(m => panelMessage(m, view)),
     messagesTotal: selected.length,
-    mailbox: mailbox.slice(-limit).map(m => panelMessage(m, names)),
+    mailbox: mailbox.slice(-limit).map(m => panelMessage(m, view)),
     mailboxTotal: mailbox.length,
     workspaces: (ctx.get('workspaceRegistry')?.list() ?? []).map(workspace => ({
       id: workspace.id,
@@ -5503,17 +5811,17 @@ function resolvePanelChannel(office, requested) {
  * @param channelId - the channel to read.
  * @param before - return messages older than this sequence; absent reads the newest page.
  * @param limit - the page size, already bounded by the host's ceiling.
- * @param names - the colleague names the message view resolves mentions against.
+ * @param view - what the message view resolves a body and a wake against; see {@link panelView}.
  * @returns the page, oldest first, and whether older messages remain.
  */
-function officeHistory(mounted, channelId, before, limit, names) {
+function officeHistory(mounted, channelId, before, limit, view) {
   const all = mounted.office.readMessages(channelId, Infinity)
   const older = before === undefined ? all : all.filter(message => message.seq < before)
   const page = older.slice(-limit)
   return {
     office: mounted.name,
     channelId,
-    messages: page.map(message => panelMessage(message, names)),
+    messages: page.map(message => panelMessage(message, view)),
     total: all.length,
     truncated: page.length < older.length,
   }
@@ -5620,11 +5928,8 @@ function registerHostRoutes(ctx, config) {
           if (!Number.isSafeInteger(limit) || limit <= 0 || limit > hostConfig().readLimitMax) {
             return respondJson(res, 400, { error: `limit must be a positive integer no greater than ${String(hostConfig().readLimitMax)}` })
           }
-          const names = [
-            ...(await mounted.office.listColleagues()).map(entry => entry.name),
-            mounted.config.userName,
-          ]
-          return respondJson(res, 200, officeHistory(mounted, channelId, before, limit, names))
+          const view = panelView(mounted, await mounted.office.listColleagues())
+          return respondJson(res, 200, officeHistory(mounted, channelId, before, limit, view))
         } catch (error) {
           return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
         }
@@ -5645,13 +5950,20 @@ function registerHostRoutes(ctx, config) {
           if (typeof body.text !== 'string' || body.text.length === 0) {
             return respondJson(res, 400, { error: 'text must be a non-empty string' })
           }
-          // The panel sends the body alone: who is woken follows from the names and levels written
-          // in it, so nothing a client claims can wake a colleague the message does not address.
-          // The user's name is scanned the same way, which is what collects `@user` into the mailbox.
+          // The panel sends the body alone: who is woken follows from the names, levels, and
+          // channels written in it, so nothing a client claims can wake a colleague the message
+          // does not address. The user's name is scanned the same way, which is what collects
+          // `@user` into the mailbox, and only the addressable channels are scanned, so a body
+          // that happens to spell "#mailbox" or a direct channel is prose.
           const roster = await mounted.office.listColleagues()
           const audience = await mounted.office.resolveWake(
-            wakeTokensIn(body.text, [...roster.map(entry => entry.name), mounted.config.userName]),
+            wakeTokensIn(
+              body.text,
+              [...roster.map(entry => entry.name), mounted.config.userName],
+              mounted.office.wakeableChannelIds(),
+            ),
             'office',
+            undefined,
           )
           // The panel may write to any channel the office holds for reading: the standing public
           // one unless it names another. The mailbox has its own composer concerns and the
@@ -5666,6 +5978,7 @@ function registerHostRoutes(ctx, config) {
             recipients: audience.colleagues,
             kind: 'public',
             wakeLevel: audience.level,
+            wakeChannel: audience.channel,
             toUser: audience.toUser,
             // The panel carries no timing control, so it sends none and gets the office's own
             // default: a colleague that is mid-turn reads a post from the panel at its next step

@@ -37,17 +37,17 @@
         wakesEnabled: true
         # Role -> session permission preset, for the roles that should run under one. This is the
         # DSH permission setting (sandbox mode plus approval policy), a different axis from the
-        # office tools the role holds: `consultant` holds no office write tool AND runs read-only,
-        # while `member` and `leader` keep whatever permission their session has. A role absent
-        # here is left alone, and an override of this row must restate this whole map.
-        rolePermissions:
-          consultant: read-only
+        # office tools the role holds: mapping a role here confines its session without taking any
+        # office tool away. It ships empty, so every role keeps whatever permission its session has;
+        # a deployment that wants a role confined, or a rung run under a narrower sandbox than the
+        # rest of the office, maps it here, and an override of this row must restate the whole map.
+        rolePermissions: {}
         # The roles whose sessions keep the harness's own `ask_user_question`. A colleague's turn
         # is started by a delivered message rather than by a person, so a question asked inside it
         # waits for a human who is not in that Chat; every other role asks the user with
         # `office_dm`, which reaches the mailbox and holds no turn open. The list withdraws the
         # tool rather than granting it, so it does nothing in a deployment whose presets mount no
-        # `tool-ask-user`. Writing all three roles keeps it everywhere, and an empty list takes it
+        # `tool-ask-user`. Writing both roles keeps it everywhere, and an empty list takes it
         # from every colleague; a boss is not one of the roles, because its own preset decides its
         # globals.
         askUserRoles:
@@ -72,8 +72,8 @@
                 You run an agent office. A colleague is an ordinary session in the roster,
                 addressed by its session title: hiring creates and titles one, adopting takes an
                 existing session, and dismissing removes it without deleting the session. Each
-                colleague's role — member, leader, or consultant — decides the office tools it
-                holds and the session permission it runs under. You hold every office tool, so
+                colleague's role — member or leader — decides the office tools it holds and the
+                session permission it runs under. You hold every office tool, so
                 manage the roster and its channels, read any channel, and post to it. Your one
                 other tool is a persistent bash shell, for inspecting what colleagues produced
                 on disk: you hold no file or search tools, so read the roster and the channels

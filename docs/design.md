@@ -37,7 +37,7 @@ Overriding any office value therefore means restating `officeName`.
 | | the host | an office |
 |---|---|---|
 | how many | exactly one per process | any number |
-| config | `readLimit`, `readLimitMax`, `bossPreset`, `profilePatch` | `officeName` (required), `officeId`, `bossPreset`, `userName`, `rolePermissions`, `maxMessageChars`, `wakesEnabled`, `idleNotice` |
+| config | `readLimit`, `readLimitMax`, `bossPreset`, `profilePatch` | `officeName` (required), `officeId`, `bossPreset`, `userName`, `rolePermissions`, `askUserRoles`, `maxMessageChars`, `wakesEnabled`, `idleNotice` |
 | owns | the agent tool set, the Web panel, `/dsh-office/*` | its storage domain, its roster, its channels |
 | registers tools | yes, once per agent that holds an office role | **no** |
 | registers routes | yes, one table for every office | **no** |
@@ -274,12 +274,13 @@ to the plugin. See [delivery.md](delivery.md) for the payload, its JSON rules, a
 
 ## Predefined colleague roles
 
-A colleague's stored `role` is one of `member`, `leader`, or `consultant`, and nothing else. The
-role is not a label because it decides which office tools that colleague's session receives: a
-free-text label would be a permission nobody can predict from the roster, and a rename of the
-label would silently change what a session may do. `canonicalRole` reads an absent or no longer
-predefined value as `member`, which is also the migration path for records written before roles
-existed; `requireRole` refuses an unrecognized value a caller supplies.
+A colleague's stored `role` is one of `member` or `leader`, and nothing else. The role is not a
+label because it decides which office tools that colleague's session receives: a free-text label
+would be a permission nobody can predict from the roster, and a rename of the label would silently
+change what a session may do. `canonicalRole` reads an absent or no longer predefined value as
+`member`, which is also the migration path for records written before roles existed and for a role
+this version retired: a colleague stored as `consultant` is a `member` on the next read, and is
+rewritten as one. `requireRole` refuses an unrecognized value a caller supplies.
 
 A role is two independent things at once:
 
@@ -289,12 +290,13 @@ A role is two independent things at once:
 | session permission preset | sandbox mode and approval policy the colleague's session runs under | `config.rolePermissions`, applied through `ctx.permissionPresets` |
 
 They are separate because they answer different questions: what a colleague may say into the
-office, and what its session may write to disk. The two diverge in `consultant`: its capability
-set speaks like a `member`'s, and the default map runs its session under `read-only`. The two
-restrictions do not compound, because an office tool is this plugin's own code writing through
-the office's storage domain — not a confined capability of the session — so a session that
-cannot write a file can still write history. `member` and `leader` keep whatever permission
-their session already has, because the default map names no preset for them.
+office, and what its session may write to disk. The default map is **empty**, so the two do not
+diverge in any predefined role: `member` and `leader` both keep whatever permission their session
+already has, and a role is exactly the capability set its name promises. What the map exists for is
+the other direction — a deployment that wants a role's session confined writes the preset here, and
+the confinement reaches the files without taking one office tool away, because an office tool is
+this plugin's own code writing through the office's storage domain rather than a confined capability
+of the session, so a session that cannot write a file can still write history.
 
 The preset is applied when a role is **set** — at hire, at adopt, and at the configure that
 carries a role. It is deliberately **not** re-applied on every turn, nor on a description-only
@@ -365,10 +367,10 @@ model can see but cannot use spends a turn, and the refusal is invisible until t
 Every roster event — adopted, configured, dismissed — and every office mount or unmount therefore
 only asks the host to resync the affected agents; only the host installs or withdraws.
 
-The question tool belongs in that signature even where the capabilities already move: `member` and
-`consultant` hold the same office capabilities and differ only in the session permission they run
-under, so a signature built from capabilities alone could not say which of them the row leaves a
-harness tool with.
+The question tool belongs in that signature even where the capabilities already move: which role a
+row leaves the harness tool with is `askUserRoles`'s own decision, independent of the capability
+table, and two offices that adopted the same colleague may vote differently on it, so a signature
+built from capabilities alone could not say whether the tool stays.
 
 ## One required wake, and the ladder a level climbs
 
@@ -381,26 +383,30 @@ that stores a message and in the row config of the notice. Required, not default
 default that was tried here was wrong — waking the whole office by omission spends a turn of every
 colleague, and waking nobody by omission hides the message from the people it was written for.
 
-`wake` names colleagues (`["@alice", "@bob"]`) or one level (`["#consultant"]`, `["#member"]`,
-`["#leader"]`), never both. Two spellings, one meaning: a **level is the lowest rung it may
+`wake` names colleagues (`["@alice", "@bob"]`), one level (`["$member"]`, `["$leader"]`), or one
+channel (`["#dev"]`), and the three spellings are never mixed. A **level is the lowest rung it may
 reach**, so it wakes its own privilege and every rung above it. That direction is the point. A
 level is not "the members", it is "at least the members", which is what makes it an escalation
-ladder rather than three more names for the three roles: `#consultant` therefore reaches the whole
-office.
+ladder rather than a second name for a role: `$member` therefore reaches the whole office. A
+channel is the third spelling because a group channel's stored members are already an audience, and
+asking for them is a different question from asking for a rung: `#dev` wakes `dev`'s members
+wherever the message is posted, and `#general` wakes the whole roster.
 
-The rungs are ordered by the **session permission** a role runs under, not by its office
-capabilities, and that is the one place the two axes of the role model disagree: `member` and
-`consultant` hold exactly the same tools, while the default map runs the consultant's session
-`read-only`. The consultant is therefore the bottom rung — the least authority reaches the most
-colleagues — and `#member` stops below it. Reading the ladder off the capability table instead
-would make `#member` and `#consultant` equal, which is a ladder that cannot be climbed.
+The rungs are the predefined roles themselves, and a level token spells the role it names, so the
+ladder cannot drift from the capability table: `member` is the lower rung, `leader` the higher one,
+and the lower spelling is the one that reaches everybody. The row's `rolePermissions` map is
+deliberately not what orders them: it confines a session's own disk writes, which is a different
+question from who hears a message, and it ships empty, so a ladder read off it would have no rungs
+at all.
 
 Two rules narrow a level and neither narrows a name. A level is scoped to the channel it is posted
 to, because a group channel's members already decide who a post there wakes; naming a colleague is
-addressing that colleague, and the channel does not get between them. And no session is ever in its
-own audience, which the old `mention_all` path enforced and the named path did not. `office_dm`
-accepts names only: a private message is one conversation, and a rung is reached with
-`office_post`, so a level there is refused with a message that says where to go instead.
+addressing that colleague, and the channel does not get between them. A channel token is scoped to
+the channel it names instead, and it may name a channel its sender is not in: an address is not a
+read, exactly as naming a colleague is not. And no session is ever in its own audience, which the
+old `mention_all` path enforced and the named path did not. `office_dm` accepts names only: a
+private message is one conversation, and a rung or a channel is reached with `office_post`, so a
+level or a channel there is refused with a message that says where to go instead.
 
 `wake: []` is a decision rather than an omission — it writes the message to the record and wakes
 nobody. It replaces `mention_all: false` and `mentions: []`, which is what kept the office's own
@@ -409,12 +415,13 @@ still needs a spelling.
 
 The panel keeps deriving its audience from the **stored body** and sends no audience of its own,
 because that invariant is what stops a client from waking a colleague the message does not address.
-It had to grow the same vocabulary to do it: `#` opens the three levels where `@` opens the roster,
-`levelsIn` resolves them by the boundary rule `mentionsIn` uses, and the **Wake everyone** checkbox
-went away rather than being kept in step with the server — a check box cannot express "at least the
-members", and a token in the body can. The message record carries the level it addressed in
-`audience`, which is how the panel colors a level token only where it actually decided the wake
-(see [data-model.md](data-model.md)).
+It had to grow the same vocabulary to do it: `@` opens the roster, `$` opens the levels, and `#`
+opens the channels a wake may name, `levelsIn` and `channelsIn` resolve their tokens by the
+boundary rule `mentionsIn` uses, and the **Wake everyone** checkbox went away rather than being kept
+in step with the server — a check box cannot express "at least the members", and a token in the body
+can. The message record carries the token a level or a channel addressed in `audience`, which is how
+the panel colors such a token only where it actually decided the wake (see
+[data-model.md](data-model.md)).
 
 ## Group channels and the `channels` capability
 
@@ -621,8 +628,8 @@ whole roster has stopped, and nothing in the record says what comes next. No col
 that on its own: the ones who would notice are idle, and an idle session has no turn to notice
 anything in. `idleNotice`, off by default on every office row, is the office taking that turn for
 them: it posts one question to `idleNotice.channel`, addressed to `idleNotice.wake` — the colleagues
-at the `#leader` rung and above, unless the row asks somebody else — and asks them to decide what
-happens next.
+at the `$leader` rung, unless the row asks somebody else — and asks them to decide what happens
+next.
 
 Three properties decide its shape.
 

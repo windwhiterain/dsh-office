@@ -49,7 +49,7 @@ as a malformed tool result.
 |---|---|---|
 | `colleagues` | session id | `{ sessionId, role, description?, adoptedAt, rosterSeen? }` |
 | `channels` | channel id | `{ channelId, kind, name, topic, members, createdAt, nextSeq }` |
-| `messages` | `<channelId>#<seq>` | `{ messageId, channelId, channelName, kind, seq, senderName, senderSessionId?, recipients, text, createdAt, deliveries, covers?, replaced?, origin? }` |
+| `messages` | `<channelId>#<seq>` | `{ messageId, channelId, channelName, kind, seq, senderName, senderSessionId?, recipients, audience?, text, createdAt, deliveries, covers?, replaced?, origin? }` |
 | `pending` | `<sessionId>#<messageId>` | `{ sessionId, channelId, seq, at }` |
 | `notices` | notice kind | `{ messageId }` |
 
@@ -61,7 +61,7 @@ session is a colleague of an office at most once.
 | Field | Meaning |
 |---|---|
 | `sessionId` | The colleague's session; the record key. |
-| `role` | One of `member`, `leader`, `consultant`. Canonicalized on **every** write, so a stored value that is absent or no longer predefined reads as `member` and is rewritten as such. |
+| `role` | One of `member`, `leader`. Canonicalized on **every** write, so a stored value that is absent or no longer predefined reads as `member` and is rewritten as such — which is how a record stored with the retired `consultant` role becomes a member rather than an unresolvable permission. |
 | `description` | Optional. Trimmed, at most 2000 characters, and removed entirely when the caller passes an empty string, so the field is absent rather than empty. It reaches the colleague's onboarding turn, the roster, and the panel. |
 | `adoptedAt` | When the session entered the roster; preserved across a re-adopt or a role change. |
 | `rosterSeen` | On a **leader** only: the [roster revision](delivery.md#the-roster-line) this colleague has been told. Absent until the office tells it one, which is what makes a promoted member start from the office it finds rather than from a change it never saw. |
@@ -117,7 +117,7 @@ feeds or a direct channel.
 | `senderName` | The sender's name at the time of writing: a session title, the short-id fallback, `userName`, or `office` for the one message the office writes itself. |
 | `senderSessionId` | The sender's session, **absent** when no session authored the message: a post from the panel, and the office's own idle notice. |
 | `recipients` | The session ids the message was addressed to. Empty on a summary or a mailbox record. |
-| `audience` | On a message addressed to a **level** only: the token it named, `#consultant`, `#member`, or `#leader`. The resolved audience is `recipients`; this is what says the post aimed at a rung rather than at names. |
+| `audience` | On a message addressed to a **level or a channel** only: the token it named, `$member`, `$leader`, or `#dev`. The resolved audience is `recipients`; this is what says the post aimed at a level or a channel rather than at names. |
 | `text` | The body. A summary's body is the text a model wrote for the range. |
 | `createdAt` | Unix milliseconds. |
 | `deliveries` | One outcome per recipient, keyed by the recipient's session id, or by `userName` for the user. Its values and statuses are in [delivery.md](delivery.md). |
@@ -130,6 +130,17 @@ order is sequence order inside a channel and the `pending` table can name a mess
 `(channelId, seq)` alone. `validateMessage` requires `messageId` and `text` to be strings and a
 `summary` to carry a two-integer `covers`; a summary that lost that pair would otherwise fail
 later as an index into nothing.
+
+`audience` is stored as the caller spelled it, so a message written before levels moved to `$`
+carries `#leader` and its like, and the record is not rewritten. What a surface states as that
+message's wake is derived from the record instead: a level or a channel shows the token it addressed
+(`$member`, `#dev`), with an old spelling read as the level it means — `#leader` shows as `$leader`,
+and `#member` or the retired `#consultant` as `$member` — because `#name` addresses a channel today
+and a channel spelled after a role is refused as a wake; a named wake stores no token, so the
+colleagues it resolved to are named (`@alice @bob`), a message that reached nobody reads `nobody`,
+and a mailbox record `@<userName>`. The body's own coloring still compares the raw `audience`, so a
+body that spells the retired token renders uncolored. A `summary` addresses nobody, so it states no
+wake at all.
 
 ### `pending`
 

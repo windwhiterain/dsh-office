@@ -28,19 +28,25 @@ What it covers, by area:
   role that is no longer predefined, and `askUserRoles` withdrawing the harness's question tool —
   per role, across a role change, across two offices that vote as a union, on a session the office
   never armed, and in a deployment that mounts no such tool at all.
-- **The wake** — the required `wake` argument and its two spellings: each level reaching its own
-  rung and every rung above it, a named wake staying exactly the colleagues it names, the sender
-  never woken by its own post, an empty list waking nobody, and the refusals: an omitted or
-  non-array `wake`, a name without its `@`, a level nobody predefined, a level combined with
-  anything else, and a name that matches no session title. `office_dm` naming exactly one colleague
-  and refusing a level, and the panel route deriving the same tokens from the body it stores are
-  covered beside it.
+- **The wake** — the required `wake` argument and its three spellings: each level reaching its own
+  rung and every rung above it, a channel addressing exactly the members of the channel it names,
+  a named wake staying exactly the colleagues it names, the sender never woken by its own post, an
+  empty list waking nobody, and the refusals: an omitted or non-array `wake`, a name without its
+  `@`, a level nobody predefined, a channel the office does not hold or one that is not
+  addressable, a level or a channel combined with anything else, a wake level spelled with the
+  trigger channels now use, and a name that matches no session title. `office_dm` naming exactly one
+  colleague and refusing a level and a channel, and the panel route deriving the same tokens from
+  the body it stores are covered beside it. The wake is also covered where an **agent** meets it: a
+  delivered frame states the token, or the colleagues a named wake resolved to, and an `office_read`
+  page states the same clause per message — including `nobody` for a message that woke nobody and a
+  pre-`$` stored `audience` read back in the spelling that addresses it today.
 - **Delivery** — the default timing steering a post and a dm into a running turn and the refusal of
   an unknown timing, the `source.kind` each delivery claims (`user` on the splice the Web Chat draws
   as an in-turn message, `office-message` on the turn it draws as a trigger), `turn-end` merging a
   burst into one turn, a durable hold surviving a simulated restart, cold resume on the route the
   session last logged, delivery statuses, and the frames, which name the sender as a colleague or as
-  the user and carry the one delivery line. A **leader's frame** also carries the office's own lines:
+  the user, state the wake the message was written with, and carry the one delivery line. A **leader's
+  frame** also carries the office's own lines:
   the load tally counted at each hand-over rather than stored or cached, an unloaded colleague counted
   in the roster and never among the working, the leader reading a splice into its own turn counted in
   it, a merged turn stating it once, and the same lines on `office_read_notifications` for a leader
@@ -110,8 +116,9 @@ its own head, opening the mailbox sidebar and asserting its scrollport is not th
 closing it again from its own ✕, unfolding a folded history row (asserting the history request is
 made *below* the oldest message the feed holds, and that the older page is prepended), switching
 the channel column between `#general` and a group channel through the switcher, opening the
-Channels dialog onto the group channels, and seeding the colleague dialog from the colleague it
-was opened on.
+Channels dialog onto the group channels, seeding the colleague dialog from the colleague it
+was opened on, and asserting the wake each feed message states — the token the office recorded for
+it, and `nobody` for one that woke nobody.
 
 The first snapshot is held back, which is the page's loading window: the check asserts the body
 says it is loading, holds **no button and no field at all**, and reports itself busy, and that

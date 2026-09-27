@@ -17,8 +17,8 @@ The order inside one post is fixed:
 1. The body is bounded by the office's `maxMessageChars`.
 2. The channel is resolved (`#general`, a group channel the caller is a member of, or the direct
    channel for `kind: 'dm'`), and the audience with it — the whole roster except the sender for
-   the standing public channel, the group channel's **members** for one the office created, or
-   the named recipients.
+   the standing public channel, the group channel's **members** for one the office created, the
+   named recipients, or the members of the channel a channel wake named.
 3. The sequence is allocated, and the message record is written with an empty `deliveries`.
 4. If the message also addresses the user, it is copied into the mailbox **after** the message
    itself is stored, so the office's own history never depends on the mailbox being writable. A
@@ -142,34 +142,40 @@ colleague actually got, and the detail is why it was not the splice its sender a
 ## Who is woken
 
 Every tool that writes a message takes a **required** `wake`, and nothing wakes anybody by
-default. It names colleagues, or one level, and the two spellings are never mixed:
+default. It names colleagues, one level, or one channel, and the three spellings are never mixed:
 
 | call | audience |
 |---|---|
 | `office_post` with `wake: ["@alice", "@bob"]` | exactly the named colleagues, whether or not the channel holds them |
-| `office_post` with `wake: ["#leader"]` to `#general` | every colleague at the leader rung or above, except the sender |
-| `office_post` with `wake: ["#member"]` to a group channel | that channel's members among the member rung and above, except the sender |
+| `office_post` with `wake: ["$leader"]` to `#general` | every colleague at the leader rung or above — the leaders alone — except the sender |
+| `office_post` with `wake: ["$member"]` to a group channel | that channel's members among the member rung and above, except the sender |
+| `office_post` with `wake: ["#dev"]` | the members of the group channel `dev`, wherever the post goes, except the sender |
+| `office_post` with `wake: ["#general"]` | the whole roster, except the sender |
 | `office_post` with `wake: []` | nobody; the message is written to the channel |
 | `office_post` naming the user (`"@user"`) | the other names it was given, and a copy in the mailbox |
 | `office_dm` with `wake: ["@alice"]` | that colleague alone, at the timing its `notify` asks for |
 | `office_dm` with `wake: ["@user"]` | the mailbox; no session is woken, and `notify` means nothing to a user with no session |
-| the office's own idle notice | whoever the row's `idleNotice.wake` names: `["#leader"]` unless it says otherwise |
+| the office's own idle notice | whoever the row's `idleNotice.wake` names: `["$leader"]` unless it says otherwise |
 
 A level is the **lowest rung it may reach**: it wakes its own privilege and every rung above it, so
-`#consultant` reaches the whole office, `#member` reaches the members and the leaders, and
-`#leader` reaches the leaders alone. The rung is the session permission a role runs under, which
-is why the read-only `consultant` is the bottom one; the ladder and its table are in
-[README.md](../README.md#who-a-message-wakes).
+`$member` reaches the whole office and `$leader` reaches the leaders alone. The rungs are the
+predefined roles, so the ladder cannot drift from the capability table; the ladder and its table are
+in [README.md](../README.md#who-a-message-wakes).
+
+A channel token addresses that channel's own members instead, wherever the message is posted, which
+is why it stands alone: it already decides a whole audience, exactly as a level does.
 
 Two rules narrow a level and never a name. A level is **scoped to the channel** it is posted to —
 the whole roster in `#general`, that channel's members in a group one — because its members decide
 who a post there wakes; naming a colleague addresses that colleague, so the channel does not
-intervene. And a session never receives its own message, whichever spelling was used.
+intervene. A channel token is scoped to the channel it names instead, and it may name a channel its
+sender is not in, because an address is not a read. And a session never receives its own message,
+whichever spelling was used.
 
-`office_dm` names exactly one colleague and refuses a level: a private message is one
-conversation, and a rung is reached with `office_post`. Every `office_post` row carries the same
-timing choice as `office_dm`: a post and a dm differ in who they reach, never in when a recipient
-that is mid-turn reads them.
+`office_dm` names exactly one colleague and refuses a level and a channel alike: a private message
+is one conversation, and a rung or a channel is reached with `office_post`. Every `office_post` row
+carries the same timing choice as `office_dm`: a post and a dm differ in who they reach, never in
+when a recipient that is mid-turn reads them.
 
 The office is the one sender that is not a session, and it has one message to send: when the whole
 roster has stopped and something was written since the office last asked, it posts `idleNotice.text`
@@ -179,13 +185,19 @@ the office no session asked for; [design.md](design.md) says why it exists and w
 repeating.
 
 The panel carries no audience of its own: it sends the body, and the office derives the wake from
-the **stored body** by the same token rule the panel colors — `@` names and `#` levels. So no
-client can wake a colleague the message does not name, and the composer has no switch to keep in
-step with the server.
+the **stored body** by the same token rule the panel colors — `@` names, `$` levels, and `#`
+channels. So no client can wake a colleague the message does not name, and the composer has no
+switch to keep in step with the server.
 
 Waking is not the same as reading. A message nobody is notified for still sits in its channel,
 where `office_read` finds it. That is the point of the empty wake: a notice that is not worth a
 turn.
+
+The wake the office recorded is also what the panel's message bubble states, beside the sequence
+and the sender: the token a level or a channel addressed, in today's spelling — a message stored
+before levels moved to `$` shows `#leader` as `$leader` — the colleagues a named wake resolved to,
+`nobody` for a message that woke nobody, and `@<userName>` for a mailbox record. A compacted-range
+summary states no wake at all, because it is not a message anybody addressed.
 
 ## Cold resume
 
@@ -273,7 +285,7 @@ with "carries non-JSON-serializable data".
 One message:
 
 ```text
-[office #general from colleague alice | general-9]
+[office #general from colleague alice | wake @bob | general-9]
 @bob can you take this?
 
 (What you write yourself reaches only the user; only an office tool notifies a colleague.)
@@ -284,23 +296,30 @@ A turn that carries a merged burst — its header says how many, and each messag
 ```text
 [office office | 3 messages arrived while you were working]
 
-[office #general from colleague carol | general-6]
+[office #general from colleague carol | wake $member | general-6]
 the build is green again
 
-[office #general from colleague dave | general-7]
+[office #general from colleague dave | wake @bob | general-7]
 thanks — merging
 
-[office DM from colleague erin | dm-….4]
+[office DM from colleague erin | wake @bob | dm-….4]
 can you look at this before I ship?
 
 (What you write yourself reaches only the user; only an office tool notifies a colleague.)
 ```
 
-The frame names the sender as a colleague or as the user, the destination, and the message
-identity, so the receiving colleague can attribute and answer the message without reading the
-office domain. A message the human sent says `from the user`; every other sender is a colleague,
-because those are the only two things a colleague can be. [The answering rule](#the-answering-rule)
-says what the trailing line is doing there and what is deliberately not next to it.
+The frame names the sender as a colleague or as the user, the destination, the wake the message was
+written with, and the message identity, so the receiving colleague can attribute and answer the
+message without reading the office domain. A message the human sent says `from the user`; every
+other sender is a colleague, because those are the only two things a colleague can be. The wake is
+stated because it is not in the body: a post takes its audience as an argument, so the reader would
+otherwise have to guess whether it was named, reached as a rung, or was in a channel the message
+addressed — the three answers that decide whether the message is the reader's to answer. It reads as
+the token the sender addressed (`wake $member`, `wake #dev`), or as the colleagues a named wake
+resolved to (`wake @alice @bob`); the label is resolved as the frame is composed, against the roster
+of that moment, and is never stored with the message.
+[The answering rule](#the-answering-rule) says what the trailing line is doing there and what is
+deliberately not next to it.
 
 ### The staleness line
 
@@ -372,7 +391,7 @@ that is working from memory, and a reader the office could not hand a turn to is
 A **leader**'s frame carries this line too, taken from the live registry as the frame is composed:
 
 ```text
-[office #general from colleague carol | general-9]
+[office #general from colleague carol | wake $member | general-9]
 the build is green again
 
 Office parallelism: 2/5 — 5 colleague(s) in the roster, 2 working.
@@ -401,9 +420,9 @@ size it is, and the load line is where that roster stands. The budget both belon
 
 ## The answering rule
 
-Any caller can address the whole office with one level, and a colleague that answers every wake in
-public multiplies that reach: one post wakes every colleague, each woken colleague posts an
-answer, and the answers wake the office again. Three rules stop that:
+Any caller can address the whole office with one level or one channel, and a colleague that answers
+every wake in public multiplies that reach: one post wakes every colleague, each woken colleague
+posts an answer, and the answers wake the office again. Three rules stop that:
 
 - **Silence is the normal answer** to a delivered message.
 - **A message is answered where it stands**: in its channel when it was public, with `office_dm`
@@ -413,8 +432,8 @@ answer, and the answers wake the office again. Three rules stop that:
   work is under way, because a public post wakes every colleague and each of them spends a turn.
 
 They are stated once, in `office_post`'s description. Every predefined role holds `office_post` —
-`member`, `leader`, and `consultant` alike, and the boss holds it too — so the tool a colleague
-answers with is the tool that says how.
+`member` and `leader` alike, and the boss holds it too — so the tool a colleague answers with is the
+tool that says how.
 
 **The paragraph these rules used to form is gone from the frames, and one line replaced it.** The
 full tail was appended to every delivered message — around 400 characters for a public one, the
@@ -495,10 +514,10 @@ office_read_notifications  {}
 
 [office office] 2 notifications were held for you, read here on request:
 
-[office DM from colleague alice | dm-….4]
+[office DM from colleague alice | wake @bob | dm-….4]
 can you look at this before I ship?
 
-[office #general from colleague bob | general-9] (held until the end of your turn)
+[office #general from colleague bob | wake $member | general-9] (held until the end of your turn)
 release is cut
 
 (What you write yourself reaches only the user; only an office tool notifies a colleague.)
@@ -509,6 +528,7 @@ release is cut
 | `messageId`, `channelId`, `channelName`, `kind`, `senderName`, `seq`, `createdAt` | The message, exactly as a frame names it. |
 | `notify` | The timing it was held under, which is the timing its sender asked for. `turn-end` is the one the frame calls out, because it is the one a reader would otherwise not expect. |
 | `text` | The body. |
+| `wake` | The wake the message was written with, in the same spelling a frame states and an `office_read` line states, resolved against the roster at the call rather than stored with the message. |
 
 - **Every role holds it, and it has no `office`-free form of another colleague.** What is held was
   addressed to that colleague alone, so there is no argument naming one: a boss able to read a
@@ -572,7 +592,11 @@ range or filter the caller names.
 | `brief` | Omit the bodies, for scanning a large range before reading it. |
 
 The filters compose and every returned message carries its `channelId` and `seq`, so a caller that
-scanned with `brief` can come back for the bodies. `*` (or `all`) reads every channel
+scanned with `brief` can come back for the bodies. Each message also carries the `wake` it was
+written with, rendered in the head beside its sender — `[general-12] nia · wake $member: …` — and
+resolved the way a frame resolves it, so a reader that was not notified still sees whether the
+message was aimed at it. A message that woke nobody reads `· wake nobody`, and a compacted-range
+summary states none, because it addresses nobody. `*` (or `all`) reads every channel
 `visibleChannels` admits: `#general` and the caller's own direct channels, **never** the mailbox.
 The mailbox is also refused by name, and a channel that is not `#general` and does not name a
 colleague is refused rather than being read as something else.

@@ -101,7 +101,7 @@ const SNAPSHOT = {
   office: 'office',
   officeId: 'office',
   colleagues: [COLLEAGUE, OUTSIDER],
-  roles: [{ id: 'member' }, { id: 'leader' }, { id: 'consultant', permission: 'read-only' }],
+  roles: [{ id: 'member' }, { id: 'leader' }],
   user: { name: 'user' },
   channels: [
     { channelId: 'general', kind: 'public' },
@@ -109,12 +109,12 @@ const SNAPSHOT = {
     { channelId: 'release', kind: 'group', topic: 'everything about cutting a release', members: ['session-nia'] },
   ],
   messages: [
-    { messageId: 'general-10', seq: 10, channelId: 'general', kind: 'public', senderName: 'nia', createdAt: 1, text: 'newest', mentions: [] },
-    { messageId: 'general-11', seq: 11, channelId: 'general', kind: 'public', senderName: 'user', createdAt: 2, text: 'tail', mentions: [] },
+    { messageId: 'general-10', seq: 10, channelId: 'general', kind: 'public', senderName: 'nia', createdAt: 1, text: 'newest', mentions: [], wake: '$member' },
+    { messageId: 'general-11', seq: 11, channelId: 'general', kind: 'public', senderName: 'user', createdAt: 2, text: 'tail', mentions: [], wake: 'nobody' },
   ],
   messagesTotal: 12,
   mailbox: [
-    { messageId: 'mailbox-1', seq: 1, channelId: 'mailbox', kind: 'mailbox', senderName: 'nia', createdAt: 3, text: 'please look at @user', mentions: ['user'], origin: { channelId: 'general', messageId: 'general-9' } },
+    { messageId: 'mailbox-1', seq: 1, channelId: 'mailbox', kind: 'mailbox', senderName: 'nia', createdAt: 3, text: 'please look at @user', mentions: ['user'], wake: '@user', origin: { channelId: 'general', messageId: 'general-9' } },
   ],
   mailboxTotal: 3,
   workspaces: [{ id: 'w1', title: 'Workspace' }],
@@ -280,6 +280,8 @@ assert.match(text(), /#general/, 'the public channel names its own column')
 assert.equal(document.querySelectorAll('[data-channel="general"]').length, 1, 'and owns exactly one scrollport')
 assert.match(text(), /10 earlier messages/, 'the feed folds everything older than the newest page')
 assert.match(text(), /tail/, 'the newest page is rendered')
+assert.match(text(), /wake \$member/, 'a message states the wake the office recorded for it')
+assert.match(text(), /wake nobody/, 'and says so when it woke nobody')
 
 // A poll of the pair already on hand hands the snapshot's token back, and the office's answer that
 // nothing moved redraws nothing: the panel is not rebuilt, so the reader's place in it survives.
@@ -329,6 +331,7 @@ assert.ok(
 )
 assert.match(text(), /Mailbox · @user/, 'the sidebar names the mailbox and the name that reaches it')
 assert.match(text(), /please look at @user/, 'opening the mailbox shows the mail')
+assert.match(text(), /wake @user/, 'a mailbox record states the wake that put it there')
 assert.match(text(), /also in #general as general-9/, 'a copied message says where it was also said')
 assert.match(text(), /2 earlier messages/, 'the mailbox folds its own older messages')
 assert.ok(
