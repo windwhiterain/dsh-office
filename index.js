@@ -3172,6 +3172,32 @@ function createOffice(ctx, domain, config, hooks) {
    */
   const purge = () => purgeDomain(domain, { officeId: config.officeId, name: config.officeName })
 
+  /**
+   * Give back the preset plane of every colleague of this office that is live without one.
+   *
+   * A wake repairs the colleague it is about to hand a turn to, and that is not enough on its own: a
+   * reader may talk to a colleague directly, and the Web surface reaches a session by reusing the
+   * agent that is already live (`createOrAdopt` returns it as it is), so nothing would ever compose
+   * that colleague again — it stays stripped for as long as it stays loaded. Mounting this office is
+   * the other moment the office can act, and it is the one a reload or a remount always produces, so
+   * the sweep runs there and repairs what it can see. One colleague whose stored preset cannot be
+   * mounted is reported and skipped rather than stopping the sweep: the rest of the roster is
+   * repairable whatever one member's record says.
+   */
+  const healPresetPlanes = async () => {
+    for (const colleague of await listColleagues()) {
+      const live = liveAgent(colleague.sessionId)
+      if (live === undefined) continue
+      try {
+        await ensurePresetPlane(live)
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `dsh-office: colleague ${colleague.sessionId} could not be rebound to its preset: ${String(error)}`,
+        )
+      }
+    }
+  }
+
   return {
     name,
     renameOffice,
@@ -3200,6 +3226,7 @@ function createOffice(ctx, domain, config, hooks) {
     rosterStatus,
     leaderLines,
     liveAgent,
+    healPresetPlanes,
     dismiss,
     rename,
     hire,
@@ -6211,6 +6238,12 @@ async function applyOffice(ctx, raw, rowId) {
     syncOfficeTools(ctx.agents.list())
   })
   syncOfficeTools(ctx.agents.list())
+
+  // A colleague that is live without its preset plane answers turns it cannot work with, and nothing
+  // about it changes until something composes it again — so the office repairs the roster it can see
+  // whenever it mounts, which every reload, remount, and Host start produces. See
+  // {@link healPresetPlanes} for why a wake alone is not enough.
+  await office.healPresetPlanes()
 
   // A colleague that finishes a turn is idle, and everything the office held for it while that
   // turn ran is delivered as one turn. `agent/status` is a process-wide agent event, so this

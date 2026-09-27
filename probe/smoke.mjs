@@ -4527,6 +4527,32 @@ await check('a colleague whose plane is restored is armed with the same withdraw
   assert.ok(member.tools.has('office_post'), 'and the office tools are installed beside the restored plane')
 })
 
+await check('mounting an office gives back the plane of a colleague that is already live without one', async () => {
+  const remount = makeHarness({ officeName: 'remount' }, undefined, { rowId: 'office_remount' })
+  await remount.ready
+  const chief = remount.publish('session-remount-boss', { preset: 'office-boss' })
+  remount.titles.set('session-remount-guest', 'guest')
+  // Adopted while it was live, and stripped of its plane: the state a colleague is left in when
+  // nothing composes it again. A reader talking to it directly reaches it through the Web surface,
+  // which reuses the live agent as it is, so no wake ever repairs it — the office has to sweep.
+  const guest = remount.publish('session-remount-guest', { preset: 'standard', bound: false })
+  await callBoss(chief, 'remount', 'office_adopt', { session_id: 'session-remount-guest' })
+  assert.equal(remount.presetBindings.get(guest.ctx), undefined, 'the fake starts it with no plane')
+
+  // A remount is what a source reload, a profile-patch reload, and a Host start all produce.
+  await remount.close()
+  remount.ctx.fiber.entry.options.id = 'office_remount'
+  await apply(remount.ctx, { officeName: 'remount' })
+  assert.equal(
+    remount.presetBindings.get(guest.ctx),
+    'standard',
+    'mounting an office repairs the colleagues it can see, without waiting for a wake',
+  )
+  const row = (await callBoss(chief, 'remount', 'office_colleagues'))
+    .colleagues.find(entry => entry.name === 'guest')
+  assert.equal(row.agentPreset, 'standard', 'and the roster reads the plane it now holds')
+})
+
 await check('a deployment that mounts no preset registry resumes a colleague as it always did', async () => {
   const bareDeployment = makeHarness({ officeName: 'noregistry' }, undefined, {
     rowId: 'office_noregistry',
