@@ -192,7 +192,11 @@ new composition, so:
 That is deliberate: an operator tuning a preset must not pull the plane out from under a session
 that is mid-turn. But it means a preset edit is not visible to a live agent, and the office keeps
 colleagues alive across reloads on purpose ([README](../README.md#installation-lifetime)), so an
-office is where a stale plane is most likely to be met. Two consequences for working here:
+office is where a stale plane is most likely to be met. An agent that is **disposed** and composed
+again — by a reload that owns it, by a Host restart, or by the office waking it from cold — is the
+other case and a new agent: it gets its plane from whatever composed it, which for a colleague is
+the office's own resume path ([delivery.md](delivery.md#cold-resume)). Two consequences for working
+here:
 
 - **A preset change is not a colleague change.** The edit reaches the colleagues the office composes
   *after* it — a cold wake mounts the preset the session's log names, a colleague found live without
