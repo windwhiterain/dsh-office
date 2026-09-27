@@ -2274,10 +2274,16 @@ window.__ModuleLoader__.load({
                     ),
                     h('div', { style: muted },
                       `${colleague.role ?? 'member'} · ${colleague.status ?? 'unknown'}`
+                      + `${colleague.doNotDisturb === true ? ' · do not disturb' : ''}`
                       + `${colleague.permission === undefined ? '' : ` · ${colleague.permission}`}`
                       + `${colleague.pending === undefined || colleague.pending === 0
                         ? ''
                         : ` · ${String(colleague.pending)} held`}`),
+                    // Why it is away, when it published a reason: the flag explains the hold count,
+                    // and the reason is what tells a reader whether to wait or to ask somebody else.
+                    colleague.doNotDisturb !== true || colleague.doNotDisturbNote === undefined
+                      ? null
+                      : h('div', { style: personNote }, colleague.doNotDisturbNote),
                     colleague.description === undefined
                       ? null
                       : h('div', { style: personNote }, colleague.description),

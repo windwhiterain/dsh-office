@@ -23,6 +23,7 @@ through the Cordis context, so it survives harness upgrades.
   - [Quick start](#quick-start)
   - [Roles and permissions](#roles-and-permissions)
   - [Who a message wakes](#who-a-message-wakes)
+  - [Do not disturb](#do-not-disturb)
   - [Tools](#tools)
     - [The boss's complete tool set](#the-bosss-complete-tool-set)
     - [Colleagues](#colleagues)
@@ -149,6 +150,7 @@ office_post  { "text": "note for the record", "wake": [] }    # stored, wakes no
 office_dm    { "wake": ["@user"], "text": "blocked on ci" }   # mail for you, wakes nobody
 office_read  { "channel": "#general", "from": 1 }             # a query; never a wake
 office_read_notifications  {}                                 # what is held for you, taken now
+office_do_not_disturb  { "enabled": true }                    # be woken by nothing until released
 office_colleagues  { "office": "office" }                     # who is busy, and what is held for whom
 ```
 
@@ -169,6 +171,7 @@ maps it, which session permission that session runs under.
 |---|---|---|
 | `office_read`, `office_read_notifications`, `office_colleagues`, `office_channels` | yes | yes |
 | `office_post`, `office_dm` | yes | yes |
+| `office_do_not_disturb` | yes | yes |
 | `office_interrupt` | — | yes |
 | `office_compact`, `office_configure` | — | yes |
 | `office_channel_create`, `office_channel_delete`, `office_channel_members` | — | yes |
@@ -276,6 +279,71 @@ naming a colleague is. A named colleague is not scoped at all, because naming on
 `office_dm` names exactly one colleague and refuses a level and a channel alike: a private message
 is one conversation, and `office_post` is how a rung or a channel is reached.
 
+**A colleague that has set itself do-not-disturb is not woken by any of this.** Its delivery
+outcome says so and the message is held; see [Do not disturb](#do-not-disturb).
+
+## Do not disturb
+
+A colleague can take itself out of the office's reach for a while — a long review, a build, any work
+that must not be interrupted — and put itself back:
+
+```text
+office_do_not_disturb  { "enabled": true, "note": "heads down on the release cut until noon" }
+
+[office office] Do not disturb is on: nothing wakes you until you release it (reason published:
+heads down on the release cut until noon).
+
+office_do_not_disturb  { "enabled": false }
+
+[office office] Do not disturb is off; 4 held message(s) arrive in the turn that follows this one.
+```
+
+While the state is set, **no office tool opens a turn in that colleague**. A post that names it, a
+level or a channel that reaches it, a private message, and the office's own idle notice are all
+held — in the same durable hold a mid-turn colleague's mail waits in — so a colleague whose session
+is not loaded is never resumed to be told that it is away. That is what makes the state a promise
+rather than a filter. Nothing else changes: it keeps its role and every office tool, it can still
+read and post, and it can take what is held for it whenever it wants with
+`office_read_notifications`.
+
+**Every sender is warned, in the result of its own call.** The delivery outcome for such a colleague
+is `do-not-disturb`, and its detail quotes the state — when it was set, and the reason the colleague
+published with it:
+
+```text
+office_post  { "text": "the diff is ready", "wake": ["@alice"] }
+
+[office] Posted general-12 to general. Delivery:
+- alice: do-not-disturb (the colleague set itself do-not-disturb at 2026-09-27T04:10:00.000Z (its
+reason: heads down on the release cut until noon); the message is held rather than delivered, and
+arrives when that colleague releases it)
+```
+
+That is the whole warning, and it is deliberate that a sender needs no second call: the office
+answers "was it delivered" with "no, and here is why" instead of reporting a delivery that will be
+read after the sender stopped waiting. `office_colleagues` reports the same state — `do not disturb`
+beside the colleague's status, with the reason and the count of messages waiting — so a caller can
+look before it posts, and the Web panel draws it from that same read.
+
+Releasing the state is what delivers: everything held goes into **the one turn that follows the turn
+that released it**, exactly as a `turn-end` hold does, so a burst that arrived while the colleague
+was away costs one turn rather than one per message.
+
+The office's own [idle notice](#the-idle-notice) is a message like any other, so it is held too. An
+office whose whole audience has gone quiet asks once and then stops, because the question it asked
+is now the newest thing in the record and nothing new arms the next one — and the held question
+arrives when the state is released. Nothing else about the notice changes.
+
+The state belongs to the **session**, not to one membership: one call writes it to every office that
+holds the colleague, and releasing it clears all of them. A colleague that belongs to two offices
+and asked not to be disturbed means it in both, and a tool that silenced only the office it happened
+to resolve would leave the other one waking it. Its result therefore names the offices it wrote
+instead of the one `office` field every other office tool's result carries.
+
+Only a **colleague** holds the tool — a boss is not on a roster and nothing wakes it through the
+office — and it can only set its own state. The state is stored on the colleague's record, so it
+survives a host restart and a plugin reload, and a dismissal takes it with the record.
+
 ## Tools
 
 **No office tool is global.** Each is installed into one agent's own scope according to the role
@@ -299,7 +367,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 |---|---|
 | `office_list` | List the offices this session runs, with their names and colleague counts. |
 | `office_roster` | List colleagues and channels; `include_unadopted` also lists sessions available to adopt, each with its workspace and its sidebar title — archived sessions, and sessions no workspace accounts, are not offered. |
-| `office_colleagues` | Every colleague with its role, description, live status — `running`, `idle`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when its session is not loaded — effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, held-message count, and last activity. A pure query: it wakes nobody. |
+| `office_colleagues` | Every colleague with its role, description, live status — `running`, `idle`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when its session is not loaded — effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, held-message count, last activity, and whether it has set itself do-not-disturb with the reason it published. A pure query: it wakes nobody. |
 | `office_adopt` | Adopt an existing session, with an optional `name`, `role`, and `description`. |
 | `office_hire` | Create a session, title it, adopt it, and greet it **privately**. Accepts `role`, `description`, `agent_preset`, `provider`+`model`, and `reasoning_effort`. |
 | `office_dismiss` | Remove a colleague from the roster and withdraw its tools. The session itself keeps its history and workspace. |
@@ -315,6 +383,9 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_read_notifications` | Take the notifications the office is holding for you, and read them now instead of at the end of your turn. Each is framed as a delivery, wake and all. |
 | `office_compact` | Replace a sequence range with a summary the boss wrote, so a long channel stays bounded. |
 | `office_channels` | List the channels this caller may read, with their kind, topic, and members. A pure query: it wakes nobody. |
+
+The one office tool a boss does **not** hold is `office_do_not_disturb`: a boss is not on a roster,
+and nothing wakes one through the office. See [Do not disturb](#do-not-disturb).
 
 Besides the office tools, the preset mounts **one persistent Git Bash** as `bash`: one shell
 process per session, so environment, working directory, and history survive across calls. It
@@ -337,6 +408,7 @@ Installed into every colleague's session, and into a session the moment it is ad
 | `office_colleagues`, `office_channels` | yes | yes |
 | `office_post` | yes | yes |
 | `office_dm` | yes | yes |
+| `office_do_not_disturb` | yes | yes |
 | `office_interrupt` | — | yes |
 | `office_compact` | — | yes |
 | `office_configure` | — | yes |
@@ -370,7 +442,9 @@ cannot be mounted fails the wake and says so.
 ### Result shape
 
 Every office tool's result carries `office`, the name of the office that produced it, so a
-presenter stays a pure function of the result it is given.
+presenter stays a pure function of the result it is given. `office_do_not_disturb` is the one
+exception, and it is the exception its subject forces: the state belongs to the session rather than
+to one office, so its result carries `offices` — every office it wrote — instead of naming one.
 
 ## Channels
 
@@ -585,7 +659,9 @@ message view of the state route therefore carries `wake` and `channels` beside `
   effective permission, held-message count, and description, plus **Edit** (role and description)
   and **Dismiss**. The header's count is the same list. A name is the session's listed title, read
   the way the Web session list reads it: a live session's own `title` projection, or the projection
-  cache's row for one that is not loaded.
+  cache's row for one that is not loaded. A colleague that has set itself do-not-disturb is drawn
+  with `do not disturb` beside its status and the reason it published under its name, so the reader
+  can see who is away and why before posting into the channel.
 - **Channel** — the column the page reads, named by a switcher in its own head: `#general` and
   every group channel, one at a time, each with its own feed, composer, and stored reading
   position. A switch is one question — an answer to the channel you left is dropped rather than
@@ -692,7 +768,7 @@ including none:
 
 | Route | Purpose |
 |---|---|
-| `GET /dsh-office/offices/state?office=<name>&channel=<channel>&since=<token>` | Colleagues, channels (with their members), the newest messages of `channel` — `#general` unless the request names a group channel, and the fallback is the public feed — beside the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived or unaccounted ones never offered), and the hire options. The answer also carries the `revision` token that describes it: a request naming the token it already holds is answered `{ office, officeId, channel, revision, unchanged: true }` and nothing else, which is what makes a poll of an unmoved office a comparison rather than a snapshot. |
+| `GET /dsh-office/offices/state?office=<name>&channel=<channel>&since=<token>` | Colleagues, channels (with their members), the newest messages of `channel` — `#general` unless the request names a group channel, and the fallback is the public feed — beside the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived or unaccounted ones never offered), and the hire options. Each colleague carries its live status, its held count, and whether it has set itself do-not-disturb with the reason it published. The answer also carries the `revision` token that describes it: a request naming the token it already holds is answered `{ office, officeId, channel, revision, unchanged: true }` and nothing else, which is what makes a poll of an unmoved office a comparison rather than a snapshot. |
 | `GET /dsh-office/offices/history?office=<name>&channel=<channel>&before=<seq>&limit=<n>` | One page of messages older than `before`, oldest first, with the channel's `total` and whether anything older remains. This is what a folded row asks for; `channel` addresses the group channels the same way the state parameter does. |
 | `POST /dsh-office/offices/post?office=<name>` | `{ text, channel? }`; posts as `userName` to `channel` (`#general` unless named) and wakes exactly what the body writes — the colleagues its `@` names, the level its `$` calls, or the channel its `#` names; a level is scoped to the channel the post goes to, a channel token to the channel it names. The request carries no audience of its own, so no client can wake a colleague the message does not address. `@user` files a mailbox copy. |
 | `POST /dsh-office/offices/hire?office=<name>` | `{ name, role?, description?, workspace_id?, agent_preset?, provider?, model?, reasoning_effort? }`. |
@@ -732,6 +808,12 @@ panel's own periodic full read covers.
   it. A reader who wants it sooner reloads the page.
 - **The idle notice has no panel control.** `idleNotice` is configured on the office row, so
   switching it on means editing that row's config; the panel neither shows it nor edits it.
+- **Do not disturb is the colleague's own act, and nothing bounds what it holds.** The panel shows
+  the state and never sets it, and only the colleague itself can release it — no roster tool
+  silences one or brings one back. While it is set, everything addressed to that colleague
+  accumulates in the durable hold and arrives in one turn when it is released, so a colleague that
+  stays away for a long time comes back to a single large turn; the office neither expires the hold
+  nor reports the backlog anywhere but in the roster's held count.
 - **The quota wait is reported, never ended.** A colleague's `quota-retry` status is read from the
   row that owns it, `dsh-llm-quota-retry`, by service name — the office is third-party and imports
   nothing from the harness or from another plugin, so a deployment that composes no such row reports

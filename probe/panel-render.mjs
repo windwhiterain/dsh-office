@@ -90,12 +90,14 @@ const COLLEAGUE = {
   permission: 'read-only',
   pending: 2,
 }
-/** A colleague of the office who is not a member of the group channel below. */
+/** A colleague of the office who is not a member of the group channel below, and is away. */
 const OUTSIDER = {
   name: 'omar',
   sessionId: 'session-omar',
   role: 'member',
   status: 'idle',
+  doNotDisturb: true,
+  doNotDisturbNote: 'heads down until noon',
 }
 const SNAPSHOT = {
   office: 'office',
@@ -272,6 +274,12 @@ assert.ok(
 assert.match(text(), /nia/, 'the rail lists the colleague')
 assert.match(text(), /leader · idle · read-only · 2 held/, 'the rail reports role, status, permission, and held mail')
 assert.match(text(), /runs the standup/, 'and the description')
+assert.match(
+  text(),
+  /member · idle · do not disturb/,
+  'the rail reports a colleague that asked not to be disturbed',
+)
+assert.match(text(), /heads down until noon/, 'and the reason it published with the state')
 assert.ok(document.getElementById('dsh-office-colleagues'), 'the roster column is open by default')
 assert.equal(document.getElementById('dsh-office-mailbox'), null, 'the mailbox sidebar is closed by default')
 assert.equal(document.querySelector('[data-channel="mailbox"]'), null, 'so the mailbox draws no feed')

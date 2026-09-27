@@ -118,6 +118,26 @@ const QUOTA_RETRY_STATUS = 'quota-retry'
 const COLLEAGUE_STATUSES = ['running', QUOTA_RETRY_STATUS, 'idle', 'inactive']
 
 /**
+ * The outcome of a wake the office held back because its recipient had set itself do-not-disturb.
+ *
+ * It is a delivery outcome and not a colleague status, because the two are different axes: a
+ * colleague that is away is still `idle` or `inactive` as far as its session is concerned. What the
+ * state decides is whether the office may open a turn, which is exactly what the delivery outcomes
+ * report — so a sender that never reads the roster still learns, from the result of its own call,
+ * that the colleague it addressed is away.
+ */
+const DO_NOT_DISTURB_STATUS = 'do-not-disturb'
+
+/**
+ * Longest reason one colleague may publish beside its do-not-disturb state.
+ *
+ * It travels into the warning every sender reads, so it is bounded the way a description is. It is
+ * a reason rather than a message: the office does not deliver it anywhere, it is quoted in the
+ * outcome of a call somebody else made.
+ */
+const DO_NOT_DISTURB_NOTE_MAX_CHARS = 500
+
+/**
  * The experience notes written for whoever sits in a leader's seat.
  *
  * A hired leader's onboarding turn names this path, so the seat arrives with what earlier
@@ -314,6 +334,44 @@ function normalizeDescription(value, where) {
     )
   }
   return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
+ * Validate a do-not-disturb reason supplied by the colleague that is setting the state.
+ * @param value - the requested note.
+ * @param where - the tool refusing it, for the diagnostic.
+ * @returns the trimmed note, or undefined when it is absent or empty.
+ * @throws {TypeError} when the value is not a string, or is longer than
+ *   {@link DO_NOT_DISTURB_NOTE_MAX_CHARS}.
+ */
+function normalizeDoNotDisturbNote(value, where) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new TypeError(`${where}: note must be a string, got ${JSON.stringify(value)}`)
+  }
+  const trimmed = value.trim()
+  if (trimmed.length > DO_NOT_DISTURB_NOTE_MAX_CHARS) {
+    throw new TypeError(
+      `${where}: note is ${String(trimmed.length)} characters; the limit is ${String(DO_NOT_DISTURB_NOTE_MAX_CHARS)}`,
+    )
+  }
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
+ * How a sender is told that one colleague was not woken.
+ *
+ * The stored state is quoted rather than paraphrased — when it was set, and the reason the
+ * colleague published with it — because the sender's next decision is whether to wait. A reader
+ * told only "do-not-disturb" cannot tell a colleague that went quiet for the afternoon from one
+ * that reads the message in a minute, and the office is holding the answer.
+ * @param state - the stored state, as {@link createOffice}'s reader reports it.
+ * @returns the delivery detail.
+ */
+function doNotDisturbDetail(state) {
+  return `the colleague set itself do-not-disturb at ${new Date(state.at).toISOString()}`
+    + `${state.note === undefined ? '' : ` (its reason: ${state.note})`}; the message is held rather `
+    + 'than delivered, and arrives when that colleague releases it'
 }
 
 /**
@@ -1192,6 +1250,19 @@ function validateColleague(value) {
   }
   if (record.description !== undefined && typeof record.description !== 'string') {
     throw new Error(`dsh-office: stored colleague description is invalid: ${JSON.stringify(value)}`)
+  }
+  // The do-not-disturb state is one fact in three fields, so a record that carries the flag without
+  // the moment it was set — or with a note of the wrong type — is invalid rather than half-read: the
+  // moment reaches every sender's delivery detail, and a reader that guessed at it would report a
+  // state the office never held.
+  if (record.doNotDisturb !== undefined && typeof record.doNotDisturb !== 'boolean') {
+    throw new Error(`dsh-office: stored colleague do-not-disturb flag is invalid: ${JSON.stringify(value)}`)
+  }
+  if (record.doNotDisturb === true && !Number.isSafeInteger(record.doNotDisturbAt)) {
+    throw new Error(`dsh-office: stored colleague do-not-disturb state has no time: ${JSON.stringify(value)}`)
+  }
+  if (record.doNotDisturbNote !== undefined && typeof record.doNotDisturbNote !== 'string') {
+    throw new Error(`dsh-office: stored colleague do-not-disturb note is invalid: ${JSON.stringify(value)}`)
   }
   return record
 }
@@ -2138,7 +2209,9 @@ function createOffice(ctx, domain, config, hooks) {
    *
    * Called when it goes idle and once at activation, which is what makes a hold survive a
    * restart. A colleague that is busy again by the time this runs keeps its held wakes: the
-   * next idle transition delivers them.
+   * next idle transition delivers them. A colleague that set itself do-not-disturb keeps them
+   * too, until it releases the state — the idle transition is exactly the moment the state
+   * exists to refuse.
    * @param sessionId - the colleague to deliver to.
    * @returns how many messages that turn carried.
    */
@@ -2151,6 +2224,11 @@ function createOffice(ctx, domain, config, hooks) {
       for (const entry of held) await pendingWakes.delete(entry.pendingKey)
       return 0
     }
+    // The state is read before the agent is, because loading a session is itself a disturbance: a
+    // colleague that asked to be left alone must not be resumed by the office trying to hand it
+    // something. What is held stays held, where the release and office_read_notifications both
+    // still find it.
+    if (doNotDisturbOf(sessionId) !== undefined) return 0
     const agent = await ensureAgent(sessionId)
     if (agent.status !== 'idle') return 0
     const batch = await recoverStepEndWakes(sessionId, held, agent)
@@ -2245,14 +2323,36 @@ function createOffice(ctx, domain, config, hooks) {
    * the harness claims it, so the promise survives a process that stops first. `turn-end` holds
    * it instead, and it goes into the one turn that hands over everything that arrived meanwhile —
    * one turn for the burst rather than one per message.
+   *
+   * A colleague that set itself do-not-disturb has no timing to choose between either: nothing is
+   * delivered while the state is set, and the message joins the same durable hold that a release
+   * hands over. The state is the colleague's own act, so the office reports it to the sender once
+   * per call instead of asking the colleague again — see {@link doNotDisturbDetail}.
    * @param message - the stored message.
    * @param key - the message's key in the messages table, where the outcome is recorded.
    * @param colleague - the recipient's roster record.
    * @param notify - when the caller asked the wake to arrive; defaults to the office's own
    *   {@link DEFAULT_NOTIFY}, which is what a surface with no timing control of its own means.
-   * @returns `delivered`, `queued`, or `steered`.
+   * @returns the outcome as the caller is told it: the status alone when the message reached the
+   *   colleague the way the call asked for — `delivered`, `queued`, or `steered` — and the status
+   *   with the reason beside it when the caller has to decide what to do next, which is what
+   *   `do-not-disturb` carries. The record keeps a reason for every outcome.
    */
   const deliver = async (message, key, colleague, notify = DEFAULT_NOTIFY) => {
+    // Read before the agent is, because loading a session is itself a way of reaching it: the
+    // office must not resume the colleague that asked to be left alone in order to hand it the
+    // message it asked not to be handed.
+    const away = doNotDisturbOf(colleague.sessionId)
+    if (away !== undefined) {
+      const detail = doNotDisturbDetail(away)
+      await holdWake(colleague.sessionId, message)
+      await recordDelivery(key, colleague.sessionId, {
+        status: DO_NOT_DISTURB_STATUS,
+        at: Date.now(),
+        detail,
+      })
+      return { status: DO_NOT_DISTURB_STATUS, detail }
+    }
     const agent = await ensureAgent(colleague.sessionId)
     if (agent.status !== 'idle' && notify === NOTIFY_STEP_END) {
       await holdWake(colleague.sessionId, message, NOTIFY_STEP_END)
@@ -2262,7 +2362,7 @@ function createOffice(ctx, domain, config, hooks) {
         at: Date.now(),
         detail: 'the colleague is mid-turn; it receives this at the end of the step that is running',
       })
-      return 'steered'
+      return { status: 'steered' }
     }
     if (agent.status !== 'idle') {
       await holdWake(colleague.sessionId, message)
@@ -2271,7 +2371,7 @@ function createOffice(ctx, domain, config, hooks) {
         at: Date.now(),
         detail: 'the colleague is mid-turn; it receives this with everything else that arrives before that turn ends',
       })
-      return 'queued'
+      return { status: 'queued' }
     }
     const held = await recoverStepEndWakes(colleague.sessionId, heldWakes(colleague.sessionId), agent)
     const batch = [...held.map(entry => entry.message), message]
@@ -2283,7 +2383,7 @@ function createOffice(ctx, domain, config, hooks) {
       at: Date.now(),
       ...batch.length > 1 ? { batch: batch.length } : {},
     })
-    return 'delivered'
+    return { status: 'delivered' }
   }
 
   /** Ensure the two-party direct-message channel exists, keyed by the two session ids. */
@@ -2590,8 +2690,13 @@ function createOffice(ctx, domain, config, hooks) {
       // reported as the office found it, not as the `idle` the wake makes of it.
       const seen = colleagueStatus(colleague.sessionId)
       try {
-        const status = await deliver(message, key, colleague, notify)
-        deliveries.push({ colleague: colleague.name, status, colleagueStatus: seen })
+        const outcome = await deliver(message, key, colleague, notify)
+        deliveries.push(compact({
+          colleague: colleague.name,
+          status: outcome.status,
+          detail: outcome.detail,
+          colleagueStatus: seen,
+        }))
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         await recordDelivery(key, colleague.sessionId, { status: 'failed', at: Date.now(), detail })
@@ -2805,6 +2910,58 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
+   * The do-not-disturb state one colleague set for itself, or undefined when it can be woken.
+   *
+   * The state is read from the roster record rather than from the live agent, because it is a
+   * promise the office keeps for a session that may not be loaded at all: a colleague that asked to
+   * be left alone is exactly the one the office must not resume in order to ask again.
+   * @param sessionId - the colleague's session.
+   * @returns `{ at, note }` while the state is set, undefined otherwise.
+   */
+  const doNotDisturbOf = (sessionId) => {
+    const record = colleagueBySession(sessionId)
+    return record?.doNotDisturb === true
+      ? compact({ at: record.doNotDisturbAt, note: record.doNotDisturbNote })
+      : undefined
+  }
+
+  /**
+   * Write or clear one colleague's do-not-disturb state.
+   *
+   * One state in three stored fields, written together: the clearing path removes all three rather
+   * than storing a `false`, so a reader answers "is it away" from the flag's presence alone and a
+   * record that lost its note cannot read as a colleague with a reason it never gave. `update`
+   * replaces the record with what the transform returns, which is what makes the removal possible
+   * without losing a field another writer set meanwhile.
+   * @param sessionId - the colleague's session.
+   * @param state - the state to store, or undefined to release it.
+   */
+  const recordDoNotDisturb = async (sessionId, state) => {
+    await colleagues.update(sessionId, (current) => {
+      const next = { ...current }
+      delete next.doNotDisturb
+      delete next.doNotDisturbAt
+      delete next.doNotDisturbNote
+      if (state === undefined) return next
+      next.doNotDisturb = true
+      next.doNotDisturbAt = state.at
+      if (state.note !== undefined) next.doNotDisturbNote = state.note
+      return next
+    })
+  }
+
+  /**
+   * How many messages the office is holding for one colleague.
+   *
+   * Deliberately the same count the roster and the panel report, and not a cheaper walk of the hold
+   * table: a hold whose message was compacted away is one the office will not hand over, so a count
+   * of the raw holds would promise a delivery the release does not make.
+   * @param sessionId - the colleague's session.
+   * @returns the number of held wakes.
+   */
+  const heldCount = (sessionId) => heldWakes(sessionId).length
+
+  /**
    * How loaded the office is at this instant: how many colleagues of the roster are mid-turn.
    *
    * "Working" is read from the live registry, because it is a property of a running session and of
@@ -2967,6 +3124,11 @@ function createOffice(ctx, domain, config, hooks) {
         tools: plane.tools,
         provider: route?.provider,
         model: route?.model,
+        // Reported for every colleague, loaded or not: the state is stored rather than read off a
+        // live session, and it is what explains a hold count that keeps growing.
+        doNotDisturb: colleague.doNotDisturb === true,
+        doNotDisturbAt: colleague.doNotDisturb === true ? colleague.doNotDisturbAt : undefined,
+        doNotDisturbNote: colleague.doNotDisturb === true ? colleague.doNotDisturbNote : undefined,
         pending: heldWakes(colleague.sessionId).length,
         lastMessageAt: times.get(colleague.sessionId),
         adoptedAt: colleague.adoptedAt,
@@ -3019,7 +3181,8 @@ function createOffice(ctx, domain, config, hooks) {
     const collegial = [...colleagues.entries()].sort(([a], [b]) => a.localeCompare(b))
       .map(([sessionId, value]) => {
         const record = validateColleague(value)
-        return [sessionId, record.role, record.description, record.adoptedAt]
+        return [sessionId, record.role, record.description, record.adoptedAt,
+          record.doNotDisturb, record.doNotDisturbAt, record.doNotDisturbNote]
       })
     const channeled = [...channels.entries()].sort(([a], [b]) => a.localeCompare(b))
       .map(([channelId, value]) => {
@@ -3527,6 +3690,9 @@ function createOffice(ctx, domain, config, hooks) {
     noteIdle,
     senderOf,
     wakeLabels,
+    doNotDisturbOf,
+    recordDoNotDisturb,
+    heldCount,
     generalChannel: GENERAL_CHANNEL,
     mailboxChannel: MAILBOX_CHANNEL,
     userName: config.userName,
@@ -4449,6 +4615,118 @@ function createInterruptTool(agent, tool) {
 }
 
 /**
+ * Build the do-not-disturb tool for one colleague.
+ *
+ * This is the one office tool whose subject is the **colleague** rather than one office: the state
+ * is the session's own answer to being addressed, so it takes no `office` argument and applies to
+ * every office that holds the caller. That is a deliberate exception to the rule that every office
+ * tool acts on a resolved office — a colleague that belongs to two offices and asked not to be
+ * disturbed means it in both, and making it call twice would leave the half it forgot still waking
+ * it. Its result names the offices it wrote instead of naming one.
+ * @param agent - the colleague whose session receives the tool.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the do-not-disturb tool definition.
+ */
+function createDoNotDisturbTool(agent, tool) {
+  const name = 'office_do_not_disturb'
+  const { text } = tool
+  return {
+    name,
+    description:
+      'Set or release your own do-not-disturb state. While it is set, nothing wakes you: a post that names '
+      + 'you, a level or a channel that reaches you, a private message, and the office\'s own idle notice are '
+      + 'held rather than delivered, and each sender is told so — with the reason below — in the result of its '
+      + 'own call. The hold is durable and it waits for you: releasing the state delivers everything it holds, '
+      + 'merged into the turn that follows this one, so nothing addressed to you is lost. Nothing else '
+      + 'changes: you keep your role and every office tool, and you may take what is held early with '
+      + 'office_read_notifications. It applies to every office that holds you at once. Set it while you work '
+      + 'on something that must not be interrupted, and release it as soon as you are reachable.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['enabled'],
+      properties: {
+        enabled: {
+          type: 'boolean',
+          description: 'true to stop being woken; false to release the state, which is what delivers '
+            + 'everything held for you.',
+        },
+        note: {
+          type: 'string',
+          description: `A short reason shown to whoever addresses you while the state is set (at most `
+            + `${String(DO_NOT_DISTURB_NOTE_MAX_CHARS)} characters). It is quoted to them, so write what they `
+            + 'should decide with — how long you are away, or whom to ask instead. Omit it to publish none, and '
+            + 'it is refused beside enabled: false, which clears it.',
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['offices', 'doNotDisturb', 'held'],
+        properties: {
+          // Every office that recorded the state, instead of the one `office` field every other
+          // office tool's result carries: the state belongs to the session, so the offices are what
+          // it was written to.
+          offices: { type: 'array', items: { type: 'string' } },
+          doNotDisturb: { type: 'boolean' },
+          note: { type: 'string' },
+          since: { type: 'integer' },
+          // What a release is about to hand over, so the colleague knows what it comes back to.
+          held: { type: 'integer' },
+        },
+      },
+      render: (_args, value) => {
+        const where = value.offices.join(', ')
+        if (value.doNotDisturb) {
+          return text(`[office ${where}] Do not disturb is on: nothing wakes you until you release it`
+            + `${value.note === undefined ? '' : ` (reason published: ${value.note})`}.`
+            + `${value.held === 0 ? '' : ` ${String(value.held)} message(s) already held for you.`}`)
+        }
+        return text(`[office ${where}] Do not disturb is off`
+          + `${value.held === 0
+            ? '.'
+            : `; ${String(value.held)} held message(s) arrive in the turn that follows this one.`}`)
+      },
+    },
+    async execute(args) {
+      const enabled = args?.enabled
+      if (typeof enabled !== 'boolean') {
+        throw new TypeError(`${name}: enabled must be true or false`)
+      }
+      if (!enabled && args?.note !== undefined) {
+        throw new TypeError(
+          `${name}: note belongs to the state being set; releasing it clears the note, so pass note only `
+          + 'with enabled: true',
+        )
+      }
+      const note = enabled ? normalizeDoNotDisturbNote(args?.note, name) : undefined
+      const sessionId = agent.session.header.id
+      // The write follows the membership rather than a resolved office: a colleague that is not on
+      // any roster is refused here, because there would be no record to hold the state and because
+      // nothing wakes such a session through the office anyway.
+      const holding = [...mountedOffices.values()]
+        .filter(entry => entry.office.colleagueBySession(sessionId) !== undefined)
+      if (holding.length === 0) {
+        throw new Error(`${name}: this session is on no office roster, so no office wakes it`)
+      }
+      const at = Date.now()
+      for (const entry of holding) {
+        await entry.office.recordDoNotDisturb(sessionId, enabled ? { at, note } : undefined)
+      }
+      return compact({
+        offices: holding.map(entry => entry.name),
+        doNotDisturb: enabled,
+        note,
+        since: enabled ? at : undefined,
+        held: holding.reduce((total, entry) => total + entry.office.heldCount(sessionId), 0),
+      })
+    },
+  }
+}
+
+/**
  * Build the roster-status tool for one agent.
  *
  * Every role holds it: a colleague cannot otherwise discover its peers at all, and the status
@@ -4469,7 +4747,9 @@ function createColleaguesTool(tool) {
       + 'its permission preset, the agent preset it is bound to with the number of tools it holds (`none` '
       + 'means it holds no preset tool at all, so it has no shell, files, or skills), and its model route; '
       + 'each reports how many messages the office holds for it and when it last carried one. Never wakes '
-      + 'anybody.',
+      + 'anybody. It also reports whether a colleague has set itself do-not-disturb, with the reason it '
+      + 'published: a message addressed to such a colleague is held rather than delivered, so a caller that '
+      + 'reads the roster knows why nothing will come back before it posts.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -4483,7 +4763,7 @@ function createColleaguesTool(tool) {
             items: {
               type: 'object',
               additionalProperties: false,
-              required: ['name', 'sessionId', 'role', 'status', 'pending'],
+              required: ['name', 'sessionId', 'role', 'status', 'pending', 'doNotDisturb'],
               properties: {
                 name: { type: 'string' },
                 sessionId: { type: 'string' },
@@ -4498,6 +4778,11 @@ function createColleaguesTool(tool) {
                 pending: { type: 'integer' },
                 lastMessageAt: { type: 'integer' },
                 adoptedAt: { type: 'integer' },
+                // A colleague's own state, beside its status rather than inside it: a colleague that
+                // is away is still idle or inactive as far as its session is concerned.
+                doNotDisturb: { type: 'boolean' },
+                doNotDisturbAt: { type: 'integer' },
+                doNotDisturbNote: { type: 'string' },
               },
             },
           },
@@ -4507,6 +4792,10 @@ function createColleaguesTool(tool) {
         if (value.colleagues.length === 0) return tool.text(`[${value.office}] No colleagues yet.`)
         const lines = value.colleagues.map((colleague) => {
           const details = [
+            colleague.doNotDisturb === true
+              ? 'do not disturb'
+                + `${colleague.doNotDisturbNote === undefined ? '' : ` (${colleague.doNotDisturbNote})`}`
+              : undefined,
             colleague.permission === undefined ? undefined : `permission ${colleague.permission}`,
             colleague.agentPreset === undefined
               ? undefined
@@ -5153,7 +5442,9 @@ function createNotificationsTool(agent, tool, userName) {
     description:
       'Read and take the notifications the office holds for you: they are no longer held, so they will not '
       + 'also arrive as a turn. Use it mid-turn to see what was addressed to you before you finish. It '
-      + 'carries only your own mail; office_read reads the rest of the record.',
+      + 'carries only your own mail; office_read reads the rest of the record. This is also how a colleague '
+      + 'that has set itself do-not-disturb reads what was addressed to it: nothing else delivers while that '
+      + 'state is set.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -5256,7 +5547,9 @@ function createCommunicationTools(agent, tool) {
         + 'and answer a message where it stands: in its channel when it was public, with office_dm when it was '
         + 'private. Silence is the normal answer to a delivered message, and a burst of them is one answer '
         + 'rather than one post each. Never post to acknowledge a message, to agree with one, or to announce '
-        + 'that you are working.',
+        + 'that you are working. A colleague that has set itself do-not-disturb is not woken at all: its '
+        + 'delivery outcome says `do-not-disturb` and the message is held until that colleague releases the '
+        + 'state, so read that outcome before waiting on an answer.',
       parameters: tool.parameters(['wake', 'text'], {
         channel: {
           type: 'string',
@@ -5327,7 +5620,9 @@ function createCommunicationTools(agent, tool) {
         + 'colleague\'s own status as the office read it when the delivery was attempted: `idle`, `running`, '
         + '`quota-retry` while it waits out an exhausted account quota — a message to that colleague waits with '
         + 'it, for as long as the account stays unusable — or `inactive` when its session was not loaded and '
-        + 'this message woke it. Addressing the user writes to the user mailbox, where nothing is woken and no '
+        + 'this message woke it. A colleague that has set itself do-not-disturb reports `do-not-disturb` '
+        + 'instead: the office did not wake it, the message is held, and it arrives when that colleague '
+        + 'releases the state. Addressing the user writes to the user mailbox, where nothing is woken and no '
         + 'colleague status is reported.',
       parameters: tool.parameters(['wake', 'text'], {
         wake: {
@@ -5406,6 +5701,11 @@ function createOfficeTools(agent, host) {
   definitions.push(createReadTool(agent, tool, host.config))
   definitions.push(createNotificationsTool(agent, tool, host.config.userName))
   definitions.push(createColleaguesTool(tool))
+  // The colleague's own state, so it is installed for a colleague and never for a boss: a boss is
+  // not on a roster and nothing wakes one through the office. A session that runs one office and
+  // belongs to another holds no colleague voice anywhere either — {@link actingOffices} resolves it
+  // as the boss it is — so it holds no such state to set.
+  if (acting.role === 'colleague') definitions.push(createDoNotDisturbTool(agent, tool))
   return definitions
 }
 

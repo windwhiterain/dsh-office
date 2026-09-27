@@ -669,6 +669,49 @@ Three properties decide its shape:
   office deleting the hold for it; the colleague's session log settles it, exactly as it settles
   the recovery case.
 
+## Why do not disturb is the colleague's own state
+
+Every other office tool acts on one resolved office. `office_do_not_disturb` does not, and two
+decisions explain it: whose fact the state is, and what a wake is for.
+
+**The state belongs to the session, so the tool takes no `office` argument.** A colleague may be a
+colleague of several offices at once, and "do not wake me" is a statement about the colleague, not
+about one of them. Resolving one office would mean a colleague that belongs to two had to set the
+state twice, and the half it forgot would keep waking it — a state that reads as on while it is
+half-off is worse than no state at all. So the call writes every office that holds the session and
+reports the offices it wrote, which is why its result carries `offices` where every other office
+tool's result carries `office`. The membership is read from the registry at the call rather than
+from the tool set the agent was armed with, exactly as every other tool re-reads the office it acts
+on.
+
+**It is a hold, not a filter, and not a status.** The office could have dropped the wake — the
+message stays in its channel and `office_read` finds it — but a wake is a promise the office keeps,
+and a colleague that asked for quiet did not ask to lose its mail. So the message joins the durable
+hold that a mid-turn colleague's mail waits in, and the release hands over everything at once. That
+also makes the release the only thing that needs to be new: the flush that already runs on every
+idle transition is what delivers, and it refuses while the state is set.
+
+Two consequences are worth stating because they are the load-bearing ones.
+
+- **The state is read before the session is loaded.** `deliver` and `flushWakes` both check it
+  before they reach `ensureAgent`. Resuming a session is itself a way of reaching it — it puts a row
+  back in the sidebar, it mounts a preset, it can start work — so an office that read the agent
+  first would disturb exactly the colleague that asked not to be disturbed, in order to tell it so.
+- **It is not a colleague status.** `COLLEAGUE_STATUSES` describes what a session is doing, and a
+  colleague that is away is still `idle` or `inactive` in that vocabulary. Folding the two together
+  would make `quota-retry` and `do-not-disturb` look like alternatives when they are orthogonal: a
+  colleague can be away *and* waiting out an exhausted account. The roster reports the state beside
+  the status, and the delivery outcome reports it where a sender actually reads it.
+
+**The warning is the delivery outcome, because that is what the sender reads.** A model that posted
+into a channel sees the result of its own call, not the roster, so `do-not-disturb` is a delivery
+status with the reason quoted in its detail — when the state was set, and the reason the colleague
+published. That is deliberately one of the few outcomes that carry a detail: a `delivered` outcome
+means the call did what it asked for, while this one tells the caller that nothing will come back
+and why, which is exactly the fact its next decision depends on. Only a colleague holds the tool: a
+boss is not on a roster, nothing wakes it through the office, and no roster operation sets or clears
+somebody else's attention.
+
 ## Why the office asks a question of its own
 
 Every message the office stores was written by somebody: the user, or a colleague with something to

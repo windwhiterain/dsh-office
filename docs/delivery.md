@@ -193,6 +193,11 @@ Waking is not the same as reading. A message nobody is notified for still sits i
 where `office_read` finds it. That is the point of the empty wake: a notice that is not worth a
 turn.
 
+One thing overrides the whole table: a colleague that has set itself do-not-disturb is not woken by
+any row of it, whatever spelling addressed it. It is not a fourth spelling and not a property of a
+wake — it is the recipient's own answer to being addressed, and it is answered with a hold and a
+reported outcome instead; see [Do not disturb](#do-not-disturb).
+
 The wake the office recorded is also what the panel's message bubble states, beside the sequence
 and the sender: the token a level or a channel addressed, in today's spelling — a message stored
 before levels moved to `$` shows `#leader` as `$leader` — the colleagues a named wake resolved to,
@@ -552,6 +557,36 @@ release is cut
   because the reader is deciding in the office it is reading about. The rest of the frame is what a
   delivery would have handed over.
 
+## Do not disturb
+
+`office_do_not_disturb` is a colleague's own switch on being addressed: while it is set, `deliver`
+holds the message instead of opening a turn, records a `do-not-disturb` outcome, and reports the
+reason to the sender. Three properties make it a state rather than a filter.
+
+- **It is read before the session is.** `deliver` and `flushWakes` both check the stored record
+  before they reach `ensureAgent`, because resuming a session is itself a way of reaching it. A
+  colleague that asked to be left alone is never loaded to be told that it is: the hold is written
+  against its session id, and nothing else about the session is touched.
+- **It is the same hold, released the same way.** The message goes into the `pending` table with no
+  timing recorded, which is exactly what a `turn-end` hold is, so it merges with everything else
+  that arrived and is carried by the one turn that follows the turn that released the state. The
+  idle transition is what flushes it, never the releasing call itself, because that call runs inside
+  the colleague's own turn — which is why a release reports what it is about to hand over (`held`)
+  rather than claiming to have handed it over.
+- **It never takes the colleague's own read away.** `office_read_notifications` is the colleague
+  asking rather than the office delivering, so it still returns and takes whatever is held. That is
+  the only way to see the mail before the state is released.
+
+The state is stored on the `colleagues` record and written to **every** office that holds the
+session, in one call, because a colleague that belongs to two offices and asked not to be disturbed
+means it in both; releasing clears all of them. A dismissal takes the record with it, and its holds
+go the way any dismissed colleague's holds go.
+
+The office's own idle notice is an ordinary message to this path, so a roster whose whole audience
+is away holds the question instead of refusing to ask it: the notice is written once, becomes the
+newest record — which is what stops the office asking again — and is handed over when the state is
+released.
+
 ## Delivery statuses
 
 Each recipient's outcome is recorded on the message in `deliveries`, keyed by that recipient's
@@ -562,6 +597,7 @@ session id — or by the user's name for the mailbox — and reported in the too
 | `delivered` | The turn was handed to the colleague, now or as part of a merged batch. A batch records how many messages it carried. A recovered step-end wake, and a notification the colleague read for itself, record it with a detail naming why. |
 | `queued` | The colleague was mid-turn and the sender asked for `turn-end`, so the message is held in `pending` and goes into its next turn, merged with whatever else is held for it. |
 | `steered` | The colleague was mid-turn and the message was spliced into the turn it was running, to be read at that turn's next step boundary. This is what the default timing reports. |
+| `do-not-disturb` | The colleague had set its own [do-not-disturb](#do-not-disturb) state, so nothing woke it: the message is held, and it arrives in the turn that follows the release. Its detail is the reason quoted to the sender — when the state was set, and the reason the colleague published with it. It is one of the three outcomes that report a detail to the caller, beside `failed` and `mailbox`, because the reason is what decides whether the caller waits. |
 | `wakes-disabled` | The office runs with `wakesEnabled: false`; the message is stored and no session is touched. |
 | `mailbox` | The message was addressed to the **user**, who has no session to wake, so it waits in the user mailbox. |
 | `failed` | The delivery itself threw; the message stays in its channel and `office_read` still finds it. |

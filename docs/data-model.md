@@ -65,16 +65,20 @@ session is a colleague of an office at most once.
 | `description` | Optional. Trimmed, at most 2000 characters, and removed entirely when the caller passes an empty string, so the field is absent rather than empty. It reaches the colleague's onboarding turn, the roster, and the panel. |
 | `adoptedAt` | When the session entered the roster; preserved across a re-adopt or a role change. |
 | `rosterSeen` | On a **leader** only: the [roster revision](delivery.md#the-roster-line) this colleague has been told. Absent until the office tells it one, which is what makes a promoted member start from the office it finds rather than from a change it never saw. |
+| `doNotDisturb` | Present and `true` while the colleague has set itself [do not disturb](delivery.md#do-not-disturb). Absent is what "reachable" reads as: releasing the state removes the field rather than storing a `false`, so a reader answers from its presence alone. |
+| `doNotDisturbAt` | When that state was set. Required whenever `doNotDisturb` is `true`, because the moment is what every sender's delivery detail quotes. |
+| `doNotDisturbNote` | Optional. The reason published with the state, trimmed, at most 500 characters, and removed with it. It reaches no tool result of its own: it is quoted inside the `do-not-disturb` outcome of whoever addressed the colleague. |
 
-`validateColleague` requires `sessionId` to be a string and, when present, `role` and
-`description` to be strings. Both optional fields reach a declared tool result schema, which
-types every key it lists, so a hand-edited medium carrying a number there must fail at the read
-rather than at the tool.
+`validateColleague` requires `sessionId` to be a string and, when present, `role`, `description`,
+`doNotDisturb`, and `doNotDisturbNote` to be of their declared types. Those optional fields reach a
+declared tool result schema, which types every key it lists, so a hand-edited medium carrying a
+number there must fail at the read rather than at the tool; a record that carries the flag without
+the moment it was set fails there too, because the moment is what the state is quoted by.
 
-`role` and `description` are the only per-colleague facts the office stores about **what a colleague
-is**; `rosterSeen` is a fact about **what it has been told**, reaches no tool result, and is absent
-on every colleague that is told nothing. Everything else a roster reports — status, effective
-permission, model route, held messages, last activity — is
+`role`, `description`, and the do-not-disturb state are the per-colleague facts the office stores
+about **what a colleague is**; `rosterSeen` is a fact about **what it has been told**, reaches no
+tool result, and is absent on every colleague that is told nothing. Everything else a roster
+reports — status, effective permission, model route, held messages, last activity — is
 read at the moment it is asked for and is therefore never stale in storage. The model route in
 particular is read from the session's own `modelSelection` projection, which is the value the Web
 UI shows (a pending selection wins over the one last used), not from `agent.options`: that field

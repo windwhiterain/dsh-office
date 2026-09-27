@@ -1183,8 +1183,8 @@ await check('adopting a live session installs the tools its role holds', async (
   titles.set('session-bob', 'bob')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-alice', role: 'member' })
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-bob' })
-  assert.deepEqual(toolNames(alice), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
-  assert.deepEqual(toolNames(bob), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
+  assert.deepEqual(toolNames(alice), ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'])
+  assert.deepEqual(toolNames(bob), ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'])
   assert.deepEqual(toolNames(outsider), [], 'adoption does not spread to other sessions')
   const roster = await callBoss(boss, 'office', 'office_roster', {})
   assert.deepEqual(roster.colleagues.map(entry => entry.name).sort(), ['Alice Smith', 'bob'])
@@ -1392,6 +1392,191 @@ await check('the default timing steers into a running turn, for a post and for a
   const idle = await callBoss(chief, 'timing', 'office_dm', { wake: ['@rosa'], text: 'no turn to steer' })
   assert.equal(idle.deliveries[0].status, 'delivered')
   assert.equal(rosa.sent.at(-1).via, 'followup')
+})
+
+await check('a colleague that sets do-not-disturb is not woken, and its senders are told why', async () => {
+  const away = makeHarness({ officeName: 'away' }, undefined, { rowId: 'office_away' })
+  await away.ready
+  const chief = away.publish('session-away-boss', { preset: 'office-boss' })
+  away.titles.set('session-nia', 'nia')
+  away.titles.set('session-omar', 'omar')
+  const nia = away.publish('session-nia')
+  const omar = away.publish('session-omar')
+  for (const sessionId of ['session-nia', 'session-omar']) {
+    await callBoss(chief, 'away', 'office_adopt', { session_id: sessionId })
+  }
+  assert.ok(
+    !toolNames(chief).includes('office_do_not_disturb'),
+    'a boss is on no roster, so it holds no such state to set',
+  )
+
+  nia.status = 'running'
+  const set = await call(nia, 'office_do_not_disturb', { enabled: true, note: 'heads down on the release cut' })
+  assert.deepEqual(set.offices, ['away'], 'the result names the offices the state was written to')
+  assert.equal(set.doNotDisturb, true)
+  assert.equal(set.note, 'heads down on the release cut')
+  assert.ok(Number.isSafeInteger(set.since), 'and the moment it was set')
+  assert.equal(set.held, 0, 'nothing was waiting for the colleague yet')
+  const stored = away.tables.get('colleagues').get('session-nia')
+  assert.equal(stored.doNotDisturb, true, 'the state is stored on the roster record, so a restart keeps it')
+  assert.equal(stored.doNotDisturbNote, 'heads down on the release cut')
+  assert.equal(
+    away.tables.get('colleagues').get('session-omar').doNotDisturb,
+    undefined,
+    'and it is the one colleague\'s own',
+  )
+
+  const before = nia.sent.length
+  const post = await call(omar, 'office_post', { text: 'nia, the diff is ready', wake: ['@nia'] })
+  assert.equal(post.deliveries[0].colleague, 'nia')
+  assert.equal(post.deliveries[0].status, 'do-not-disturb', 'a post tells its sender that the colleague is away')
+  assert.match(
+    post.deliveries[0].detail,
+    /set itself do-not-disturb at \d{4}-\d\d-\d\dT.* \(its reason: heads down on the release cut\)/,
+    'and quotes the state it was given, so the sender can decide whether to wait',
+  )
+  assert.match(post.deliveries[0].detail, /held rather than delivered/)
+  assert.equal(nia.sent.length, before, 'nothing opens a turn in the colleague that asked to be left alone')
+  assert.equal(
+    storedMessage(away, post.message.messageId).deliveries['session-nia'].status,
+    'do-not-disturb',
+    'the record keeps the outcome, so a later reader of the channel sees why nothing was answered',
+  )
+
+  const dm = await call(omar, 'office_dm', { wake: ['@nia'], text: 'and a private one' })
+  assert.equal(dm.deliveries.length, 1)
+  assert.equal(dm.deliveries[0].status, 'do-not-disturb', 'a private message reports the same outcome')
+  assert.equal(dm.deliveries[0].colleagueStatus, 'running', 'beside the status the office read before the attempt')
+
+  const roster = await call(omar, 'office_colleagues', { office: 'away' })
+  const entry = roster.colleagues.find(colleague => colleague.name === 'nia')
+  assert.equal(entry.doNotDisturb, true, 'the roster reports the state')
+  assert.equal(entry.doNotDisturbNote, 'heads down on the release cut')
+  assert.equal(entry.pending, 2, 'and the mail the state is holding')
+  // The panel draws the same fact from the same read, so one badge needs no second route.
+  const state = await callRoute(routes, officeRoute('state', 'away'))
+  const viewed = state.payload.colleagues.find(colleague => colleague.name === 'nia')
+  assert.equal(viewed.doNotDisturb, true)
+  assert.equal(viewed.doNotDisturbNote, 'heads down on the release cut')
+
+  await assert.rejects(
+    () => call(nia, 'office_do_not_disturb', {}),
+    /enabled must be true or false/,
+    'a call that names no state is refused rather than defaulted',
+  )
+  await assert.rejects(() => call(nia, 'office_do_not_disturb', { enabled: 'yes' }), /enabled must be true or false/)
+  await assert.rejects(
+    () => call(nia, 'office_do_not_disturb', { enabled: false, note: 'still busy' }),
+    /note belongs to the state being set/,
+    'releasing clears the note, so one sent beside it is refused rather than dropped',
+  )
+  await assert.rejects(
+    () => call(nia, 'office_do_not_disturb', { enabled: true, note: 'x'.repeat(501) }),
+    /the limit is 500/,
+  )
+
+  // The state is a stored roster fact, so the panel's poll token moves with it and the badge appears
+  // without a manual reload.
+  await call(nia, 'office_do_not_disturb', { enabled: false })
+  const moved = await callRoute(routes, officeRoute('state', 'away') + `&since=${state.payload.revision}`)
+  assert.notEqual(moved.payload.unchanged, true, 'releasing the state moves the token the panel holds')
+})
+
+await check('a release hands over everything the state held, and the state never resumes the colleague', async () => {
+  const held = makeHarness({ officeName: 'held' }, undefined, { rowId: 'office_held' })
+  await held.ready
+  const chief = held.publish('session-held-boss', { preset: 'office-boss' })
+  held.titles.set('session-pia', 'pia')
+  held.titles.set('session-quinn', 'quinn')
+  const pia = held.publish('session-pia')
+  const quinn = held.publish('session-quinn')
+  for (const sessionId of ['session-pia', 'session-quinn']) {
+    await callBoss(chief, 'held', 'office_adopt', { session_id: sessionId })
+  }
+
+  pia.status = 'running'
+  await call(pia, 'office_do_not_disturb', { enabled: true, note: 'in a review' })
+  await call(quinn, 'office_post', { text: 'first', wake: ['@pia'] })
+  // The one delivery the office makes on nobody's behalf is the colleague's own read, and the state
+  // does not take it away: it answers "do not wake me", not "do not tell me".
+  const taken = await call(pia, 'office_read_notifications', {})
+  assert.deepEqual(taken.notifications.map(notification => notification.text), ['first'])
+  await call(quinn, 'office_post', { text: 'second', wake: ['@pia'] })
+  await call(quinn, 'office_dm', { wake: ['@pia'], text: 'third' })
+
+  const before = pia.sent.length
+  const released = await call(pia, 'office_do_not_disturb', { enabled: false })
+  assert.equal(released.doNotDisturb, false)
+  assert.equal(released.held, 2, 'the release reports what it is about to hand over')
+  assert.equal(
+    held.tables.get('colleagues').get('session-pia').doNotDisturb,
+    undefined,
+    'and the record is cleared rather than marked false',
+  )
+  assert.equal(pia.sent.length, before, 'the release is not a wake: the mail waits for the turn to end')
+  await held.setStatus('session-pia', 'idle')
+  assert.equal(pia.sent.length, before + 1, 'one turn carries everything that was held')
+  const text = pia.sent.at(-1).message.content[0].text
+  assert.equal(pia.sent.at(-1).message.source.batch, 2)
+  assert.match(text, /second/)
+  assert.match(text, /third/)
+
+  // A colleague that is not loaded is not resumed to be told it is away, and the state outlives the
+  // agent that set it: a session brought back for another reason still finds its mail waiting.
+  await call(pia, 'office_do_not_disturb', { enabled: true, note: 'back at it' })
+  held.dispose(pia)
+  const resumes = held.resumed.length
+  const parked = await call(quinn, 'office_post', { text: 'fourth', wake: ['@pia'] })
+  assert.equal(parked.deliveries[0].status, 'do-not-disturb')
+  assert.equal(held.resumed.length, resumes, 'holding a message never resumes the colleague it is held for')
+
+  const returned = held.publish('session-pia')
+  await held.setStatus('session-pia', 'idle')
+  assert.equal(returned.sent.length, 0, 'the state still refuses the office\'s mail to a session that came back')
+  const cleared = await call(returned, 'office_do_not_disturb', { enabled: false })
+  assert.equal(cleared.held, 1)
+  await held.setStatus('session-pia', 'idle')
+  assert.deepEqual(returned.sent.map(sent => sent.via), ['followup'], 'and releasing it delivers')
+})
+
+await check('one do-not-disturb call silences every office that holds the colleague', async () => {
+  const west = makeHarness({ officeName: 'west' }, undefined, { rowId: 'office_west' })
+  const east = makeHarness({ officeName: 'east' }, undefined, { rowId: 'office_east' })
+  await west.ready
+  await east.ready
+  // One preset runs both offices, so a session that runs them is a single boss over the pair.
+  const chief = west.publish('session-west-boss', { preset: 'office-boss' })
+  west.titles.set('session-tess', 'tess')
+  west.titles.set('session-uma', 'uma')
+  east.titles.set('session-tess', 'tess')
+  east.titles.set('session-vic', 'vic')
+  const tess = west.publish('session-tess')
+  const uma = west.publish('session-uma')
+  const vic = east.publish('session-vic')
+  await callBoss(chief, 'west', 'office_adopt', { session_id: 'session-tess' })
+  await callBoss(chief, 'east', 'office_adopt', { session_id: 'session-tess' })
+  await callBoss(chief, 'west', 'office_adopt', { session_id: 'session-uma' })
+  await callBoss(chief, 'east', 'office_adopt', { session_id: 'session-vic' })
+
+  tess.status = 'running'
+  const set = await call(tess, 'office_do_not_disturb', { enabled: true, note: 'writing' })
+  assert.deepEqual([...set.offices].sort(), ['east', 'west'], 'one call writes every office that holds the colleague')
+  assert.equal(west.tables.get('colleagues').get('session-tess').doNotDisturb, true)
+  assert.equal(east.tables.get('colleagues').get('session-tess').doNotDisturb, true)
+
+  for (const [poster, colleague] of [[uma, 'uma'], [vic, 'vic']]) {
+    const posted = await call(poster, 'office_post', { text: 'tess, a word', wake: ['@tess'] })
+    assert.equal(
+      posted.deliveries[0].status,
+      'do-not-disturb',
+      `${colleague}'s own office reads the state the other office recorded`,
+    )
+  }
+
+  const released = await call(tess, 'office_do_not_disturb', { enabled: false })
+  assert.equal(released.held, 2, 'the release counts what both offices were holding')
+  assert.equal(west.tables.get('colleagues').get('session-tess').doNotDisturb, undefined)
+  assert.equal(east.tables.get('colleagues').get('session-tess').doNotDisturb, undefined, 'and clears both records')
 })
 
 await check('office_dm notify:step-end steers into the running turn, and the claim releases the hold', async () => {
@@ -1882,8 +2067,8 @@ await check('office_hire creates a session, titles it, adopts it, and arms it', 
   assert.deepEqual(
     toolNames(liveAgents.get('session-hired-1')),
     ['office_channel_create', 'office_channel_delete', 'office_channel_members', 'office_channels',
-      'office_colleagues', 'office_compact', 'office_configure', 'office_dm', 'office_interrupt',
-      'office_post', 'office_read', 'office_read_notifications'],
+      'office_colleagues', 'office_compact', 'office_configure', 'office_dm', 'office_do_not_disturb',
+      'office_interrupt', 'office_post', 'office_read', 'office_read_notifications'],
     'the new colleague is armed with exactly the tools its role holds, in the same activation',
   )
   await assert.rejects(
@@ -2267,7 +2452,7 @@ await check('the panel can hire, and can post without waking anyone', async () =
   assert.equal(hires.at(-1).agentPreset, 'standard')
   assert.deepEqual(
     toolNames(liveAgents.get(hired.payload.colleague.sessionId)),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'],
   )
 
   const quiet = await callRoute(routes, officeRoute('post', 'office'), {
@@ -2453,7 +2638,7 @@ await check('a disposed agent loses its office tools', async () => {
   const temp = harness.publish('session-temp')
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
-  assert.equal(temp.tools.size, 6)
+  assert.equal(temp.tools.size, 7)
   assert.equal(temp.promptSections.size, 1, 'and the delivery contract with them')
   harness.dispose(temp)
   assert.equal(temp.tools.size, 0, 'the scoped registrations unwind with the agent')
@@ -2464,7 +2649,7 @@ await check('office_dismiss removes a colleague and withdraws its channel tools'
   const temp = harness.publish('session-temp')
   harness.titles.set('session-temp', 'temp')
   await callBoss(boss, 'office', 'office_adopt', { session_id: 'session-temp' })
-  assert.equal(temp.tools.size, 6, 'adoption arms the session')
+  assert.equal(temp.tools.size, 7, 'adoption arms the session')
   assert.equal(temp.promptSections.size, 1, 'and gives it the office delivery contract')
   const dismissed = await callBoss(boss, 'office', 'office_dismiss', { name: 'temp' })
   assert.deepEqual(dismissed.colleague, { name: 'temp', sessionId: 'session-temp' })
@@ -2500,7 +2685,7 @@ await check('officeName makes a fully independent office behind one shared tool 
   await callBoss(studioBoss, 'studio', 'office_adopt', { session_id: 'session-member' })
   assert.deepEqual(
     toolNames(member),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'],
   )
   const roster = await callBoss(studioBoss, 'studio', 'office_roster', {})
   assert.deepEqual(roster.channels.map(entry => entry.channelId), ['general', 'mailbox'], 'the office seeds the public channel and the user mailbox')
@@ -3320,7 +3505,7 @@ await check('each predefined role holds exactly the office tools it is defined w
       description: `the office ${role}`,
     })
   }
-  assert.deepEqual(toolNames(sessions.member), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
+  assert.deepEqual(toolNames(sessions.member), ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'])
   assert.deepEqual(toolNames(sessions.leader), [
     'office_channel_create',
     'office_channel_delete',
@@ -3330,6 +3515,7 @@ await check('each predefined role holds exactly the office tools it is defined w
     'office_compact',
     'office_configure',
     'office_dm',
+    'office_do_not_disturb',
     'office_interrupt',
     'office_post',
     'office_read',
@@ -3364,7 +3550,7 @@ await check('changing a role moves the live session to the tool set the new role
   })
   assert.deepEqual(
     toolNames(dana),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'],
     'a demotion withdraws the leader-only tools rather than leaving them to refuse at call time',
   )
   assert.equal(demoted.colleague.description, 'reads the record and writes no files')
@@ -3431,7 +3617,7 @@ await check('a stored role that is no longer predefined reads as the default mem
   assert.equal(legacy.tables.get('colleagues').get('session-cons').role, 'member')
   assert.deepEqual(
     toolNames(cons),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'],
     'and holds the member tool set',
   )
 
@@ -3442,7 +3628,7 @@ await check('a stored role that is no longer predefined reads as the default mem
     Number.isSafeInteger(stored.adoptedAt),
     'the record keeps the arrival time it already carried',
   )
-  assert.deepEqual(toolNames(old), ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'])
+  assert.deepEqual(toolNames(old), ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'])
 })
 
 await check('office_colleagues reports the roster with each colleague live status', async () => {
@@ -3751,7 +3937,7 @@ await check('a deployment with no question tool is armed without a word about it
   assert.ok(!seesAskUser(nda), 'there is no such tool to hold')
   assert.deepEqual(
     toolNames(nda),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'],
     'and the colleague is armed exactly as before: a name the deployment never mounted is not an error',
   )
 })
@@ -4023,7 +4209,7 @@ await check('the panel adopts an existing session as a colleague', async () => {
   }, 'the colleague is named by the adopted session title, like every colleague')
   assert.deepEqual(
     toolNames(sam),
-    ['office_channels', 'office_colleagues', 'office_dm', 'office_post', 'office_read', 'office_read_notifications'],
+    ['office_channels', 'office_colleagues', 'office_dm', 'office_do_not_disturb', 'office_post', 'office_read', 'office_read_notifications'],
     'adoption from the panel arms the live session exactly as the tool does',
   )
   const after = (await callRoute(routes, officeRoute('state', 'guiadopt'))).payload

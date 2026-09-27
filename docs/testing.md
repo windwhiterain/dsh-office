@@ -89,6 +89,19 @@ What it covers, by area:
   did, the panel token moving when a colleague enters or leaves the wait, and the interrupt result
   naming the wait it ended. The fake answers only for the harnesses that ask for it, which is what
   makes the absent-row case a case at all.
+- **Do not disturb** — a colleague setting its own state through `office_do_not_disturb`, and what
+  that state silences: a post that names it, a private message, and the mail of a colleague whose
+  session is not loaded are each held rather than delivered, each reported to its own sender as
+  `do-not-disturb` with the reason quoted, and none of them opens a turn in the colleague that
+  asked to be left alone. The release reports what it is about to hand over and hands it over as one
+  merged turn at the next idle transition, never inside the releasing call;
+  `office_read_notifications` still returns and takes the caller's own holds while the state is set;
+  a session that is not loaded is never resumed to be told that it is away; and one call writes
+  every office that holds the colleague, whose colleagues each read the state the other office
+  recorded. The roster reports the state and the reason to every reader, the panel's snapshot
+  carries them, and the refusals are covered: a call that names no state, a state that is not a
+  boolean, a note sent beside a release, and a note past the bound. A boss holds no such tool,
+  because it is on no roster.
 - **The panel routes** — the state snapshot (roster, roles, mailbox, totals, the channel the feed
   asked for), the history page a folded row asks for, hire, configure, dismiss, and the connection
   policy each one applies. The snapshot's own token is covered by what it is for: a poll naming the
@@ -127,7 +140,8 @@ made *below* the oldest message the feed holds, and that the older page is prepe
 the channel column between `#general` and a group channel through the switcher, opening the
 Channels dialog onto the group channels, seeding the colleague dialog from the colleague it
 was opened on, and asserting the wake each feed message states — the token the office recorded for
-it, and `nobody` for one that woke nobody.
+it, and `nobody` for one that woke nobody — and the do-not-disturb state a colleague's roster row
+draws, with the reason it published.
 
 The first snapshot is held back, which is the page's loading window: the check asserts the body
 says it is loading, holds **no button and no field at all**, and reports itself busy, and that
