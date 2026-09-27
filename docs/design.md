@@ -473,6 +473,48 @@ is therefore who the column lists. The composer's `@` menu is deliberately not s
 naming a colleague addresses that colleague wherever the post goes, and a level posted into a
 channel is already narrowed by that channel's membership.
 
+## What a panel poll costs
+
+A panel open on an office polls it every few seconds for the life of the page, so the cost of the
+answer the poll usually gets is a design decision rather than an implementation detail.
+
+**A poll of a page already on screen is answered without a snapshot.** Each snapshot carries an
+opaque token describing everything the page draws, and the next poll hands it back; while it still
+matches the office's own tick, the answer is a few dozen bytes. What the token must therefore be is
+the interesting part. It is **derived from the office's records** — a walk of its own small tables,
+never of a session's history — rather than counted by the writers: a counter a writer has to
+remember to move goes stale the first time a write path is added, and a stale token is worse than a
+slow one, because the page then stops refreshing altogether with nothing to show for it. For the
+same reason the token is composed **before** the snapshot it stamps: a change that lands while the
+snapshot is being built then leaves the client holding a token older than its content, which costs
+one redundant answer, where a token newer than the content would hide a message for good.
+
+**Naming a colleague reads a listing, not a log.** The tick and the snapshot both need each
+colleague's name, and a name is the session's title. The cheap read is the one every listing in the
+deployment already uses — a live session's own `title` projection, else the projection cache's row
+by header — while folding the title out of the session's log resolves that session's source and
+copies its whole history. On a live office of ten colleagues with tens of megabytes of history
+between them, the difference measured here was seconds per poll against milliseconds, and it was
+the reason the page looked empty: the answer arrived after the following polls had already been
+sent. The log fold stays as the last resort, for a deployment that mounts neither projection, and
+the roster reads the corpus listing **once** per request — the adopt picker's candidates come from
+the same listing the names were resolved against.
+
+**One question per office and channel is open at a time.** The poll interval says when to ask, not
+how many copies of one question may be outstanding. Without that rule a slow answer stacks the next
+poll and the one after it behind it, which is how a route that pays seconds once pays them three
+times over and never catches up. A switch is a *different* question, so the reader's decision is
+asked for immediately rather than queued behind a poll already on its way.
+
+**The first answer gates the page; no later one does.** While the selected office's first snapshot
+is on its way, the page is a loading state with no control on it. A page whose roster is not known
+yet has nothing a click could mean: the header's buttons act on a snapshot, every dialog seeds
+itself from one, and the composer posts into a channel the answer has not named. Rendering the
+shell and disabling it would offer controls whose meaning arrives later; rendering it enabled is how
+a reader posts into the wrong channel. Once a snapshot is on hand the same reasoning inverts — a
+refresh draws over a page that already works — so the gate belongs to the first answer alone, and a
+failed first answer says so and offers the one control that state has.
+
 ## The user mailbox is a channel
 
 The user is not a session, so nothing can wake them and a colleague cannot answer them by

@@ -1333,7 +1333,12 @@ function createOffice(ctx, domain, config, hooks) {
    */
   const processCtx = ctx.root
 
-  /** The session's committed title, or undefined when none exists yet. */
+  /**
+   * The session's committed title folded from its log, or undefined when none exists yet.
+   *
+   * This is the expensive read and the reason {@link nameOf} does not start here: the fold resolves
+   * the session's source, so naming one colleague copies that colleague's whole history.
+   */
   const readTitle = async (sessionId) => {
     const query = ctx.get('sessionQuery')
     if (query === undefined) return undefined
@@ -1342,14 +1347,54 @@ function createOffice(ctx, domain, config, hooks) {
     return typeof title === 'string' && title.length > 0 ? title : undefined
   }
 
-  /** The name a session is addressed by: its title, or a short-id fallback. */
-  const nameOf = async (sessionId) => (await readTitle(sessionId)) ?? `session-${shortSessionId(sessionId)}`
+  /**
+   * Every session the deployment holds, as a corpus listing.
+   *
+   * One listing serves a whole request — the roster's names and the adopt picker's candidate list —
+   * and it stays a listing: headers with their availability flags, never the histories behind them,
+   * so a long-lived session costs the same as a fresh one.
+   * @returns the session records, newest first.
+   */
+  const sessionRecords = async () => {
+    const query = ctx.get('sessionQuery')
+    return query === undefined ? [] : query.listSessions()
+  }
 
-  /** Adopted colleagues with their current session titles resolved. */
-  const listColleagues = async () => {
-    const records = [...colleagues.entries()].map(([, value]) => validateColleague(value))
+  /**
+   * The name a session is addressed by: its listed title, or a short-id fallback.
+   *
+   * The listed title is read the way every other listing in this deployment reads it — the live
+   * session's own `title` projection, else the projection cache's row by header. The log fold is
+   * the last resort rather than the first read, because it copies the named session's whole history:
+   * naming a roster of ten long-lived colleagues through it cost seconds on every poll, while the
+   * projections answer the same names from memory.
+   * @param sessionId - the session to name.
+   * @param headers - the session headers of the enclosing listing, by session id; a caller with no
+   *   listing reads the live projection and then the log fold.
+   * @returns the name the office addresses this session by.
+   */
+  const nameOf = async (sessionId, headers) => (await listedTitleOf(
+    sessionId,
+    headers?.get(sessionId),
+    ctx.agents,
+    ctx.get('sessionProjections'),
+    ctx.get('sessionProjectionCache'),
+  )) ?? (await readTitle(sessionId)) ?? `session-${shortSessionId(sessionId)}`
+
+  /**
+   * Adopted colleagues with their current session titles resolved.
+   * @param records - the corpus listing the names resolve against; listed here when absent, so a
+   *   caller that already holds one never pays for a second.
+   * @returns one record per colleague, in roster order.
+   */
+  const listColleagues = async (records) => {
+    const listed = records ?? await sessionRecords()
+    const headers = new Map(listed.map(record => [record.header.id, record.header]))
     const named = []
-    for (const record of records) named.push({ ...record, name: await nameOf(record.sessionId) })
+    for (const [, value] of colleagues.entries()) {
+      const record = validateColleague(value)
+      named.push({ ...record, name: await nameOf(record.sessionId, headers) })
+    }
     return named
   }
 
@@ -2509,10 +2554,11 @@ function createOffice(ctx, domain, config, hooks) {
    * permission preset and the model route are reported only for a loaded session: they are
    * properties of that live session, and guessing them from storage would report a fact this
    * office does not hold.
+   * @param records - the corpus listing the names resolve against; listed here when absent.
    * @returns one record per colleague, in roster order.
    */
-  const rosterStatus = async () => {
-    const list = await listColleagues()
+  const rosterStatus = async (records) => {
+    const list = await listColleagues(records)
     const times = lastMessageTimes()
     const described = []
     for (const colleague of list) {
@@ -2534,6 +2580,104 @@ function createOffice(ctx, domain, config, hooks) {
     }
     return described
   }
+
+  /**
+   * The sessions on the roster, by id.
+   *
+   * What a caller that only has to exclude the roster needs — the adopt picker is the one — without
+   * paying for the names, which is the part of a listing that reads another session's title.
+   * @returns the adopted session ids.
+   */
+  const rosterSessionIds = () => new Set(colleagues.keys())
+
+  /**
+   * What one channel holds, as a tick the panel can compare between polls.
+   *
+   * Derived from the stored records rather than counted by the writers: a counter that a writer has
+   * to remember to move goes stale the first time a write path is added, and the panel would then
+   * stop refreshing entirely. The walk is over the message keys of this office, not over any
+   * session's history, so a tick costs the same however long the office has been running.
+   * @param channelId - the channel to describe.
+   * @returns how many messages the channel holds and its newest sequence.
+   */
+  const channelTick = (channelId) => {
+    const prefix = `${channelId}#`
+    let count = 0
+    let newest = 0
+    for (const key of messages.keys()) {
+      if (!key.startsWith(prefix)) continue
+      count += 1
+      const seq = Number(key.slice(prefix.length))
+      if (seq > newest) newest = seq
+    }
+    return `${String(count)}.${String(newest)}`
+  }
+
+  /**
+   * The office's own records as one tick: its name, its roster, and its channels.
+   *
+   * Sorted by key so that a table rewritten in another order is not read as a change. The
+   * sequence counters are left out because a message moves them, and a message is what
+   * {@link channelTick} already reports.
+   * @returns the stored structure of the office, flattened.
+   */
+  const structureTick = () => {
+    const collegial = [...colleagues.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .map(([sessionId, value]) => {
+        const record = validateColleague(value)
+        return [sessionId, record.role, record.description, record.adoptedAt]
+      })
+    const channeled = [...channels.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .map(([channelId, value]) => {
+        const record = validateChannel(value)
+        return [channelId, record.kind, record.topic, record.members]
+      })
+    return JSON.stringify([name(), collegial, channeled])
+  }
+
+  /**
+   * The facts the office holds only in memory: each colleague's live status, its effective
+   * permission, and how much is held for it.
+   *
+   * These are the columns a poll exists to refresh even when nothing was written — a colleague that
+   * went idle or picked up held mail changes no stored record — so the tick reads them from the
+   * registry instead of waiting for a write to notice.
+   * @returns one tick per colleague, in roster order.
+   */
+  const liveTick = () => {
+    const projections = ctx.get('sessionProjections')
+    const described = []
+    for (const sessionId of colleagues.keys()) {
+      const live = liveAgent(sessionId)
+      const title = live === undefined ? undefined : projections?.stateOf(live.session, 'title')
+      described.push([
+        sessionId,
+        live === undefined ? 'inactive' : live.status,
+        live === undefined ? undefined : currentPermission(live),
+        heldWakes(sessionId).length,
+        title,
+      ])
+    }
+    return JSON.stringify(described)
+  }
+
+  /**
+   * Everything the panel's snapshot shows, as one opaque token it hands back on its next poll.
+   *
+   * The panel sends the token it was answered with and is told `unchanged` while it still matches,
+   * so a poll costs a walk of this office's own tables instead of a rebuilt snapshot. The tick is
+   * composed **before** the snapshot it stamps, never after: a change that lands while the snapshot
+   * is being built then leaves the client holding a token older than its content, which costs one
+   * redundant answer, where a token newer than the content would hide a message for good.
+   * @param channelId - the channel the panel is reading.
+   * @returns the token for this office, this channel, and the mailbox.
+   */
+  const panelTick = (channelId) => [
+    structureTick(),
+    channelTick(channelId),
+    channelTick(MAILBOX_CHANNEL),
+    liveTick(),
+  ].join('|')
 
   /** Set while one idle notice is being sent, so two idle transitions cannot send two. */
   let idleNoticeInFlight = false
@@ -2918,6 +3062,9 @@ function createOffice(ctx, domain, config, hooks) {
     colleagueByName,
     colleagueBySession,
     nameOf,
+    sessionRecords,
+    rosterSessionIds,
+    panelTick,
     listChannels,
     visibleChannels,
     ensureChannel,
@@ -4989,33 +5136,48 @@ function panelMessage(message, names) {
 }
 
 /**
- * The title one listed session displays, as the Web sidebar's own list rows display it.
+ * The title one session is listed under, as the Web sidebar's own list rows display it.
  *
  * The `title` projection unit is the accepted client-side title state: a live session reads the
- * live cell, a cold one reads the projection cache's row by header alone — never a log replay,
- * so a listing stays cheap however long the sessions are. This is the projection pair
- * `ApiSessionList` reads for the Web session list. A registry without that unit, an unreadable
- * source, and a session with no title yet are all `undefined`, which the caller renders as the
- * short-id name the office itself addresses an unnamed sender by.
- * @param record - one session record as `sessionQuery.listSessions` reports it.
+ * live cell, a session that is not loaded reads the projection cache's row by header alone — never
+ * a log replay, so a listing stays cheap however long the sessions are. This is the projection pair
+ * `ApiSessionList` reads for the Web session list, and the office reads it for the same reason
+ * there as here. A registry without that unit, an unreadable source, and a session with no title
+ * yet are all `undefined`, which the caller renders as the short-id name the office itself
+ * addresses an unnamed sender by.
+ * @param sessionId - the session to name.
+ * @param header - the session's header, when the caller listed it; the cache needs it as its
+ *   lifecycle witness. A live session supplies its own, so a header-less call still reads the
+ *   live cell.
  * @param agents - the live agent registry, or `undefined` when none is mounted.
  * @param projections - the projection registry, or `undefined` when none is mounted.
  * @param cache - the projection cache, or `undefined` when none is mounted.
  * @returns the displayed title, or `undefined` when none is projected.
  */
-const listedTitle = (record, agents, projections, cache) => {
+const listedTitleOf = (sessionId, header, agents, projections, cache) => {
   try {
-    const agent = agents?.get(record.header.id)
-    const title = agent !== undefined
-      ? projections?.stateOf(agent.session, 'title')
-      : cache?.cachedSnapshot(record.header)?.values.title
-    return typeof title === 'string' && title.length > 0 ? title : undefined
+    const agent = agents?.get(sessionId)
+    const live = agent === undefined ? undefined : projections?.stateOf(agent.session, 'title')
+    if (typeof live === 'string' && live.length > 0) return live
+    const cached = header === undefined ? undefined : cache?.cachedSnapshot(header)?.values.title
+    return typeof cached === 'string' && cached.length > 0 ? cached : undefined
   } catch {
     // A registry without that unit is a missing column, not a failed listing: the entry renders
     // as the short-id form instead, and the picker stays open.
     return undefined
   }
 }
+
+/**
+ * The listed title of one session record, for a caller that already holds the corpus listing.
+ * @param record - one session record as `sessionQuery.listSessions` reports it.
+ * @param agents - the live agent registry, or `undefined` when none is mounted.
+ * @param projections - the projection registry, or `undefined` when none is mounted.
+ * @param cache - the projection cache, or `undefined` when none is mounted.
+ * @returns the displayed title, or `undefined` when none is projected.
+ */
+const listedTitle = (record, agents, projections, cache) =>
+  listedTitleOf(record.header.id, record.header, agents, projections, cache)
 
 /**
  * List recent sessions that are not colleagues yet.
@@ -5033,12 +5195,16 @@ const listedTitle = (record, agents, projections, cache) => {
  * @param ctx - the plugin context carrying the optional listing services.
  * @param office - the office whose roster the listing excludes.
  * @param limit - the ceiling on one listing.
+ * @param listed - the corpus listing to select from; listed here when absent, so a caller that
+ *   already holds one never pays for a second.
  * @returns the adoptable sessions, newest first.
  */
-async function unadoptedSessions(ctx, office, limit) {
+async function unadoptedSessions(ctx, office, limit, listed) {
   const query = ctx.get('sessionQuery')
   if (query === undefined) return []
-  const adopted = new Set((await office.listColleagues()).map(colleague => colleague.sessionId))
+  // The roster is excluded by session id, so the names are never resolved here: naming a colleague
+  // is a title read per colleague and this listing shows none of them.
+  const adopted = office.rosterSessionIds()
   const registry = ctx.get('workspaceRegistry')
   const archived = new Set(registry?.archivedSessionIds ?? [])
   // The workspace account is the registry's own filtered membership, so the workspace a session
@@ -5051,7 +5217,7 @@ async function unadoptedSessions(ctx, office, limit) {
       }
     }
   }
-  const records = (await query.listSessions())
+  const records = (listed ?? await query.listSessions())
     .filter(record => !adopted.has(record.header.id) && !archived.has(record.header.id)
       && workspaces.has(record.header.id))
     .slice(0, limit)
@@ -5067,29 +5233,41 @@ async function unadoptedSessions(ctx, office, limit) {
 }
 
 /**
- * Snapshot one office for the panel.
+ * Snapshot one office for the panel, or say that the panel already holds it.
  *
  * The host registers the route but the office owns the data, so the whole snapshot is derived
  * from the mounted entry: its stored name, its roster, its channels, and its messages.
  *
  * Each message list travels with its total, because the panel renders the newest `readLimit`
  * and folds the rest behind one row: without the total it could not say how many are folded.
+ *
+ * A poll that carries the token of the answer it holds is answered with `unchanged` instead, which
+ * is what keeps a panel open on a quiet office from rebuilding this snapshot every few seconds. The
+ * token is taken before the snapshot is built, so an answer never claims to be newer than it is.
  * @param ctx - the plugin context carrying the optional listing services.
  * @param mounted - the mounted office entry.
- * @returns the panel snapshot.
+ * @param requestedChannel - the channel the request named, when it named one.
+ * @param since - the token the caller holds, when it sent one.
+ * @returns the panel snapshot, or the token alone when nothing it shows has moved.
  */
-async function officeState(ctx, mounted, requestedChannel) {
+async function officeState(ctx, mounted, requestedChannel, since) {
   const { office } = mounted
-  const colleagues = await office.rosterStatus()
+  // The channel feed the panel is reading: the standing public one unless the request names
+  // another. A channel that no longer exists falls back to the public one — the panel
+  // converges through this fallback instead of reporting a channel it just deleted.
+  const channelId = resolvePanelChannel(office, requestedChannel)
+  const revision = office.panelTick(channelId)
+  if (since !== undefined && since === revision) {
+    return { office: mounted.name, officeId: mounted.id, channel: channelId, revision, unchanged: true }
+  }
+  // One corpus listing serves both readers of it below: the roster's names and the adopt picker.
+  const records = await office.sessionRecords()
+  const colleagues = await office.rosterStatus(records)
   // The user name is a mention target like a colleague name, so the panel colors it in the same
   // pass: a body that named the user is exactly what the mailbox exists to collect.
   const names = [...colleagues.map(entry => entry.name), mounted.config.userName]
   const limit = hostConfig().readLimit
   const mailbox = office.readMessages(office.mailboxChannel, Infinity)
-  // The channel feed the panel is reading: the standing public one unless the request names
-  // another. A channel that no longer exists falls back to the public one — the panel
-  // converges through this fallback instead of reporting a channel it just deleted.
-  const channelId = resolvePanelChannel(office, requestedChannel)
   const selected = office.readMessages(channelId, Infinity)
   return {
     office: mounted.name,
@@ -5097,6 +5275,8 @@ async function officeState(ctx, mounted, requestedChannel) {
     // Which channel the `messages` page is from, so a client can tell a fallback from its own
     // choice without re-deriving the resolution.
     channel: channelId,
+    // The token this answer carries, which the next poll hands back to be told `unchanged`.
+    revision,
     colleagues,
     // What the hire and edit dialogs offer. A role's mapped preset travels with it, so the panel
     // shows what choosing a role does to that colleague's session rather than only its name.
@@ -5106,7 +5286,7 @@ async function officeState(ctx, mounted, requestedChannel) {
     })),
     // The sessions the panel's adopt dialog offers, through the same unadopted listing the boss
     // tool reports, with the workspace each session belongs to.
-    unadopted: await unadoptedSessions(ctx, office, hostConfig().readLimitMax),
+    unadopted: await unadoptedSessions(ctx, office, hostConfig().readLimitMax, records),
     // The name `@` addresses to reach the user's mailbox, and the mailbox itself. A colleague
     // cannot read it through any tool, so this route is the only way it reaches a surface.
     user: { name: mounted.config.userName },
@@ -5245,10 +5425,12 @@ function registerHostRoutes(ctx, config) {
         const mounted = officeOr404(req, res)
         if (mounted === undefined) return undefined
         try {
+          const query = new URL(req.url ?? '/', 'http://x').searchParams
           return respondJson(res, 200, await officeState(
             ctx,
             mounted,
-            new URL(req.url ?? '/', 'http://x').searchParams.get('channel') ?? undefined,
+            query.get('channel') ?? undefined,
+            query.get('since') ?? undefined,
           ))
         } catch (error) {
           return respondJson(res, 500, { error: error instanceof Error ? error.message : String(error) })

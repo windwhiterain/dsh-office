@@ -508,6 +508,24 @@ stay isolated: no shared roster and no shared channel.
 panel, both under the id `office`. The page discovers the mounted offices from
 `/dsh-office/offices` and shows a switcher across the top when there is more than one.
 
+Until the selected office's first snapshot arrives the page is a **loading state with no control on
+it**: a page whose roster is not known yet has nothing a click could mean, since the header's
+buttons, every dialog, and the composer all act on what the snapshot carries. Only that first
+answer gates — a later poll draws over a page that already resolved, so a refresh never takes the
+controls away from a reader who is using them. A first answer that *failed* is not a page still
+loading: it says so and offers **Retry**, which is the one control that state has.
+
+A poll is also **dirty-only**. The snapshot carries an opaque token — its `revision` — that
+describes everything the page draws, and the next poll hands that token back: while nothing it
+describes has moved, the office answers `unchanged` in a few dozen bytes instead of rebuilding the
+snapshot. Polls of one office and channel never overlap, so a slow answer cannot stack two more
+behind it, while a channel switch is a different question and is asked at once. Opening one of the
+panel's own dialogs asks for a full snapshot at that click, because what a dialog offers — the
+sessions nobody has adopted, the workspaces, the presets, the models — changes without an office
+write and so is not something the token compares. Once a minute the panel asks for a full snapshot
+anyway, which is what catches any other fact no office write moved — a session renamed from the
+sidebar, say.
+
 Everything below the switcher belongs to the selected office. The body is three columns — the
 roster, the channel, and the mailbox — and each of the two side columns is opened from a button in
 the header, next to **Hire a colleague**, and closed either from that button again or from the
@@ -521,7 +539,9 @@ without a tool call.
 - **Colleagues** — a side column, open by default: the colleagues the channel column holds — the
   whole office for `#general`, a group channel's own members — each with its role, live status,
   effective permission, held-message count, and description, plus **Edit** (role and description)
-  and **Dismiss**. The header's count is the same list.
+  and **Dismiss**. The header's count is the same list. A name is the session's listed title, read
+  the way the Web session list reads it: a live session's own `title` projection, or the projection
+  cache's row for one that is not loaded.
 - **Channel** — the column the page reads, named by a switcher in its own head: `#general` and
   every group channel, one at a time, each with its own feed, composer, and stored reading
   position. A switch is one question — an answer to the channel you left is dropped rather than
@@ -624,7 +644,7 @@ including none:
 
 | Route | Purpose |
 |---|---|
-| `GET /dsh-office/offices/state?office=<name>&channel=<channel>` | Colleagues, channels (with their members), the newest messages of `channel` — `#general` unless the request names a group channel, and the fallback is the public feed — beside the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived or unaccounted ones never offered), and the hire options. |
+| `GET /dsh-office/offices/state?office=<name>&channel=<channel>&since=<token>` | Colleagues, channels (with their members), the newest messages of `channel` — `#general` unless the request names a group channel, and the fallback is the public feed — beside the mailbox with their totals, the roles and their mapped presets, the user name, the adoptable sessions with their workspaces and titles (archived or unaccounted ones never offered), and the hire options. The answer also carries the `revision` token that describes it: a request naming the token it already holds is answered `{ office, officeId, channel, revision, unchanged: true }` and nothing else, which is what makes a poll of an unmoved office a comparison rather than a snapshot. |
 | `GET /dsh-office/offices/history?office=<name>&channel=<channel>&before=<seq>&limit=<n>` | One page of messages older than `before`, oldest first, with the channel's `total` and whether anything older remains. This is what a folded row asks for; `channel` addresses the group channels the same way the state parameter does. |
 | `POST /dsh-office/offices/post?office=<name>` | `{ text, channel? }`; posts as `userName` to `channel` (`#general` unless named) and wakes exactly what the body writes — the colleagues its `@` names, or the rung its `#` level calls, scoped to the channel for a group one. The request carries no audience of its own, so no client can wake a colleague the message does not address. `@user` files a mailbox copy. |
 | `POST /dsh-office/offices/hire?office=<name>` | `{ name, role?, description?, workspace_id?, agent_preset?, provider?, model?, reasoning_effort? }`. |
@@ -641,8 +661,25 @@ own, so every route first calls `ctx.connection.requestRejection({ headers })` a
 401/403 unchanged; with no connection service the routes answer 503 rather than serve the office
 unauthenticated.
 
+The state route's token describes what the snapshot draws — the roster with its live status and
+held counts, the channels, the channel being read, and the mailbox — and it is derived from the
+office's own records on each request rather than counted by the writers, so no write path can
+forget to move it. It is **not stored**: a plugin reload restarts every office's counters, which
+is exactly right, because the panel that held a token then holds a stale one and is answered with
+a snapshot. A change the office never wrote — a session renamed from the sidebar, a storage file
+edited by hand — moves no token, which is what the panel's own periodic full read covers.
+
 ## Known limitations
 
+- **The panel's roster names come from the title projections.** A deployment that mounts neither
+  `sessionProjections` nor `sessionProjectionCache` has no listed title to read, so naming a
+  colleague falls back to folding its session log — the read that made a poll of a ten-colleague
+  office take as long as the office's whole history. The names are then correct and the page is
+  slow, which is the trade the projection pair exists to avoid.
+- **A fact no office wrote reaches the panel within a minute.** The token moves for what the
+  office stores and for its colleagues' live state; a session renamed from the sidebar, or a
+  storage file edited by hand, moves nothing, so the panel's own periodic full read is what shows
+  it. A reader who wants it sooner reloads the page.
 - **The idle notice has no panel control.** `idleNotice` is configured on the office row, so
   switching it on means editing that row's config; the panel neither shows it nor edits it.
 - **Panel copy is not localized.** Strings are inline in `client.js` rather than routed through

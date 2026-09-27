@@ -75,7 +75,12 @@ What it covers, by area:
   the row validation that refuses a notice it could never send.
 - **The panel routes** — the state snapshot (roster, roles, mailbox, totals, the channel the feed
   asked for), the history page a folded row asks for, hire, configure, dismiss, and the connection
-  policy each one applies.
+  policy each one applies. The snapshot's own token is covered by what it is for: a poll naming the
+  token it was answered with is told `unchanged` and carries no snapshot at all, a message in the
+  channel the panel reads moves it, another channel's traffic does not, and a colleague's live
+  status does. The roster's names are covered by the read they must not make: a check counts the
+  log folds the fake was asked for and asserts the count is zero while a title projection is
+  readable, for a first listing and for a rename.
 
 Keep it out of `index.js`: the shipped plugin carries no test code, and `package.json`'s `files`
 list ships neither `probe/` nor `docs/`. `experience/` does ship: a hired leader's onboarding turn
@@ -97,6 +102,13 @@ made *below* the oldest message the feed holds, and that the older page is prepe
 the channel column between `#general` and a group channel through the switcher, opening the
 Channels dialog onto the group channels, and seeding the colleague dialog from the colleague it
 was opened on.
+
+The first snapshot is held back, which is the page's loading window: the check asserts the body
+says it is loading, holds **no button and no field at all**, and reports itself busy, and that
+releasing the answer draws the office. One full poll interval is then waited out, which is the only
+way to observe a poll: the check asserts the request carries the token the previous answer was
+given, and that a `MutationObserver` watching the panel records **no mutation at all** while the
+office answers that nothing moved — the page is not rebuilt, so the reader's place in it survives.
 
 Four assertions belong to the switch itself, and they are the reason the stub can hold an answer
 back (see below):

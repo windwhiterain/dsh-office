@@ -149,14 +149,30 @@ const releaseHeld = () => {
   held = []
   for (const resolve of pending) resolve()
 }
+/**
+ * The token every full snapshot carries.
+ *
+ * It is what the panel hands back on its next poll of the same office and channel, so the stub can
+ * answer "nothing moved" the way a quiet office does and the check can see that the poll asked.
+ */
+const SNAPSHOT_REVISION = 'tick-1'
 dom.window.__ModuleLoader__ = { load: (module) => { captured = module } }
 globalThis.fetch = async (path) => {
   calls.push(path)
   const url = new URL(path, 'http://127.0.0.1:3081/')
+  const since = url.searchParams.get('since')
   const body = path === '/dsh-office/offices'
     ? { offices: [{ id: 'office', name: 'office' }] }
     : url.pathname.endsWith('/state')
-      ? { ...SNAPSHOT, channel: url.searchParams.get('channel') ?? 'general' }
+      ? since === SNAPSHOT_REVISION
+        ? {
+          office: 'office',
+          officeId: 'office',
+          channel: url.searchParams.get('channel') ?? 'general',
+          revision: SNAPSHOT_REVISION,
+          unchanged: true,
+        }
+        : { ...SNAPSHOT, revision: SNAPSHOT_REVISION, channel: url.searchParams.get('channel') ?? 'general' }
       : OLDER
   if (url.pathname.endsWith('/state') && holding(url)) {
     await new Promise(resolve => { held.push(resolve) })
@@ -207,6 +223,10 @@ const ctx = {
 module.apply(ctx)
 assert.ok(registered.main, 'the panel registers the main slot')
 
+// The page's loading window: the office list is answered, the snapshot is not. Holding the first
+// state request is what a slow snapshot looks like to the panel, and it is where the page must
+// offer nothing to click rather than columns that act on a roster it does not have yet.
+holding = url => url.pathname.endsWith('/state')
 const root = createRoot(document.getElementById('root'))
 root.render(React.createElement(registered.main))
 const settle = async (ms = 30) => { await new Promise(resolve => setTimeout(resolve, ms)) }
@@ -223,6 +243,12 @@ const until = async (predicate, ms = 2000) => {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
+assert.match(text(), /Loading office/, 'a page whose snapshot has not arrived says it is loading')
+assert.equal(buttons().length, 0, 'and offers no control at all')
+assert.equal(document.querySelectorAll('select, input, textarea').length, 0, 'nor a field to type into')
+assert.ok(document.querySelector('[aria-busy="true"]'), 'and reports itself busy to assistive readers')
+holding = () => false
+releaseHeld()
 const clickOn = (label) => {
   const button = buttons().find(entry => entry.textContent.includes(label))
   assert.ok(button, `a button labelled "${label}" must be rendered; body was: ${text()}`)
@@ -254,6 +280,21 @@ assert.match(text(), /#general/, 'the public channel names its own column')
 assert.equal(document.querySelectorAll('[data-channel="general"]').length, 1, 'and owns exactly one scrollport')
 assert.match(text(), /10 earlier messages/, 'the feed folds everything older than the newest page')
 assert.match(text(), /tail/, 'the newest page is rendered')
+
+// A poll of the pair already on hand hands the snapshot's token back, and the office's answer that
+// nothing moved redraws nothing: the panel is not rebuilt, so the reader's place in it survives.
+// The wait is one poll interval, which is the only way to observe a poll at all.
+const polledFrom = calls.length
+let mutations = 0
+const observer = new dom.window.MutationObserver(() => { mutations += 1 })
+observer.observe(document.getElementById('root'), { subtree: true, childList: true, characterData: true, attributes: true })
+assert.ok(
+  await until(() => calls.slice(polledFrom).some(path => path.includes(`since=${SNAPSHOT_REVISION}`)), 6000),
+  `a poll of the same office and channel must carry the token it was answered with; calls: ${calls.slice(polledFrom).join(', ')}`,
+)
+await settle(80)
+observer.disconnect()
+assert.equal(mutations, 0, 'an answer that says nothing moved changes nothing on the page')
 assert.ok(!text().includes('please look at @user'), 'the mailbox is collapsed by default')
 
 // The roster column collapses from its header toggle and comes back with its content.

@@ -26,6 +26,15 @@ window.__ModuleLoader__.load({
     /** Polling interval for the office snapshot. */
     const POLL_MS = 4000
     /**
+     * How often the panel asks for a full snapshot whatever its token says.
+     *
+     * An office's tick moves for everything the office writes, and the panel's roster reads live
+     * state beside it, but a fact no office wrote — a session renamed from the sidebar, a storage
+     * file edited by hand — moves nothing. This is the backstop that keeps such a fact from being
+     * invisible for the life of the page.
+     */
+    const SAFETY_REFRESH_MS = 60000
+    /**
      * How long an office edit waits for the Loader to apply the profile patch it wrote.
      *
      * A create or delete returns as soon as the row is written; the Loader reconciles the
@@ -370,6 +379,8 @@ window.__ModuleLoader__.load({
     const emptyState = { padding: '48px 24px', maxWidth: '560px' }
     const emptyTitle = { margin: '0 0 8px', fontSize: '15px', fontWeight: 600 }
     const emptyBody = { ...muted, margin: 0, lineHeight: 1.6 }
+    /** What the page draws while its first snapshot is still on its way, in place of the columns. */
+    const loadingState = { padding: '48px 24px', ...muted }
     const body = { display: 'flex', flex: 1, minHeight: 0 }
     /**
      * The roster column. Like the mailbox sidebar it is a head over a body, so all three columns
@@ -922,10 +933,18 @@ window.__ModuleLoader__.load({
      * outlives every office, so the panel can list nothing and still create the first one.
      * Only a dropped request keeps the previous list, because a failed refresh must not
      * blank a list that already resolved.
-     * @returns the office list, a reload callback, and a reader that reports the fresh list.
+     * @returns the office list, whether it has ever resolved, a reload callback, and a reader
+     *   that reports the fresh list.
      */
     function useOffices() {
       const [offices, setOffices] = useState([])
+      /**
+       * Whether the list has been answered at least once.
+       *
+       * An empty list before that answer is not an office-less Host, it is a page that has not
+       * asked yet — the panel draws its loading state for the one and the empty state for the other.
+       */
+      const [resolved, setResolved] = useState(false)
       /** Fetch and publish the list; rejects so a caller can tell a failure from an answer. */
       const read = useCallback(async () => {
         const payload = await requestJson(OFFICES_ROUTE)
@@ -936,6 +955,7 @@ window.__ModuleLoader__.load({
             name: office.name,
           }))
         setOffices(next)
+        setResolved(true)
         return next
       }, [])
       const reloadOffices = useCallback(async () => {
@@ -950,7 +970,7 @@ window.__ModuleLoader__.load({
         const timer = setInterval(() => { void reloadOffices() }, POLL_MS)
         return () => { clearInterval(timer) }
       }, [reloadOffices])
-      return { offices, reloadOffices, read }
+      return { offices, resolved, reloadOffices, read }
     }
 
     /**
@@ -1108,42 +1128,87 @@ window.__ModuleLoader__.load({
      * polls of one channel may both land.
      * @param officeName - the office to read, or undefined while none is mounted.
      * @param channelId - the channel whose `messages` the snapshot should carry.
-     * @returns the snapshot on hand, whether it answers this request, its error, and a refresher.
+     * @returns the snapshot on hand, whether it answers this request, its error, a refresher that
+     *   always asks for a fresh snapshot, and whether the first one is still on its way.
      */
     function useOffice(officeName, channelId) {
       /** The last published answer, carrying the office and channel it was asked for. */
       const [held, setHeld] = useState(undefined)
       /** The office and channel being asked for now, which is what an answer is judged against. */
       const latest = useRef(undefined)
+      /** The answer on hand, readable from a callback without rebuilding it on every poll. */
+      const answering = useRef(undefined)
+      answering.current = held
+      /** The office-and-channel pair one request is in flight for, if any. */
+      const asking = useRef(undefined)
       const wanted = `${officeName ?? ''}\u0000${channelId ?? ''}`
       latest.current = wanted
-      const refresh = useCallback(async () => {
+
+      /**
+       * Ask once for the office's snapshot, naming the token when the caller holds this pair's.
+       *
+       * A poll is answered with `unchanged` while the office's own tick still matches what the panel
+       * was last handed, so a quiet office costs a comparison rather than a snapshot. One pair is
+       * asked for at a time: the poll interval says when to ask, not how many copies of one question
+       * may be open, and a slow route otherwise stacks a second and a third snapshot behind the
+       * first. A switch is a different pair, so the reader's decision is asked for immediately
+       * rather than queued behind a poll that is already on its way.
+       * @param force - whether to ask for a full snapshot regardless of the token held.
+       */
+      const read = useCallback(async (force = false) => {
         if (officeName === undefined || channelId === undefined) return
         const asked = `${officeName}\u0000${channelId}`
+        if (asking.current === asked) return
+        const previous = answering.current
+        // The token belongs to the pair it was answered for: another channel's token would be a
+        // comparison against a tick this request never asked about.
+        const token = !force && previous?.office === officeName && previous.asked === channelId
+          ? previous.payload?.revision
+          : undefined
+        const route = withChannel(officeRoute('state', officeName), channelId)
+          + (typeof token === 'string' && token.length > 0
+            ? `&${new URLSearchParams({ since: token })}`
+            : '')
+        asking.current = asked
         try {
-          const payload = await requestJson(withChannel(officeRoute('state', officeName), channelId))
+          const payload = await requestJson(route)
           if (latest.current !== asked) return
+          // Nothing the panel draws moved, so there is nothing to redraw: publishing the same
+          // snapshot again would reset what the reader is doing — a scroll position among it.
+          if (payload?.unchanged === true) return
           setHeld({ office: officeName, asked: channelId, payload, error: undefined })
         } catch (failure) {
           if (latest.current !== asked) return
           const message = failure instanceof Error ? failure.message : String(failure)
-          setHeld(previous => ({
+          setHeld(current => ({
             office: officeName,
             asked: channelId,
             // A dropped poll must not blank a panel that already resolved, but a failure while
             // another channel is coming has nothing of this channel to keep.
-            payload: previous?.office === officeName && previous.asked === channelId
-              ? previous.payload
+            payload: current?.office === officeName && current.asked === channelId
+              ? current.payload
               : undefined,
             error: message,
           }))
+        } finally {
+          // Only this request's own marker: a switch may have started a second question behind it.
+          if (asking.current === asked) asking.current = undefined
         }
       }, [officeName, channelId])
+
+      /** Ask for a full snapshot now, which is what every office edit and the retry button want. */
+      const refresh = useCallback(() => read(true), [read])
       useEffect(() => {
-        void refresh()
-        const timer = setInterval(() => { void refresh() }, POLL_MS)
-        return () => { clearInterval(timer) }
-      }, [refresh])
+        void read()
+        const timer = setInterval(() => { void read() }, POLL_MS)
+        // The tick cannot see a fact no office wrote — a session renamed from the sidebar, a
+        // storage file edited by hand — so a slow full read keeps the panel from drifting for ever.
+        const safety = setInterval(() => { void read(true) }, SAFETY_REFRESH_MS)
+        return () => {
+          clearInterval(timer)
+          clearInterval(safety)
+        }
+      }, [read])
       // Another office's snapshot is not this office's: a roster, a channel list, and a mailbox
       // all belong to the office they were read from.
       const answer = held !== undefined && held.office === officeName ? held : undefined
@@ -1153,6 +1218,9 @@ window.__ModuleLoader__.load({
         // follow a fallback without letting a superseded answer move the reader's choice.
         fresh: answer !== undefined && answer.asked === channelId,
         error: answer?.error,
+        // Loading is exactly "nothing to draw yet and nothing went wrong": a snapshot on hand is
+        // drawn while a later poll is in flight, so a refresh never blanks the page.
+        loading: officeName !== undefined && answer === undefined,
         refresh,
       }
     }
@@ -2212,7 +2280,7 @@ window.__ModuleLoader__.load({
     }
 
     function OfficePanel() {
-      const { offices, reloadOffices, read } = useOffices()
+      const { offices, resolved, reloadOffices, read } = useOffices()
       // Which office the page shows is part of the panel's state, not of one visit: reopening
       // the page returns to the office the operator was working in.
       const [selected, setSelected] = useStoredState('office', undefined)
@@ -2227,7 +2295,7 @@ window.__ModuleLoader__.load({
       const requestedChannel = typeof channelChoice === 'string' && channelChoice.length > 0
         ? channelChoice
         : 'general'
-      const { snapshot, fresh, error, refresh } = useOffice(active, requestedChannel)
+      const { snapshot, fresh, error, loading, refresh } = useOffice(active, requestedChannel)
       // The server answers the public channel for a name it does not resolve — one this office
       // deleted while it was stored, say — and that answer is the channel to follow. Only the
       // answer to the request the panel is waiting for is read that way, so the reader's choice
@@ -2284,6 +2352,61 @@ window.__ModuleLoader__.load({
       // refusal the user did not ask for.
       useEffect(() => { setEditing(undefined) }, [active])
 
+      /**
+       * Open one dialog over a snapshot that is fresh as of this click.
+       *
+       * What the dialogs offer changes without an office write — the sessions nobody has adopted,
+       * the workspaces, the presets, the models — so the office's own tick cannot describe it, and a
+       * page open for a while would offer a list it read minutes ago. Opening a dialog is a
+       * deliberate act and a full snapshot is one request, so this is the moment to ask for one
+       * rather than to widen what every poll compares.
+       * @param which - the dialog to open.
+       */
+      const openDialog = (which) => {
+        void refresh()
+        setDialog(which)
+      }
+
+      // The page's own answer while the office list or the selected office's first snapshot is
+      // still on its way: a loading state and no control at all.
+      //
+      // Nothing is rendered rather than merely disabled because there is nothing a click could mean
+      // yet — the header's buttons act on a snapshot, every dialog seeds itself from one, and the
+      // composer posts into a channel the answer has not named. Rendering the shell would offer
+      // controls that either do nothing or act on a roster that is not there.
+      //
+      // Only the first answer gates: a later poll draws over a page that already has one, so a
+      // refresh never takes the controls away from a reader who is using them.
+      if (!resolved || loading) {
+        return h('div', { style: page, 'aria-busy': 'true' },
+          h('div', { style: header },
+            h('h1', { style: title }, 'Office'),
+          ),
+          h('p', { style: loadingState, role: 'status' },
+            active === undefined ? 'Loading the mounted offices…' : `Loading office “${active}”…`),
+        )
+      }
+
+      // A first read that failed is not a page still loading: it is answered, and the answer is a
+      // refusal. The switcher stays because another office may be perfectly reachable.
+      if (snapshot === undefined && error !== undefined) {
+        return h('div', { style: page },
+          h('div', { style: header },
+            h('h1', { style: title }, 'Office'),
+            h(OfficeSwitcher, { offices, active, onSelect: setSelected }),
+          ),
+          h('div', { style: loadingState },
+            h('p', { style: notice, role: 'alert' },
+              `Cannot reach office “${active}”: ${error}`),
+            h('button', {
+              type: 'button',
+              style: smallButton,
+              onClick: () => { void refresh() },
+            }, 'Retry'),
+          ),
+        )
+      }
+
       return h('div', { style: page },
         h('div', { style: header },
           h('h1', { style: title }, 'Office'),
@@ -2309,17 +2432,17 @@ window.__ModuleLoader__.load({
                 h('button', {
                   type: 'button',
                   style: smallButton,
-                  onClick: () => { setDialog('hire') },
+                  onClick: () => { openDialog('hire') },
                 }, 'Hire a colleague'),
                 h('button', {
                   type: 'button',
                   style: smallButton,
-                  onClick: () => { setDialog('adopt') },
+                  onClick: () => { openDialog('adopt') },
                 }, 'Adopt a session'),
                 h('button', {
                   type: 'button',
                   style: smallButton,
-                  onClick: () => { setDialog('channels') },
+                  onClick: () => { openDialog('channels') },
                 }, 'Channels'),
               ),
             h('button', {

@@ -422,6 +422,14 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
   /** Pending input per session, which a resumed agent reattaches rather than starting empty. */
   const inboxes = new Map()
   const titles = new Map()
+  /**
+   * How many times a check's work folded a session's log to read one title.
+   *
+   * A fold is the expensive read — it resolves the session's whole history — so the panel's roster
+   * must never reach for it while a title projection is readable. The count is what tells those two
+   * paths apart where a name alone cannot: both answer the same string.
+   */
+  const titleFolds = { count: 0 }
   const resumed = []
   const hires = []
   const selects = []
@@ -614,6 +622,7 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
             events: [...(carriedWakes.get(sessionId) ?? []), ...loggedEvents],
           }),
           readTitle: async (sessionId) => {
+            titleFolds.count += 1
             const title = titles.get(sessionId)
             return title === undefined
               ? undefined
@@ -754,6 +763,7 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     routes,
     liveAgents,
     titles,
+    titleFolds,
     resumed,
     hires,
     selects,
@@ -4215,6 +4225,100 @@ await check('every cold resume is owned by the process context, not by this plug
     ['process'],
     'a resume through the office row would make a source reload dispose the colleague mid-turn',
   )
+})
+
+await check('a panel poll holding the snapshot token is told nothing moved, until something does', async () => {
+  const first = await callRoute(routes, officeRoute('state', 'office'))
+  assert.equal(typeof first.payload.revision, 'string', 'the snapshot carries the token its next poll hands back')
+  assert.equal(first.payload.unchanged, undefined, 'and a full snapshot never claims that nothing moved')
+
+  const held = `${officeRoute('state', 'office')}&since=${encodeURIComponent(first.payload.revision)}`
+  const quiet = await callRoute(routes, held)
+  assert.equal(quiet.payload.unchanged, true, 'the same tick is answered without a snapshot')
+  assert.equal(quiet.payload.colleagues, undefined, 'so a quiet poll carries no roster at all')
+  assert.equal(quiet.payload.revision, first.payload.revision, 'and hands the same token back')
+
+  // A post that names nobody wakes nobody, so the tick can only have moved because the channel the
+  // panel reads moved — which is the difference between a feed refresh and a colleague's hold.
+  const posted = await callRoute(routes, officeRoute('post', 'office'), {
+    method: 'POST',
+    body: { text: 'a line into the feed the panel reads' },
+  })
+  assert.equal(posted.status, 200)
+  const after = await callRoute(routes, held)
+  assert.notEqual(after.payload.unchanged, true, 'a message in that channel moves the tick')
+  assert.notEqual(after.payload.revision, first.payload.revision, 'so the stale token is refused')
+})
+
+await check("the token moves for the roster's live state and stays put for another channel's traffic", async () => {
+  // A second office mounts into the shared harness, so the check owns a channel of its own while
+  // the one host keeps serving the routes the panel asks for.
+  harness.ctx.fiber.entry.options.id = 'office_ticks'
+  await apply(harness.ctx, { officeName: 'ticks' })
+  harness.titles.set('session-ticks-boss', 'tick chief')
+  harness.titles.set('session-tick-a', 'ada')
+  const chief = harness.publish('session-ticks-boss', { preset: 'office-boss' })
+  harness.publish('session-tick-a')
+  await callBoss(chief, 'ticks', 'office_adopt', { session_id: 'session-tick-a' })
+
+  const token = async (channel) =>
+    (await callRoute(routes, `${officeRoute('state', 'ticks')}&channel=${channel}`)).payload.revision
+  const holds = (channel, since) =>
+    `${officeRoute('state', 'ticks')}&channel=${channel}&since=${encodeURIComponent(since)}`
+  const settled = await token('general')
+
+  // A colleague that starts working moves nothing the office stored, so the roster's own live
+  // status is the case the tick has to read from the registry rather than from a write.
+  await harness.setStatus('session-tick-a', 'running')
+  assert.notEqual(await token('general'), settled, "a colleague's status moves the tick")
+  assert.notEqual(
+    (await callRoute(routes, holds('general', settled))).payload.unchanged,
+    true,
+    'so a panel holding the old token is answered with a snapshot',
+  )
+
+  // A channel the panel is not reading is not a change to the page it draws. The group channel has
+  // no members, so a post into #general wakes nobody and stores no hold for anyone either — the
+  // mailbox, the roster, and the channel being read are all untouched by it.
+  const created = await callBoss(chief, 'ticks', 'office_channel_create', { name: 'elsewhere' })
+  assert.equal(created.channelId, 'elsewhere', `creating the group channel failed: ${JSON.stringify(created)}`)
+  const elsewhere = await token('elsewhere')
+  const other = await callRoute(routes, officeRoute('post', 'ticks'), {
+    method: 'POST',
+    body: { text: 'a line in the general feed' },
+  })
+  assert.equal(other.status, 200, `posting to #general failed: ${JSON.stringify(other.payload)}`)
+  assert.equal(
+    (await callRoute(routes, holds('elsewhere', elsewhere))).payload.unchanged,
+    true,
+    "another channel's traffic leaves the panel's own token alone",
+  )
+})
+
+await check("naming the roster reads the title projections, never a session's log", async () => {
+  // `titles: {}` mounts the projection registry, which is what a deployment that shows a session
+  // list has and what makes a live title readable without folding the log behind it.
+  const naming = makeHarness({ officeName: 'naming' }, undefined, { rowId: 'office_naming', titles: {} })
+  await naming.ready
+  naming.titles.set('session-naming-boss', 'naming chief')
+  naming.titles.set('session-name-a', 'ada')
+  const chief = naming.publish('session-naming-boss', { preset: 'office-boss' })
+  naming.publish('session-name-a')
+  await callBoss(chief, 'naming', 'office_adopt', { session_id: 'session-name-a' })
+
+  naming.titleFolds.count = 0
+  const listed = await callBoss(chief, 'naming', 'office_colleagues', {})
+  assert.deepEqual(listed.colleagues.map(entry => entry.name), ['ada'])
+  assert.equal(naming.titleFolds.count, 0, 'the roster reads the live title projection, not the log')
+
+  naming.titles.set('session-name-a', 'ada lovelace')
+  const renamed = await callBoss(chief, 'naming', 'office_colleagues', {})
+  assert.deepEqual(
+    renamed.colleagues.map(entry => entry.name),
+    ['ada lovelace'],
+    'and a session renamed anywhere renames the colleague with no log read either',
+  )
+  assert.equal(naming.titleFolds.count, 0, 'a rename is not an excuse to fold the history')
 })
 
 for (const label of checks) console.log(`  ok  ${label}`)

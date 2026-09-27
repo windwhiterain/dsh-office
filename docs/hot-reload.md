@@ -103,34 +103,76 @@ restart loads whatever it holds, including a half-finished edit.
 
 The panel reads the mounted offices from `GET /dsh-office/offices` and then one snapshot from
 `GET /dsh-office/offices/state`. An **empty roster and empty channel and mailbox columns with no
-error message** is what an *empty office list* looks like: the registry read failed or answered
-nothing, `useOffices` keeps the list it already had, and a freshly loaded page starts from an
-empty one — so the panel renders nothing and says nothing.
+error message** has more than one cause that looks identical on screen, so read the browser's
+Network tab before touching anything:
 
-Observed on a live Host (2026-09-27, `web` profile, this package linked into it):
+| `GET /dsh-office/offices` | `GET /dsh-office/offices/state` | What it is |
+|---|---|---|
+| `200` `{"offices":[...]}` | `200` with a snapshot | The office is served; the page is drawing an answer it never repainted from, so reload it |
+| `200` `{"offices":[...]}` | pending for seconds | A slow snapshot, which is what the page's loading state is drawn for — see below |
+| `200` `{"offices":[]}` | `404` | The registry is empty: the office is mounted nowhere the host row can see |
+| `401`/`403`/`503` | any | The connection fence. The page was not opened through the URL `dsh web` printed |
+| any | `500` | The route's own data path, and the answer body names the failure |
 
-| Time | Event |
-|---|---|
-| 11:46:04 | The profile patch was rewritten wholesale (29931 → 22599 bytes; a `dsh-history-access` row added) — a live config reload |
-| then | The panel listed nothing, while `office_planet_x.json` kept advancing: the colleagues were posting, the roster and the record were intact (8 colleagues, 376 messages) |
-| 11:52–11:54 | Writing the watched `index.js` re-applied the plugin generation; one activation marker recorded `03:54:10.926Z applyOffice planet_x` |
-| after | The panel's next read showed the office again, with every colleague and message in place |
+### Measured recurrence, 2026-09-27
 
-What is **observed** is the pairing: the office *tools* kept writing while the *routes* read an
-empty registry, and a reload of the whole plugin generation cleared it. The explanation that fits
-is a **partial remount** — a patch rewrite remounts only the rows whose composed `config` changed,
-so the tools can remain bound to the office object of one generation while the routes answer from
-another, whose module registry the office row's own disposer already emptied. The office's storage
-is the source of truth either way, so nothing is lost while the two halves disagree.
+`web` profile, this package linked into it. The panel drew the office shell with empty columns
+while the office was quiet — its storage file did not change across a 30-second window — and the
+state route answered in **10–12 seconds**, five times in a row. The cost was in the route rather
+than in the Host's load: `/dsh-office/offices` answered in 4 ms throughout, the state snapshot
+itself was 50 KB, and the Host process spent 2.5 s of an 8.3 s request in CPU.
+
+What the route was doing was resolving the roster's **names**. `listColleagues` asked
+`sessionQuery.readTitle` once per colleague, sequentially, and that read resolves the session's
+source and copies every event of its log — measured here at 121 ms for the largest colleague alone
+(8852 events, 19.3 MB of text). The snapshot asked for the roster twice (once for the statuses,
+once to exclude adopted sessions from the adopt picker), `modelRouteOf` could add a full
+`readSession` per live colleague, and the panel polled every 4 seconds **with no in-flight guard**,
+so two or three of those snapshots were always outstanding and the page never caught up. The office
+was healthy throughout; only its listing was slow.
+
+What changed as a result, all of it inside this package:
+
+- A roster's names come from the listing pair every other surface already reads — a live session's
+  `title` projection, else the projection cache's row by header — and the log fold is the last
+  resort rather than the first read. One corpus listing per request serves both the names and the
+  adopt picker, which excludes the roster by session id and resolves no name at all.
+- A poll of a page already on screen hands back the snapshot's token and is answered `unchanged`
+  while nothing it describes has moved — see
+  [design.md](design.md#what-a-panel-poll-costs).
+- The panel asks for one office and channel at a time, and only its first answer gates the page.
+
+It is worth re-measuring rather than assuming after any change here: the same authenticated read
+is one command, and the route is the one the panel lives on.
+
+```powershell
+# with the browser session cookie of the profile's Host
+$sw = [Diagnostics.Stopwatch]::StartNew()
+Invoke-WebRequest -Uri 'http://127.0.0.1:3080/dsh-office/offices/state?office=<name>' -Headers @{ Cookie = $cookie } -UseBasicParsing | Out-Null
+$sw.Elapsed.TotalMilliseconds
+```
+
+### Earlier observation, 2026-09-27 11:46
+
+The panel listed nothing while `office_planet_x.json` kept advancing — the colleagues were posting
+and the roster and record were intact (8 colleagues, 376 messages) — right after the profile patch
+was rewritten wholesale (29931 → 22599 bytes, a `dsh-history-access` row added). Writing the
+watched `index.js` re-applied the plugin generation, and the panel's next read showed the office
+again. The pairing is real — the office *tools* kept writing while the *routes* answered nothing —
+but its cause was never measured, and it is **not** the recurrence above: there the office list
+itself answered with the office. The partial-remount explanation first offered for it (a patch
+rewrite remounting only the rows whose composed `config` changed, leaving one generation's tools
+beside another's routes) remains a hypothesis that fits and was never confirmed, so the code was
+not changed to defend against it.
 
 Operating rules:
 
-- **Empty panel + advancing office storage → reload the plugin generation.** Any write to a
-  watched source file does it; no Host restart, no data loss. Distinguish it from a refused
-  request first if you can: in the browser's Network tab, `200` with `{"offices":[]}` is this case,
-  while `401`/`403`/`503` is the connection fence and `500` is the route's own data path.
-- **A recurrence with nobody touching files is a defect**, not an operator mistake: it would mean
-  the Loader's remount path itself leaves a plugin's routes and tools on different generations.
-- A generation reload no longer disposes the colleagues the office woke: `ensureAgent` resumes
-  through the process root context ([delivery.md](delivery.md#cold-resume)). The reloads in the
-  table above left every running colleague alive — the office-resumed one included.
+- **A busy answer is not an empty one.** Wait out the first snapshot; that wait is what the loading
+  state is drawn for. A panel that stays empty while `/offices` answers with the office is a page
+  that needs a reload, not a repair.
+- **`{"offices":[]}` while the office is writing is a registry problem, not a data problem.** Write
+  to a watched source file to re-apply the plugin generation; no Host restart, and the office's
+  storage is untouched either way.
+- A generation reload does not dispose the colleagues the office woke: `ensureAgent` resumes
+  through the process root context ([delivery.md](delivery.md#cold-resume)). The reloads recorded
+  above left every running colleague alive — the office-resumed one included.

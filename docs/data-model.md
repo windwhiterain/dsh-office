@@ -239,6 +239,11 @@ the name its row was written with.
 - **A session that belongs to two offices chooses with the `office` argument.** It holds the
   union of its roles' capabilities, and it must name an office whenever the two could differ; a
   call that omits the name fails when more than one office holds it, rather than picking one.
+- **The panel's poll token is not stored.** It describes what one snapshot draws and lives in the
+  running office's memory, because it is a comparison between two answers rather than a fact about
+  the office: a process that restarts answers the next poll in full, which is exactly what a client
+  holding a token from the previous process needs. See
+  [design.md](design.md#what-a-panel-poll-costs).
 
 ## Where the user fits
 
