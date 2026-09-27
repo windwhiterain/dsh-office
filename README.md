@@ -288,7 +288,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 |---|---|
 | `office_list` | List the offices this session runs, with their names and colleague counts. |
 | `office_roster` | List colleagues and channels; `include_unadopted` also lists sessions available to adopt, each with its workspace and its sidebar title — archived sessions, and sessions no workspace accounts, are not offered. |
-| `office_colleagues` | Every colleague with its role, description, live status, effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, held-message count, and last activity. A pure query: it wakes nobody. |
+| `office_colleagues` | Every colleague with its role, description, live status — `running`, `idle`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when its session is not loaded — effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, held-message count, and last activity. A pure query: it wakes nobody. |
 | `office_adopt` | Adopt an existing session, with an optional `name`, `role`, and `description`. |
 | `office_hire` | Create a session, title it, adopt it, and greet it **privately**. Accepts `role`, `description`, `agent_preset`, `provider`+`model`, and `reasoning_effort`. |
 | `office_dismiss` | Remove a colleague from the roster and withdraw its tools. The session itself keeps its history and workspace. |
@@ -297,9 +297,9 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_channel_create` | Create a group channel: a shared feed whose members decide who reads it and who a post there wakes. Takes a name, an optional topic, and the session titles of the colleagues that start on it. |
 | `office_channel_delete` | Delete a group channel the office created; its messages and the holds it owed go with it. The standing channels and the direct ones are refused. |
 | `office_channel_members` | Add or remove a group channel's members, named by session title — or read the current members back with neither list. |
-| `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. |
+| `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. A colleague waiting out an exhausted account quota holds a turn like any other, so it can be stopped too — the result names that wait, and ending it does not end the exhaustion. |
 | `office_post` | Post to a channel: `#general` by default. `wake` **is required** and decides who hears it — names (`["@alice"]`), one level (`["$member"]`, `["$leader"]`), which wakes its rung and every rung above it, or one channel (`["#dev"]`), which wakes that channel's members wherever the post goes — and an empty list writes without waking anyone; naming the user files a copy in the mailbox. A group channel wakes only its own members among the ones the wake addresses. `notify` picks when a colleague that is **mid-turn** receives it: `step-end` (the default) splices it into the running turn to be read at its next step boundary, and `turn-end` holds it until the turn ends and hands it over merged with whatever else arrived. An idle colleague gets it now either way. See [Who a message wakes](#who-a-message-wakes). |
-| `office_dm` | Private message to one colleague named by `wake` (exactly one, no level or channel), or mail to the user, whose name writes to the mailbox. Takes the same `notify` as `office_post`. |
+| `office_dm` | Private message to one colleague named by `wake` (exactly one, no level or channel), or mail to the user, whose name writes to the mailbox. Takes the same `notify` as `office_post`. The delivery reports the colleague's own status too, as the office read it *before* delivering — `idle`, `running`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when this message is what woke it — so a sender learns why nothing comes back. |
 | `office_read` | Read channel history by sequence range and filters, addressed by name, by a colleague's title for a DM, or by `*` for everything you can read. Each message states the wake it was written with — `· wake $member`, `· wake @alice`, or `· wake nobody` for a message that woke nobody — so a reader who was not notified can still see whether the message was aimed at it. |
 | `office_read_notifications` | Take the notifications the office is holding for you, and read them now instead of at the end of your turn. Each is framed as a delivery, wake and all. |
 | `office_compact` | Replace a sequence range with a summary the boss wrote, so a long channel stays bounded. |
@@ -569,7 +569,8 @@ message view of the state route therefore carries `wake` and `channels` beside `
 `audience`.
 
 - **Colleagues** — a side column, open by default: the colleagues the channel column holds — the
-  whole office for `#general`, a group channel's own members — each with its role, live status,
+  whole office for `#general`, a group channel's own members — each with its role, live status
+  (including `quota-retry` for a colleague waiting out an exhausted account quota),
   effective permission, held-message count, and description, plus **Edit** (role and description)
   and **Dismiss**. The header's count is the same list. A name is the session's listed title, read
   the way the Web session list reads it: a live session's own `title` projection, or the projection
@@ -720,6 +721,12 @@ panel's own periodic full read covers.
   it. A reader who wants it sooner reloads the page.
 - **The idle notice has no panel control.** `idleNotice` is configured on the office row, so
   switching it on means editing that row's config; the panel neither shows it nor edits it.
+- **The quota wait is reported, never ended.** A colleague's `quota-retry` status is read from the
+  row that owns it, `dsh-llm-quota-retry`, by service name — the office is third-party and imports
+  nothing from the harness or from another plugin, so a deployment that composes no such row reports
+  the harness's own statuses and nothing else about the office changes. Reading the wait is not a
+  promise about it: `office_interrupt` ends the colleague's turn, not the account's exhaustion, and
+  the next request re-enters the same wait.
 - **Panel copy is not localized.** Strings are inline in `client.js` rather than routed through
   the Client locale dictionaries, so the panel does not follow the UI language.
 - **An office name accepts letters, digits, and underscores.** Any script is accepted, but a

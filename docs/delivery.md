@@ -574,6 +574,21 @@ text names the user in the same delivery list. When a post has no deliveries at 
 named and nobody was woken — the rendered result says so: `No colleague was woken; the message
 waits in the office for office_read.`
 
+**A delivery outcome is not what the colleague was.** `office_dm` reports that too, as
+`colleagueStatus` on the same entry, and it is the only result that declares the field: a private
+message is about one colleague, while a post is about messages. It is read before the delivery is
+attempted, because delivering a wake loads a session that was `inactive` — the
+colleague the office reports is the one it found, not the `idle` the wake makes of it. The values
+are the office's status vocabulary: `idle`, `running`, `quota-retry` for a colleague held in
+[the wait an exhausted account quota causes](design.md#the-one-status-the-harness-cannot-report),
+and `inactive` for a session that was not loaded.
+
+That reading is not stored: the message's own `deliveries` record keeps the outcome and its detail,
+so `office_read` reports what the office did with the message rather than a colleague's state at
+the moment it did — a state that ages badly in a record whose whole use is later. The field is also
+declared as an enum, so a status the office does not define fails the call rather than reaching a
+model as prose.
+
 ## The reading contract
 
 `office_read` is a **query** over stored history and the only way to see what a colleague was not

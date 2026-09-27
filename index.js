@@ -97,6 +97,27 @@ const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interr
 const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
 
 /**
+ * The status of a loaded colleague that is waiting out an exhausted account quota.
+ *
+ * The harness has no such status: `AgentStatus` is `idle | running`, and the long-term quota retry
+ * holds the failed request's step open while it waits, so a session that cannot make a request for
+ * an hour reports `running` exactly as one that is working does. The office reports the wait as its
+ * own status because the two are the same fact to every reader here — a colleague that is not
+ * making progress — and it reads the wait from the row that owns it rather than guessing at it:
+ * see the optional service in {@link colleagueStatus}.
+ */
+const QUOTA_RETRY_STATUS = 'quota-retry'
+
+/**
+ * Every status a colleague can be reported in.
+ *
+ * `quota-retry` refines `running` rather than replacing a state: a colleague in it holds an open
+ * turn. `inactive` is the office's own value for a session it holds but that is not loaded, which
+ * is a state the harness cannot report at all because it has no agent to report it on.
+ */
+const COLLEAGUE_STATUSES = ['running', QUOTA_RETRY_STATUS, 'idle', 'inactive']
+
+/**
  * The experience notes written for whoever sits in a leader's seat.
  *
  * A hired leader's onboarding turn names this path, so the seat arrives with what earlier
@@ -2443,7 +2464,11 @@ function createOffice(ctx, domain, config, hooks) {
    *   `wakeLevel` and `wakeChannel` are the token the caller addressed, when it addressed one, and
    *   are recorded with the message. `notify` is ignored for a message that only addresses the
    *   user: the user has no session to steer.
-   * @returns the stored message and one delivery outcome per recipient.
+   * @returns the stored message and one delivery outcome per recipient. Each outcome also carries
+   *   the recipient's status as it was read before that delivery, because delivering wakes a
+   *   session that was `inactive` and the office must report the colleague it found rather than the
+   *   one the wake leaves behind. Only `office_dm` declares that field, so the projection in
+   *   {@link toDeliveryResult} is what decides who sees it.
    */
   const post = async ({
     channel,
@@ -2549,17 +2574,27 @@ function createOffice(ctx, domain, config, hooks) {
     if (!config.wakesEnabled) {
       return {
         message,
-        deliveries: [...deliveries, ...audience.map(c => ({ colleague: c.name, status: 'wakes-disabled' }))],
+        deliveries: [
+          ...deliveries,
+          ...audience.map(c => ({
+            colleague: c.name,
+            status: 'wakes-disabled',
+            colleagueStatus: colleagueStatus(c.sessionId),
+          })),
+        ],
       }
     }
     for (const colleague of audience) {
+      // Read before the delivery, which loads the session it reaches: an unloaded colleague is
+      // reported as the office found it, not as the `idle` the wake makes of it.
+      const seen = colleagueStatus(colleague.sessionId)
       try {
         const status = await deliver(message, key, colleague, notify)
-        deliveries.push({ colleague: colleague.name, status })
+        deliveries.push({ colleague: colleague.name, status, colleagueStatus: seen })
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         await recordDelivery(key, colleague.sessionId, { status: 'failed', at: Date.now(), detail })
-        deliveries.push({ colleague: colleague.name, status: 'failed', detail })
+        deliveries.push({ colleague: colleague.name, status: 'failed', detail, colleagueStatus: seen })
       }
     }
     return { message, deliveries }
@@ -2736,6 +2771,39 @@ function createOffice(ctx, domain, config, hooks) {
   const liveAgent = (sessionId) => ctx.agents.get(sessionId)
 
   /**
+   * The long-term quota retry service, when the deployment composes the row that provides it.
+   *
+   * Read out of the registry rather than injected, because it belongs to another plugin and the
+   * office is third-party: a deployment that mounts no `dsh-llm-quota-retry` reads `undefined`
+   * here, and every status below is then exactly what it was before that row existed. Nothing is
+   * imported from it either — the service is read by name, and the session value it is handed is
+   * opaque to both sides.
+   * @returns the service, or undefined when no composed row publishes it.
+   */
+  const quotaRetry = () => ctx.get('llmQuotaRetry')
+
+  /**
+   * The status one colleague reports, in the office's own vocabulary.
+   *
+   * The status is the registry's, with one refinement: a colleague waiting out an exhausted account
+   * quota is reported as {@link QUOTA_RETRY_STATUS} rather than as the `running` the harness still
+   * reports, because a step held open by that wait is a colleague that cannot answer.
+   *
+   * The wait is read as armed (`pending`) rather than as the entry's existence, because the entry
+   * outlives a cancelled turn with no wait behind it: the retry row keeps it until a request
+   * succeeds or its switch goes off, and calling that state a wait would be false. A cancelled
+   * turn's retry request, which is a request in flight with nothing armed, is `running`.
+   * @param sessionId - the colleague's session.
+   * @returns one of {@link COLLEAGUE_STATUSES}.
+   */
+  const colleagueStatus = (sessionId) => {
+    const live = liveAgent(sessionId)
+    if (live === undefined) return 'inactive'
+    if (live.status !== 'running') return 'idle'
+    return quotaRetry()?.stateOf(live.session)?.pending === true ? QUOTA_RETRY_STATUS : 'running'
+  }
+
+  /**
    * How loaded the office is at this instant: how many colleagues of the roster are mid-turn.
    *
    * "Working" is read from the live registry, because it is a property of a running session and of
@@ -2743,6 +2811,10 @@ function createOffice(ctx, domain, config, hooks) {
    * is still one of the people the office holds. The roster count is therefore every colleague,
    * loaded or not, and a reader of the line is told both numbers rather than a ratio that hides
    * which of the two it is.
+   *
+   * This reads the harness status rather than {@link colleagueStatus} on purpose: a colleague
+   * waiting out an exhausted quota is holding a turn, so it counts as working here, and the load
+   * line is about turns rather than about progress.
    * @returns how many colleagues are running a turn, and how many the roster holds.
    */
   const officeParallelism = () => {
@@ -2866,8 +2938,9 @@ function createOffice(ctx, domain, config, hooks) {
   /**
    * The roster with each colleague's live status, for the roster tools and the panel.
    *
-   * Status is read from the live agent when the session is loaded and is `inactive` when it is
-   * not, because an unloaded colleague has no turn to be in either state of. The effective
+   * Status comes from {@link colleagueStatus} — the live agent's, refined by the wait a colleague
+   * may be held in — and is `inactive` when the session is not loaded, because an unloaded
+   * colleague has no turn to be in either state of. The effective
    * permission preset, the agent preset with the tool count it currently holds, and the model
    * route are reported only for a loaded session: they are properties of that live session, and
    * guessing them from storage would report a fact this office does not hold.
@@ -2887,7 +2960,7 @@ function createOffice(ctx, domain, config, hooks) {
         sessionId: colleague.sessionId,
         role: canonicalRole(colleague.role),
         description: colleague.description,
-        status: live === undefined ? 'inactive' : live.status,
+        status: colleagueStatus(colleague.sessionId),
         permission: live === undefined ? undefined : currentPermission(live),
         agentPreset: plane.agentPreset,
         tools: plane.tools,
@@ -2960,8 +3033,8 @@ function createOffice(ctx, domain, config, hooks) {
    * permission, and how much is held for it.
    *
    * These are the columns a poll exists to refresh even when nothing was written — a colleague that
-   * went idle or picked up held mail changes no stored record — so the tick reads them from the
-   * registry instead of waiting for a write to notice.
+   * went idle, picked up held mail, or entered a quota wait changes no stored record — so the tick
+   * reads them from the registry instead of waiting for a write to notice.
    * @returns one tick per colleague, in roster order.
    */
   const liveTick = () => {
@@ -2972,7 +3045,7 @@ function createOffice(ctx, domain, config, hooks) {
       const title = live === undefined ? undefined : projections?.stateOf(live.session, 'title')
       described.push([
         sessionId,
-        live === undefined ? 'inactive' : live.status,
+        colleagueStatus(sessionId),
         live === undefined ? undefined : currentPermission(live),
         heldWakes(sessionId).length,
         title,
@@ -3439,6 +3512,7 @@ function createOffice(ctx, domain, config, hooks) {
     rosterStatus,
     leaderLines,
     liveAgent,
+    colleagueStatus,
     healPresetPlanes,
     dismiss,
     rename,
@@ -3477,8 +3551,19 @@ function requireText(args, tool) {
   return value
 }
 
-/** The declared result schema shared by `office_post` and `office_dm`. */
-function officePostSchema() {
+/**
+ * The declared result schema shared by `office_post` and `office_dm`.
+ *
+ * `office_dm` declares one field more than `office_post`: the status of the colleague it addressed,
+ * as the office read it when the delivery was attempted. Only the private message carries it,
+ * because it is the one call whose whole subject is a single colleague — a reader of a post is
+ * given delivery outcomes, and what a colleague is belongs in `office_colleagues`. The two are one
+ * function rather than two schemas because everything else about the result is the same, and two
+ * copies would drift.
+ * @param options - `colleagueStatus` adds the addressed colleague's status to each delivery entry.
+ * @returns the declared result schema.
+ */
+function officePostSchema(options = {}) {
   return {
     type: 'object',
     additionalProperties: false,
@@ -3505,10 +3590,35 @@ function officePostSchema() {
             colleague: { type: 'string' },
             status: { type: 'string' },
             detail: { type: 'string' },
+            ...(options.colleagueStatus === true
+              ? { colleagueStatus: { type: 'string', enum: COLLEAGUE_STATUSES } }
+              : {}),
           },
         },
       },
     },
+  }
+}
+
+/**
+ * Project one delivery outcome onto the declared result.
+ *
+ * The office's own delivery record is wider than either tool declares: it carries the recipient's
+ * status whether or not the caller's schema has a field for it, and a field the schema does not
+ * declare fails the call. So every field is named here rather than passed through, which is also
+ * what keeps a future bookkeeping field from reaching a model by accident.
+ * @param delivery - one outcome of the office `post` operation.
+ * @param options - `colleagueStatus` keeps the status the delivery was attempted in.
+ * @returns the value matching one `deliveries` entry of {@link officePostSchema}.
+ */
+function toDeliveryResult(delivery, options = {}) {
+  return {
+    colleague: delivery.colleague,
+    status: delivery.status,
+    ...(delivery.detail === undefined ? {} : { detail: delivery.detail }),
+    ...(options.colleagueStatus === true && delivery.colleagueStatus !== undefined
+      ? { colleagueStatus: delivery.colleagueStatus }
+      : {}),
   }
 }
 
@@ -3520,9 +3630,11 @@ function officePostSchema() {
  * @param posted - the value returned by the office `post` operation.
  * @param officeName - the posting office's immutable name, which the result carries so its
  *   presenter can name the office without reading the call's arguments.
+ * @param options - `colleagueStatus` carries each delivery's recipient status, which is what
+ *   `office_dm` declares and `office_post` does not.
  * @returns the value matching {@link officePostSchema}.
  */
-function toPostResult(posted, officeName) {
+function toPostResult(posted, officeName, options = {}) {
   return {
     office: officeName,
     message: {
@@ -3530,7 +3642,7 @@ function toPostResult(posted, officeName) {
       channelId: posted.message.channelId,
       text: posted.message.text,
     },
-    deliveries: posted.deliveries,
+    deliveries: posted.deliveries.map(delivery => toDeliveryResult(delivery, options)),
   }
 }
 
@@ -3546,7 +3658,8 @@ function renderPostResult(value) {
     return `${head} No colleague was woken; the message waits in the office for office_read.`
   }
   const lines = value.deliveries
-    .map(d => `- ${d.colleague}: ${d.status}${d.detail === undefined ? '' : ` (${d.detail})`}`)
+    .map(d => `- ${d.colleague}: ${d.status}${d.detail === undefined ? '' : ` (${d.detail})`}`
+      + `${d.colleagueStatus === undefined ? '' : ` [colleague status: ${d.colleagueStatus}]`}`)
     .join('\n')
   return `${head} Delivery:\n${lines}`
 }
@@ -4282,7 +4395,9 @@ function createInterruptTool(agent, tool) {
     description:
       'Cancel a colleague\'s running turn, for work on the wrong thing that a message alone would reach too '
       + 'late. Everything the office held for it while it ran is handed over as one turn when it stops, so no '
-      + 'message is lost. An idle or unloaded colleague has nothing to interrupt, which the result reports.',
+      + 'message is lost. An idle or unloaded colleague has nothing to interrupt, which the result reports. A '
+      + 'colleague waiting out an exhausted account quota does: its wait is a running turn, and stopping it '
+      + 'costs one attempt when its next wake meets the same exhausted account.',
     parameters: tool.parameters(['name'], {
       name: { type: 'string', description: "The colleague's session title." },
     }),
@@ -4294,13 +4409,14 @@ function createInterruptTool(agent, tool) {
         properties: {
           office: { type: 'string' },
           colleague: { type: 'string' },
-          status: { type: 'string', enum: ['running', 'idle', 'inactive'] },
+          status: { type: 'string', enum: COLLEAGUE_STATUSES },
           interrupted: { type: 'boolean' },
         },
       },
       render: (_args, value) => tool.text(value.interrupted
-        ? `[${value.office}] Interrupted "${value.colleague}"; the office hands it everything held for it as `
-          + 'one turn once it stops.'
+        ? `[${value.office}] Interrupted "${value.colleague}"`
+          + `${value.status === QUOTA_RETRY_STATUS ? ', ending its wait on an exhausted account quota' : ''}`
+          + '; the office hands it everything held for it as one turn once it stops.'
         : `[${value.office}] "${value.colleague}" was not running (status ${value.status}); nothing to interrupt.`),
     },
     async execute(args) {
@@ -4317,12 +4433,11 @@ function createInterruptTool(agent, tool) {
       if (colleague.sessionId === agent.session.header.id) {
         throw new Error('office_interrupt: a colleague cannot interrupt itself')
       }
+      // Both states that hold a turn are interruptible, and they are exactly the two the office
+      // reports as a colleague that is running; the others have no turn to stop.
       const live = office.liveAgent(colleague.sessionId)
-      if (live === undefined) {
-        return { office: officeName, colleague: colleague.name, status: 'inactive', interrupted: false }
-      }
-      const status = live.status === 'running' ? 'running' : 'idle'
-      if (status !== 'running') {
+      const status = office.colleagueStatus(colleague.sessionId)
+      if (live === undefined || (status !== 'running' && status !== QUOTA_RETRY_STATUS)) {
         return { office: officeName, colleague: colleague.name, status, interrupted: false }
       }
       // The inbox is kept: a message the leader sent moments ago is not the turn being stopped.
@@ -4347,10 +4462,13 @@ function createColleaguesTool(tool) {
     name: 'office_colleagues',
     description:
       'List every colleague with its role, its description, and its status: `running`, `idle` when it is '
-      + 'loaded and waiting, `inactive` when its session is not loaded. A loaded colleague also reports its '
-      + 'permission preset, the agent preset it is bound to with the number of tools it holds (`none` means '
-      + 'it holds no preset tool at all, so it has no shell, files, or skills), and its model route; each '
-      + 'reports how many messages the office holds for it and when it last carried one. Never wakes anybody.',
+      + 'loaded and waiting, `inactive` when its session is not loaded. A colleague that is loaded and '
+      + 'waiting out an exhausted account quota reports `quota-retry` rather than `running`, because it '
+      + 'holds a turn it cannot finish until the account can be used again. A loaded colleague also reports '
+      + 'its permission preset, the agent preset it is bound to with the number of tools it holds (`none` '
+      + 'means it holds no preset tool at all, so it has no shell, files, or skills), and its model route; '
+      + 'each reports how many messages the office holds for it and when it last carried one. Never wakes '
+      + 'anybody.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -4370,7 +4488,7 @@ function createColleaguesTool(tool) {
                 sessionId: { type: 'string' },
                 role: { type: 'string', enum: COLLEAGUE_ROLES },
                 description: { type: 'string' },
-                status: { type: 'string', enum: ['running', 'idle', 'inactive'] },
+                status: { type: 'string', enum: COLLEAGUE_STATUSES },
                 permission: { type: 'string' },
                 agentPreset: { type: 'string' },
                 tools: { type: 'integer' },
@@ -5204,8 +5322,12 @@ function createCommunicationTools(agent, tool) {
         + 'required and names exactly one colleague, "@alice", or the user; a level and a channel are refused — '
         + 'a private message is one conversation, so use office_post to wake a level or a channel. The message '
         + 'is delivered into that colleague\'s session as a user turn, waking it if it is inactive, and a '
-        + 'colleague that is mid-turn is not interrupted. Every delivery outcome is reported. Addressing the '
-        + 'user writes to the user mailbox, where nothing is woken.',
+        + 'colleague that is mid-turn is not interrupted. Every delivery outcome is reported, each with the '
+        + 'colleague\'s own status as the office read it when the delivery was attempted: `idle`, `running`, '
+        + '`quota-retry` while it waits out an exhausted account quota — a message to that colleague waits with '
+        + 'it, for as long as the account stays unusable — or `inactive` when its session was not loaded and '
+        + 'this message woke it. Addressing the user writes to the user mailbox, where nothing is woken and no '
+        + 'colleague status is reported.',
       parameters: tool.parameters(['wake', 'text'], {
         wake: {
           type: 'array',
@@ -5217,7 +5339,7 @@ function createCommunicationTools(agent, tool) {
         notify: notifyProperty(),
       }),
       output: {
-        schema: officePostSchema(),
+        schema: officePostSchema({ colleagueStatus: true }),
         render: (_args, value) => text(renderPostResult(value)),
       },
       async execute(args) {
@@ -5248,7 +5370,7 @@ function createCommunicationTools(agent, tool) {
           kind: 'dm',
           toUser: audience.toUser,
           notify,
-        }), officeName)
+        }), officeName, { colleagueStatus: true })
       },
     })
   }

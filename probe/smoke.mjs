@@ -806,6 +806,20 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
           cachedSnapshot: (header) => ({ asOfSeq: 0, values: { title: features.coldTitles[header.id] ?? null } }),
         }
       }
+      if (name === 'llmQuotaRetry') {
+        // The optional row the office reads a colleague's quota wait from. It answers only for the
+        // harnesses that compose it, which is the deployment the office must keep working in
+        // unchanged: `features.quotaRetry` maps a session id to the entry a ledger would hold for
+        // it, and a check rewrites that map to move a session in and out of the wait.
+        if (features.quotaRetry === undefined) return undefined
+        return {
+          isRetrying: session => features.quotaRetry[session.header.id] !== undefined,
+          stateOf: (session) => {
+            const entry = features.quotaRetry[session.header.id]
+            return entry === undefined ? undefined : Object.freeze({ retrying: true, ...entry })
+          },
+        }
+      }
       if (name === 'sessionController') {
         return {
           create: async (request) => {
@@ -1219,7 +1233,7 @@ await check('renaming a session renames the colleague, with no office-side renam
   assert.ok(roster.colleagues.some(entry => entry.name === 'Robert' && entry.sessionId === 'session-bob'))
   const addressed = await call(alice, 'office_dm', { wake: ['@Robert'], text: 'addressed by the new title' })
   assert.equal(addressed.message.channelId, 'dm-sessionalice+sessionbob')
-  assert.deepEqual(addressed.deliveries, [{ colleague: 'Robert', status: 'delivered' }])
+  assert.deepEqual(addressed.deliveries, [{ colleague: 'Robert', status: 'delivered', colleagueStatus: 'idle' }])
   titles.set('session-bob', 'bob')
 })
 
@@ -1292,7 +1306,11 @@ await check('notify:turn-end holds a burst and hands over one merged turn when t
   bob.status = 'running'
   const dm = await call(alice, 'office_dm', { wake: ['@bob'], text: 'private note', notify: 'turn-end' })
   assert.equal(dm.message.channelId, 'dm-sessionalice+sessionbob')
-  assert.deepEqual(dm.deliveries, [{ colleague: 'bob', status: 'queued' }], 'a busy colleague is not interrupted')
+  assert.deepEqual(
+    dm.deliveries,
+    [{ colleague: 'bob', status: 'queued', colleagueStatus: 'running' }],
+    'a busy colleague is not interrupted, and the private message says so',
+  )
   assert.equal(bob.sent.length, before, 'and nothing is spliced into the turn it is running')
 
   const second = await call(alice, 'office_post', {
@@ -1345,7 +1363,11 @@ await check('the default timing steers into a running turn, for a post and for a
   assert.equal(rosa.inbox.nextStep.length, 1, 'and the hold is what the office keeps until a step claims it')
 
   const dm = await callBoss(chief, 'timing', 'office_dm', { wake: ['@rosa'], text: 'and a private one' })
-  assert.deepEqual(dm.deliveries, [{ colleague: 'rosa', status: 'steered' }], 'so does a dm')
+  assert.deepEqual(
+    dm.deliveries,
+    [{ colleague: 'rosa', status: 'steered', colleagueStatus: 'running' }],
+    'so does a dm',
+  )
 
   // A broadcast steers every colleague it reaches, not only a named one.
   sam.status = 'running'
@@ -1358,7 +1380,7 @@ await check('the default timing steers into a running turn, for a post and for a
 
   // turn-end is what a caller asks for when the message can wait for the merge.
   const held = await callBoss(chief, 'timing', 'office_dm', { wake: ['@rosa'], text: 'this one can wait', notify: 'turn-end' })
-  assert.deepEqual(held.deliveries, [{ colleague: 'rosa', status: 'queued' }])
+  assert.deepEqual(held.deliveries, [{ colleague: 'rosa', status: 'queued', colleagueStatus: 'running' }])
   await assert.rejects(
     () => callBoss(chief, 'timing', 'office_post', { text: 'x', wake: [], notify: 'later' }),
     /office_post: notify must be one of step-end, turn-end/,
@@ -1775,7 +1797,11 @@ await check('a cold resume runs on the route the session itself last logged', as
   withLog.titles.set('session-poster', 'poster')
   await callBoss(withBoss, 'resume', 'office_adopt', { session_id: 'session-poster' })
   const posted = await call(poster, 'office_dm', { wake: ['@gina'], text: 'resume on your own route' })
-  assert.deepEqual(posted.deliveries, [{ colleague: 'gina', status: 'delivered' }])
+  assert.deepEqual(
+    posted.deliveries,
+    [{ colleague: 'gina', status: 'delivered', colleagueStatus: 'inactive' }],
+    'the status is the one the office found, not the idle the wake made of it',
+  )
   assert.deepEqual(withLog.resumed[0].agentOptions, {
     provider: 'logged-provider',
     model: 'logged-model',
@@ -3500,6 +3526,108 @@ await check('office_interrupt stops a running colleague and reports what it foun
     () => call(kim, 'office_interrupt', { name: 'kim' }),
     /cannot interrupt itself/,
     'a leader cannot stop its own turn, which is the turn it is calling from',
+  )
+})
+
+await check('a colleague waiting out an exhausted quota reports a status of its own', async () => {
+  // The wait a colleague cannot make progress in is not the harness's to report: the retry row holds
+  // the failed step open, so the session still says `running`. The office reads the wait from that
+  // row, and `entries` is what a check moves a session in and out of it with.
+  const entries = { 'session-wait': { pending: true } }
+  const waiting = makeHarness({ officeName: 'waiting' }, undefined, {
+    rowId: 'office_waiting',
+    quotaRetry: entries,
+  })
+  await waiting.ready
+  const chief = waiting.publish('session-wait-boss', { preset: 'office-boss' })
+  waiting.titles.set('session-wait', 'waiter')
+  waiting.titles.set('session-busy', 'busy')
+  const waiter = waiting.publish('session-wait', { status: 'running' })
+  const busy = waiting.publish('session-busy', { status: 'running' })
+  await callBoss(chief, 'waiting', 'office_adopt', { session_id: 'session-wait' })
+  await callBoss(chief, 'waiting', 'office_adopt', { session_id: 'session-busy' })
+
+  const statusOf = async (colleague) => {
+    const listed = await call(waiter, 'office_colleagues', {})
+    return listed.colleagues.find(entry => entry.name === colleague).status
+  }
+  assert.equal(await statusOf('waiter'), 'quota-retry', 'a wait held open reads as its own status')
+  assert.equal(await statusOf('busy'), 'running', 'a colleague no ledger holds is running, as before')
+
+  // What is reported is the armed wait. An entry outlives a cancelled turn with nothing armed, and
+  // the retry request that follows it is a request in flight, so neither is a colleague held.
+  entries['session-wait'] = { pending: false }
+  assert.equal(await statusOf('waiter'), 'running', 'an entry with no wait armed is not a wait')
+  delete entries['session-wait']
+  assert.equal(await statusOf('waiter'), 'running', 'and a session the retry row has forgotten is running')
+
+  // An unloaded colleague has no turn to hold, so it cannot be in the wait whatever a ledger says.
+  entries['session-busy'] = { pending: true }
+  waiting.dispose(busy)
+  assert.equal(await statusOf('busy'), 'inactive', 'a session that is not loaded is not waiting either')
+
+  // The private message carries the status the office read before it delivered, which is the call
+  // whose whole subject is one colleague. That the value passes the declared schema is what says
+  // `office_dm` declares the field: an undeclared one fails the result.
+  entries['session-wait'] = { pending: true }
+  const mailed = await callBoss(chief, 'waiting', 'office_dm', { wake: ['@waiter'], text: 'how goes it?' })
+  assert.equal(mailed.deliveries.length, 1)
+  assert.equal(mailed.deliveries[0].status, 'steered', 'the wait holds the turn the message is steered into')
+  assert.equal(mailed.deliveries[0].colleagueStatus, 'quota-retry')
+  assert.match(
+    chief.tools.get('office_dm').output.render({}, mailed)[0].text,
+    /\[colleague status: quota-retry\]/,
+    'the private message names the state it found the colleague in',
+  )
+
+  // A post is a report of delivery outcomes, and what a colleague is belongs in the roster, so the
+  // wider field the office holds never reaches that result.
+  const posted = await callBoss(chief, 'waiting', 'office_post', { text: 'anyone?', wake: ['@waiter'] })
+  assert.equal('colleagueStatus' in posted.deliveries[0], false, 'office_post declares no such field')
+
+  // A deployment that composes no quota row reads the roster it always did.
+  const plain = makeHarness({ officeName: 'plain' }, undefined, { rowId: 'office_plain' })
+  await plain.ready
+  const plainChief = plain.publish('session-plain-boss', { preset: 'office-boss' })
+  plain.titles.set('session-plain', 'plain')
+  const plainMember = plain.publish('session-plain', { status: 'running' })
+  await callBoss(plainChief, 'plain', 'office_adopt', { session_id: 'session-plain' })
+  assert.equal(
+    (await call(plainMember, 'office_colleagues', {})).colleagues[0].status,
+    'running',
+    'without the row, the status is the harness one and nothing else changes',
+  )
+})
+
+await check('the panel and the interrupt tool report the same quota wait', async () => {
+  const entries = { 'session-held': { pending: true } }
+  const held = makeHarness({ officeName: 'held' }, undefined, { rowId: 'office_held', quotaRetry: entries })
+  await held.ready
+  const chief = held.publish('session-held-boss', { preset: 'office-boss' })
+  held.titles.set('session-held', 'held')
+  held.publish('session-held', { status: 'running' })
+  await callBoss(chief, 'held', 'office_adopt', { session_id: 'session-held' })
+
+  const state = officeRoute('state', 'held')
+  const waiting = await callRoute(routes, state)
+  assert.equal(waiting.payload.colleagues[0].status, 'quota-retry', 'the roster column shows the wait')
+
+  // Entering or leaving the wait writes nothing to the office, so the token a poll compares has to
+  // read the derived status: otherwise a panel already on screen would never repaint.
+  delete entries['session-held']
+  const left = await callRoute(routes, `${state}&since=${encodeURIComponent(waiting.payload.revision)}`)
+  assert.notEqual(left.payload.revision, waiting.payload.revision, 'leaving the wait moves the panel token')
+  assert.equal(left.payload.colleagues[0].status, 'running')
+
+  // The wait is a running turn, so it is the one state a leader may stop — and the result says
+  // which state it stopped rather than calling every running turn the same.
+  entries['session-held'] = { pending: true }
+  const stopped = await callBoss(chief, 'held', 'office_interrupt', { name: 'held' })
+  assert.deepEqual(stopped, { office: 'held', colleague: 'held', status: 'quota-retry', interrupted: true })
+  assert.match(
+    chief.tools.get('office_interrupt').output.render({}, stopped)[0].text,
+    /wait on an exhausted account quota/,
+    'the interrupt result names what it ended',
   )
 })
 

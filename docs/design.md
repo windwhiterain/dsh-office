@@ -480,6 +480,55 @@ is therefore who the column lists. The composer's `@` menu is deliberately not s
 naming a colleague addresses that colleague wherever the post goes, and a level posted into a
 channel is already narrowed by that channel's membership.
 
+## The one status the harness cannot report
+
+A colleague's status is the harness's own — `idle` or `running`, since `AgentStatus` is exactly
+those two — plus the office's `inactive` for a session it holds but that is not loaded. One state a
+colleague can be in has no harness status behind it: an account out of allowance. The long-term
+quota retry answers an exhausted allowance by holding the failed request's step open and retrying
+it on an interval — an hour by default — so the turn never reaches quiescence and the session
+reports `running` throughout the wait. Nothing about that state reaches the roster, so a colleague
+that cannot make a request until its allowance resets looks exactly like one that is working.
+
+The office reports that wait as `quota-retry`. Four decisions decide its shape.
+
+- **The wait is read from the row that owns it, by service name.** `dsh-llm-quota-retry` publishes
+  `ctx.llmQuotaRetry`, and the office reads it through the registry rather than injecting it or
+  importing it: the office imports nothing from the harness and nothing from another plugin, so a
+  deployment that composes no such row reads `undefined` and every status is then exactly what it
+  was. Nothing is guessed from the vendor, the model, or the failure text — a second reading of
+  another plugin's condition could be wrong in exactly the case the status exists for.
+- **It is the armed wait, not the entry.** The retry row keeps an entry from the first quota
+  takeover until a request succeeds or its switch goes off, and an entry survives a cancelled turn
+  with nothing armed. Only `pending` — a wait actually scheduled — is a colleague held; the retry
+  request that follows one is a request in flight, and a session whose turn was cancelled is
+  working again the moment the office hands it one. Both are `running`.
+- **Only a loaded session can be in it.** A colleague whose session is not loaded is reported as
+  `inactive` whatever a ledger holds for it, because a wait is a property of an open turn and an
+  unloaded session has none. That is also why the status is read where the roster is built and in
+  the panel's live tick, so the two surfaces cannot disagree.
+- **It refines `running`; it does not stop being one.** A waiting colleague holds a turn, so the
+  leader frame's load tally still counts it among the working — that line is about turns, not about
+  progress — and `office_interrupt` may stop it, because a turn held open is exactly what that tool
+  cancels. What the office adds is the *name* of the state, so a leader can tell a colleague that is
+  thinking from one that cannot reach its account, and can decide to stop it rather than wait.
+
+**The panel token has to carry the derived status.** A poll of the panel is answered `unchanged`
+while nothing the snapshot draws has moved, and entering or leaving a quota wait writes nothing to
+the office: the colleague is not hired, renamed, or delivered to. A tick that compared the harness
+status alone would therefore never repaint the roster column, and the panel would show a colleague
+as working for as long as the page stayed open. Reading the same derivation the roster reads is
+what keeps the token honest.
+
+**One result declares it, and the rest do not.** `office_dm` reports the status the office read
+*before* the delivery, and it is the only tool whose result carries it: a private message's whole
+subject is one colleague, so "which colleague did I just reach, and what was it doing" is the
+question the call is asking, while a post is a report of delivery outcomes and what a colleague is
+belongs in `office_colleagues`. The status is read before the delivery rather than after because
+delivering a wake to an unloaded colleague loads it: reporting the state the office left behind
+would report `idle` for a colleague that was cold a moment earlier, which is the fact the sender
+most needs — that nothing answered because the message started the turn.
+
 ## What a panel poll costs
 
 A panel open on an office polls it every few seconds for the life of the page, so the cost of the

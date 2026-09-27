@@ -12,8 +12,9 @@ node probe/smoke.mjs
 ```
 
 It drives `apply()` against in-memory fakes: a storage domain over plain maps, an agent registry
-that publishes real Cordis root events, a permission-preset service, a session controller, and a
-route table that runs the handlers the panel calls. It checks the office logic, the per-agent
+that publishes real Cordis root events, a permission-preset service, a session controller, a route
+table that runs the handlers the panel calls, and — only for the checks that ask for it — the
+long-term quota retry service another row would provide. It checks the office logic, the per-agent
 tool scoping, every declared tool output against its own schema, and the routes. It needs no
 running Harness and no dependencies beyond the package's own, so it runs on every edit.
 
@@ -80,6 +81,14 @@ What it covers, by area:
   outside the roster going idle, `wakesEnabled: false`, a configured channel the office does not
   hold being reported rather than swallowed, the record of the last notice surviving a restart, and
   the row validation that refuses a notice it could never send.
+- **The quota wait** — the one status the office derives rather than reads: a colleague held in a
+  wait reporting `quota-retry` while one no entry covers reports `running`, an entry with no wait
+  armed reported as `running` too, an unloaded colleague reported `inactive` whatever a ledger
+  holds, the private message carrying the status read *before* it delivered (and `office_post`
+  declaring no such field), a deployment that composes no quota row reading the roster it always
+  did, the panel token moving when a colleague enters or leaves the wait, and the interrupt result
+  naming the wait it ended. The fake answers only for the harnesses that ask for it, which is what
+  makes the absent-row case a case at all.
 - **The panel routes** — the state snapshot (roster, roles, mailbox, totals, the channel the feed
   asked for), the history page a folded row asks for, hire, configure, dismiss, and the connection
   policy each one applies. The snapshot's own token is covered by what it is for: a poll naming the
