@@ -8,6 +8,7 @@ needs before it is visible decides how you iterate on this package.
 | A row's `config` in the **profile** patch | Live — the profile patch is watched |
 | A row added inside an existing `insert` list | Live |
 | A **profile patch rewritten wholesale** | Live for the rows whose composed `config` changed; every other row keeps the fiber it has — see below |
+| A **preset's `plugins` list** in the profile patch | Live for the next agent composed from that preset; an agent that is **already live** keeps the revision it was composed with — see [below](#a-preset-edit-and-the-agents-that-are-already-live) |
 | A bare top-level row in the profile patch | Never — the Loader reads it as an id-targeted override and warns |
 | `index.js` or `client.js`, with a watch root that names the file | Live — the plugin is disposed and imported again |
 | The package's own `cordis.patch.yml` (a bundle layer) | Restart — bundle layers are read at startup |
@@ -176,3 +177,45 @@ Operating rules:
 - A generation reload does not dispose the colleagues the office woke: `ensureAgent` resumes
   through the process root context ([delivery.md](delivery.md#cold-resume)). The reloads recorded
   above left every running colleague alive — the office-resumed one included.
+
+## A preset edit and the agents that are already live
+
+A preset declaration owns a **generation**: one mounted scope that every agent composed from that
+preset is parented to, kept alive for its users and retired only when the last of them lets go
+(`agent-preset-registry`'s `Generation`). A profile-patch reload mounts a new generation for the
+new composition, so:
+
+- an agent composed **after** the edit runs the new composition;
+- an agent that is **already live** keeps the composition it was composed with — including a row the
+  edit removed, and including the *absence* of a row the edit added.
+
+That is deliberate: an operator tuning a preset must not pull the plane out from under a session
+that is mid-turn. But it means a preset edit is not visible to a live agent, and the office keeps
+colleagues alive across reloads on purpose ([README](../README.md#installation-lifetime)), so an
+office is where a stale plane is most likely to be met. Two consequences for working here:
+
+- **A preset change is not a colleague change.** The edit reaches the colleagues the office composes
+  *after* it — a cold wake mounts the preset the session's log names, a colleague found live without
+  one is rebound ([delivery.md](delivery.md#cold-resume)) — so a colleague that keeps working
+  through the edit keeps the plane it had. Read the plane rather than assuming it.
+- **A colleague's plane is a fact the office reports.** `office_colleagues` prints each live
+  colleague's agent preset and how many tools it holds; `none`, or a count in the single digits where
+  the preset declares dozens, is a colleague holding only the office's own tools.
+
+### Reading a lost plane back from the record
+
+```powershell
+node probe/session-tool-scan.mjs <session.v4.jsonl.zstd> [name-regex]
+```
+
+It prints every tool catalog a session's requests carried — one line per change, with the sequence
+and time — beside the tools it actually called. The catalog list is the load-bearing half: a plane
+the session never called a tool from is invisible to a call log, and a colleague stripped of its
+shell is exactly a session with no shell calls and a *smaller* request header.
+
+Observed on a live Host (2026-09-27, `web` profile, this package linked into it): a colleague's
+catalog went from 27 tools to 8 at the moment the office woke it cold, while its 112 `git_bash`
+calls all sat *before* that line. The cause was the wake, not the catalog: the office resumed the
+session without the `setup` that mounts its preset, so the resume published an agent holding the
+office's own tools and the deployment's globals and nothing else. That is what `delivery.md`'s cold
+resume section now forbids, and what the smoke probe pins.

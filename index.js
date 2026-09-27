@@ -1677,6 +1677,81 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
+   * The agent preset one colleague's session runs, as the session reconstructs it.
+   *
+   * `agentPreset` is a **projection**, not the creation header: a session may change preset while
+   * it is still blank, and the change is what every later turn ran under, so the header alone
+   * would rebuild the composition the session started with rather than the one it ran. The header
+   * is only the fallback for a deployment whose projection registry cannot answer.
+   * @param agent - the colleague's agent.
+   * @returns the preset id, or undefined when the session never named one.
+   */
+  const presetIdOf = (agent) => {
+    const projections = ctx.get('sessionProjections')
+    if (projections !== undefined) {
+      try {
+        const state = projections.stateOf(agent.session, 'agentPreset')
+        if (typeof state === 'string' && state.length > 0) return state
+      } catch {
+        // A registry without that unit falls back to the header rather than failing the resume.
+      }
+    }
+    const header = agent.session.header.agentPreset
+    return typeof header === 'string' && header.length > 0 ? header : undefined
+  }
+
+  /**
+   * Mount the session's agent preset on the agent the office is bringing up.
+   *
+   * The harness mounts a preset **only** through the `setup` the caller hands `agents.resume()`.
+   * An agent resumed without one is born with no preset plane at all: it holds the deployment's
+   * global tools and the office's own contributions, and none of the shell, file, search, skill,
+   * todo, web, or delegation tools the session's preset declares — the office would then hand a
+   * colleague turns it cannot work with while its roster row still reads healthy. The Web surface
+   * is the other caller that reaches an ordinary session, and it passes exactly this setup
+   * (`dsh-api-session-controller`'s `composeAgent`); a deployment that mounts no preset registry
+   * keeps its own composition, and a preset that cannot be mounted fails the resume outright
+   * rather than publishing that half-agent.
+   * @param agentCtx - the agent's own scope context.
+   * @param agent - the agent being published.
+   */
+  const mountPreset = async (agentCtx, agent) => {
+    const presets = ctx.get('agentPresets')
+    if (presets === undefined) return
+    await presets.mount(agentCtx, presetIdOf(agent))
+  }
+
+  /**
+   * Give back the preset plane of a colleague that is already live without one.
+   *
+   * A colleague the office woke before this row mounted a preset, or one whose binding a reload
+   * dropped, stays live with an empty plane. `composedPreset` is what tells that state apart from
+   * a healthy one, and `recompose` is the harness's own rebind, so the repair costs the colleague
+   * no history, no session, and no turn.
+   *
+   * The tool set is rebuilt around the restored plane, because the plane is also what the role's
+   * one harness tool is decided against (`askUserRoles`): that decision was taken when this agent
+   * had no plane to decide about, so leaving the set as the arming found it would hand a member the
+   * blocking question tool. A role change reinstalls the set for the same reason.
+   * @param agent - the live colleague.
+   */
+  const ensurePresetPlane = async (agent) => {
+    const presets = ctx.get('agentPresets')
+    if (presets === undefined) return
+    if (presets.composedPreset(agent.ctx) !== undefined) return
+    const wanted = presetIdOf(agent)
+    if (wanted === undefined) return
+    await presets.recompose(agent.ctx, wanted)
+    if (officeToolSignature(agent) !== undefined) {
+      withdrawOfficeTools(agent)
+      installOfficeTools(agent)
+    }
+    ctx.logger?.info?.(
+      `dsh-office: colleague ${agent.session.header.id} held no agent preset plane; rebound to "${wanted}"`,
+    )
+  }
+
+  /**
    * The live agent of one colleague, cold-resuming its session when it is not loaded.
    *
    * `agents.resume` is the only harness operation that reaches an inactive ordinary session. The
@@ -1686,16 +1761,21 @@ function createOffice(ctx, domain, config, hooks) {
    * The resume goes through {@link processCtx} rather than this row's own context, because the
    * call decides who owns the resumed agent: see that constant for what a row-owned colleague
    * costs a reload. The two-argument `(ownerCtx, options)` form is the lower-level agentLoop
-   * factory contract, not a service call.
+   * factory contract, not a service call. {@link mountPreset} travels with it because the preset
+   * is part of what a session *is*, not a decoration the office may leave out.
    * @param sessionId - the colleague's session id.
    * @returns the agent that can be handed a turn.
    */
   const ensureAgent = async (sessionId) => {
     const live = ctx.agents.get(sessionId)
-    if (live !== undefined) return live
+    if (live !== undefined) {
+      await ensurePresetPlane(live)
+      return live
+    }
     const handle = await processCtx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: await resolveRoute(sessionId),
+      setup: mountPreset,
     })
     return handle.agent
   }
@@ -2547,13 +2627,43 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
+   * What a live colleague's tool plane actually is.
+   *
+   * A colleague can be live and still hold nothing but the office's own tools: an agent resumed
+   * without its preset has no preset plane at all, and it answers turns it cannot work with while
+   * its roster row reads healthy. `composedPreset` is what tells that state apart, and the count
+   * is the same fact in the unit a reader notices — a colleague with its preset holds dozens of
+   * tools, a stripped one holds the office's handful. The count is a projection of the surface the
+   * model is shown, never a guess from configuration.
+   * @param agent - the live colleague.
+   * @returns the preset it is bound to (`none` when the deployment mounts presets but this agent
+   *   holds none) and the number of tools it currently holds.
+   */
+  const presetPlaneOf = (agent) => {
+    const presets = ctx.get('agentPresets')
+    const bound = presets?.composedPreset(agent.ctx)
+    let tools
+    try {
+      tools = agent.ctx.tools.schemas(agent).length
+    } catch {
+      // A deployment whose tools service cannot project this agent's surface reports no count
+      // rather than failing the whole roster read.
+      tools = undefined
+    }
+    return compact({
+      agentPreset: bound ?? (presets === undefined ? undefined : 'none'),
+      tools,
+    })
+  }
+
+  /**
    * The roster with each colleague's live status, for the roster tools and the panel.
    *
    * Status is read from the live agent when the session is loaded and is `inactive` when it is
    * not, because an unloaded colleague has no turn to be in either state of. The effective
-   * permission preset and the model route are reported only for a loaded session: they are
-   * properties of that live session, and guessing them from storage would report a fact this
-   * office does not hold.
+   * permission preset, the agent preset with the tool count it currently holds, and the model
+   * route are reported only for a loaded session: they are properties of that live session, and
+   * guessing them from storage would report a fact this office does not hold.
    * @param records - the corpus listing the names resolve against; listed here when absent.
    * @returns one record per colleague, in roster order.
    */
@@ -2564,6 +2674,7 @@ function createOffice(ctx, domain, config, hooks) {
     for (const colleague of list) {
       const live = liveAgent(colleague.sessionId)
       const route = live === undefined ? undefined : await modelRouteOf(live)
+      const plane = live === undefined ? {} : presetPlaneOf(live)
       described.push(compact({
         name: colleague.name,
         sessionId: colleague.sessionId,
@@ -2571,6 +2682,8 @@ function createOffice(ctx, domain, config, hooks) {
         description: colleague.description,
         status: live === undefined ? 'inactive' : live.status,
         permission: live === undefined ? undefined : currentPermission(live),
+        agentPreset: plane.agentPreset,
+        tools: plane.tools,
         provider: route?.provider,
         model: route?.model,
         pending: heldWakes(colleague.sessionId).length,
@@ -3984,8 +4097,9 @@ function createColleaguesTool(tool) {
     description:
       'List every colleague with its role, its description, and its status: `running`, `idle` when it is '
       + 'loaded and waiting, `inactive` when its session is not loaded. A loaded colleague also reports its '
-      + 'permission preset and model route; each reports how many messages the office holds for it and when it '
-      + 'last carried one. Never wakes anybody.',
+      + 'permission preset, the agent preset it is bound to with the number of tools it holds (`none` means '
+      + 'it holds no preset tool at all, so it has no shell, files, or skills), and its model route; each '
+      + 'reports how many messages the office holds for it and when it last carried one. Never wakes anybody.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -4007,6 +4121,8 @@ function createColleaguesTool(tool) {
                 description: { type: 'string' },
                 status: { type: 'string', enum: ['running', 'idle', 'inactive'] },
                 permission: { type: 'string' },
+                agentPreset: { type: 'string' },
+                tools: { type: 'integer' },
                 provider: { type: 'string' },
                 model: { type: 'string' },
                 pending: { type: 'integer' },
@@ -4022,6 +4138,10 @@ function createColleaguesTool(tool) {
         const lines = value.colleagues.map((colleague) => {
           const details = [
             colleague.permission === undefined ? undefined : `permission ${colleague.permission}`,
+            colleague.agentPreset === undefined
+              ? undefined
+              : `agent preset ${colleague.agentPreset}`
+                + `${colleague.tools === undefined ? '' : ` (${String(colleague.tools)} tools)`}`,
             colleague.model === undefined ? undefined : `model ${colleague.provider ?? '?'}/${colleague.model}`,
             colleague.pending === 0 ? undefined : `${String(colleague.pending)} message(s) held for it`,
             colleague.lastMessageAt === undefined

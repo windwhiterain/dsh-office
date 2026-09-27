@@ -189,10 +189,28 @@ turn.
 
 ## Cold resume
 
-An inactive colleague is reached with `ctx.root.agents.resume({ resumeSessionId, agentOptions })`, the
-only harness operation that reaches an unloaded ordinary session. `AgentRegistry.resume` takes the
+An inactive colleague is reached with `ctx.root.agents.resume({ resumeSessionId, agentOptions, setup })`,
+the only harness operation that reaches an unloaded ordinary session. `AgentRegistry.resume` takes the
 options object alone; the `(ownerCtx, options)` form is the lower-level `agentLoop` factory
 contract.
+
+`setup` is what carries the session's **agent preset**. The harness mounts a preset only through the
+callback a resuming caller hands it (`dsh-api-session-controller`'s `composeAgent` is the other caller
+that passes one, for the Web surface); an agent resumed without one is published with **no preset
+plane at all**. It then holds the deployment's global tools and the office's own contributions, and
+none of the shell, file, search, skill, todo, web, or delegation tools its session's preset declares
+— a colleague that answers turns it cannot work with while its roster row still reads healthy.
+`setup` therefore mounts the preset the session's log names: the `agentPreset` projection (a session
+may change preset while it is blank, and the change is what later turns ran under), falling back to
+the creation header, and to the deployment default when the session never named one. A deployment
+that mounts no `agentPresets` service resumes as before, and a preset that cannot be mounted —
+unknown, or a declaration whose rows do not activate — **fails the resume** rather than publishing
+that half-agent, so the wake is reported instead of silently degrading a colleague.
+
+The office also repairs a colleague it finds **already live without a preset binding**
+(`agentPresets.composedPreset(agent.ctx) === undefined`): it calls the harness's own
+`recompose(agent.ctx, sessionPreset)` before handing over the turn, so a colleague that came up
+before this row mounted a preset keeps its history, its session, and its turn.
 
 The **context the call is made through is the ownership decision**, not an implementation detail:
 `agentLoop` registers the agent's and its session's teardown on the accessing context's fiber, so
@@ -204,8 +222,7 @@ and because the harness reports `session/disposed` as `api-session/removed`, the
 leaves the Web sidebar until something wakes it again. The process root context outlives every
 plugin generation, so `ctx.root` is what a wake resumes through; reads (`agents.get`, `agents.list`)
 may stay on the row's own context, because only a resume takes ownership. A hire is unaffected: the
-session controller creates that agent through its own context, which is the harness's own owner for
-a session it materializes.
+session controller creates that agent through its own context, and composes its preset itself.
 
 `agentOptions` is **mandatory**, not optional: the `provider` and `model` prompt variables read
 `agent.options`, so a resume without a route fails prompt assembly with

@@ -272,7 +272,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 |---|---|
 | `office_list` | List the offices this session runs, with their names and colleague counts. |
 | `office_roster` | List colleagues and channels; `include_unadopted` also lists sessions available to adopt, each with its workspace and its sidebar title — archived sessions, and sessions no workspace accounts, are not offered. |
-| `office_colleagues` | Every colleague with its role, description, live status, effective permission, model route, held-message count, and last activity. A pure query: it wakes nobody. |
+| `office_colleagues` | Every colleague with its role, description, live status, effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, held-message count, and last activity. A pure query: it wakes nobody. |
 | `office_adopt` | Adopt an existing session, with an optional `name`, `role`, and `description`. |
 | `office_hire` | Create a session, title it, adopt it, and greet it **privately**. Accepts `role`, `description`, `agent_preset`, `provider`+`model`, and `reasoning_effort`. |
 | `office_dismiss` | Remove a colleague from the roster and withdraw its tools. The session itself keeps its history and workspace. |
@@ -331,6 +331,14 @@ teardown to the context the resume was made through: a row-owned colleague would
 next source hot reload, profile-patch reload, or remount of that row — killed mid-turn if it was
 working — and the harness reports that disposal as a removal from the Web session list. The office
 is developed against a live host, so a generation reload has to be an event colleagues survive.
+
+**A wake carries the colleague's own preset.** The harness mounts an agent preset only through the
+`setup` a resuming caller hands `agents.resume()`, so the office passes one that mounts the preset
+the session's log names — the same composition the Web surface builds. Without it a resumed
+colleague holds no preset tool at all (no shell, no files, no skills, no delegation), which is a
+live colleague that answers turns it cannot work with; a wake of a colleague found live *without*
+that plane rebinds it instead, through the harness's own `recompose`. Either way a preset that
+cannot be mounted fails the wake and says so.
 
 ### Result shape
 

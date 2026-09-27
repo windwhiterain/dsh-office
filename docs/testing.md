@@ -1,8 +1,9 @@
 # Testing
 
-Two checks live outside the shipped package: `probe/smoke.mjs` covers the plugin logic without a
-Harness, and `probe/panel-render.mjs` covers the Web panel's render path and its contract with
-the state route. Neither is part of what a deployment installs.
+Three tools live outside the shipped package: `probe/smoke.mjs` covers the plugin logic without a
+Harness, `probe/panel-render.mjs` covers the Web panel's render path and its contract with the
+state route, and `probe/session-tool-scan.mjs` reads one stored session back for what it held and
+what it called. None is part of what a deployment installs.
 
 ## The offline probe
 
@@ -81,6 +82,15 @@ What it covers, by area:
   status does. The roster's names are covered by the read they must not make: a check counts the
   log folds the fake was asked for and asserts the count is zero while a title projection is
   readable, for a first listing and for a rename.
+- **The preset plane of a colleague** — that a cold resume hands the harness a `setup` which mounts
+  the preset the session's log names (projection first, creation header as the fallback), that a
+  resume on a deployment with no preset registry still works and mounts nothing, that a live
+  colleague found without a plane is rebound rather than handed a turn it cannot work with, that a
+  colleague whose preset nobody declares fails the wake instead of coming up stripped, and that the
+  roster reports the preset and tool count a live colleague actually holds. A colleague rebuilt
+  around a restored plane is checked to be armed with the same withdrawal a freshly composed one
+  gets, and the fake registry refuses an unknown id and a broken declaration exactly as the real
+  one does.
 
 Keep it out of `index.js`: the shipped plugin carries no test code, and `package.json`'s `files`
 list ships neither `probe/` nor `docs/`. `experience/` does ship: a hired leader's onboarding turn
@@ -140,11 +150,31 @@ This check earns its place: it caught a message view that carried no sequence nu
 panel could render a feed but never unfold it — and a props binding the rail needed and did not
 have. Neither is visible to a schema check or a syntax check.
 
+## Reading a session back
+
+```powershell
+node probe/session-tool-scan.mjs <session.v4.jsonl.zstd> [name-regex]
+```
+
+It prints two things from one stored session: **every tool catalog its requests carried**, one line
+per change with the sequence and the time, and **the tools it actually called**, most used first,
+with the first and last sequence each appears at. The optional regex filters the call summary only,
+so one run can ask "did it ever call `git_bash`" without losing the catalogs.
+
+It is not a check: nothing asserts, and its exit code is 2 only for a missing argument. It is the
+instrument for a question the plugin cannot answer for itself — *which tools did this colleague
+hold, and when did that change* — and it reads the record rather than a model's account of itself.
+Two facts about the format are load-bearing and are why it is a scan: a stored session is a
+concatenation of small zstd frames (one per event batch), and Node's zstd stream stops after the
+first frame, so the reader walks every frame magic instead. A catalog the session never called a
+tool from is the case a call log cannot show, which is exactly the one that mattered when a cold
+resume published a colleague with no preset plane ([hot-reload.md](hot-reload.md#reading-a-lost-plane-back-from-the-record)).
+
 ## What is not covered
 
-- **A real Host.** Neither check mounts the package in a running DSH: activation against the
+- **A real Host.** No check mounts the package in a running DSH: activation against the
   Loader's composed config, the client bundle route, and a browser are checked by running it, as
   [hot-reload.md](hot-reload.md) describes.
-- **The harness APIs themselves.** The fakes stand in for `ctx.agents.resume`, the permission
-  presets, and the session projection; their contracts are read from the harness source, not
-  asserted against it.
+- **The harness APIs themselves.** The fakes stand in for `ctx.agents.resume` and its `setup`, the
+  preset registry, the permission presets, and the session projection; their contracts are read from
+  the harness source, not asserted against it.

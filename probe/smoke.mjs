@@ -234,8 +234,18 @@ function makeInbox() {
 }
 
 /** One fake Agent carrying its own tool scope, exactly as `agent.ctx.tools` does. */
-function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox(), inherited = new Map()) {
+function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox(), plane = () => new Map()) {
   const tools = new Map()
+  /** This agent's scope, assigned as soon as the literal below is built. */
+  let self
+  /**
+   * The tools this agent's scope INHERITS, read at call time.
+   *
+   * A preset is what contributes an inherited plane, so an agent composed without one inherits
+   * nothing — the state every colleague the office woke without a `setup` is in. A fake that
+   * always answered the deployment's tool catalog would hide exactly that.
+   */
+  const inheritedNow = () => plane(self.ctx)
   /** Prompt sections registered into this agent's own scope, as `agent.ctx.systemPrompt` holds them. */
   const promptSections = new Map()
   /**
@@ -262,7 +272,7 @@ function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox(), inherite
     )
     return message
   }
-  return {
+  return (self = {
     sent,
     cancels,
     tools,
@@ -291,7 +301,26 @@ function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox(), inherite
           const admitted = restrictions.every(filter =>
             (filter.allow === undefined || filter.allow.has(name))
             && (filter.deny === undefined || !filter.deny.has(name)))
-          return admitted ? inherited.get(name) : undefined
+          return admitted ? inheritedNow().get(name) : undefined
+        },
+        /**
+         * Project the surface this scope is shown, as the real registry does: own registrations
+         * shadow an inherited name, and a restricted-away inherited name reads as absent. The
+         * office reads this to report how many tools a colleague actually holds, so a fake without
+         * it would hide the count that makes a stripped colleague visible.
+         * @returns one schema per visible tool.
+         */
+        schemas: () => {
+          const admitted = (name) => restrictions.every(filter =>
+            (filter.allow === undefined || filter.allow.has(name))
+            && (filter.deny === undefined || !filter.deny.has(name)))
+          const visible = new Map([...inheritedNow()].filter(([name]) => admitted(name)))
+          for (const [name, definition] of tools) visible.set(name, definition)
+          return [...visible.values()].map(definition => ({
+            name: definition.name,
+            description: definition.description,
+            parameters: definition.parameters,
+          }))
         },
         /**
          * Mask inherited tools for this agent's scope, with the real registry's refusals: a
@@ -305,7 +334,7 @@ function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox(), inherite
             filter.allow !== undefined || filter.deny !== undefined,
             'restrict() requires allow and/or deny',
           )
-          const unknown = [...filter.allow ?? [], ...filter.deny ?? []].filter(name => !inherited.has(name))
+          const unknown = [...filter.allow ?? [], ...filter.deny ?? []].filter(name => !inheritedNow().has(name))
           assert.deepEqual(unknown, [], `restrict() names unknown global tool ${unknown.join(', ')}`)
           const compiled = {
             ...filter.allow !== undefined ? { allow: new Set(filter.allow) } : {},
@@ -358,7 +387,7 @@ function makeAgent(sessionId, status, cwd, preset, inbox = makeInbox(), inherite
      * @param options - `keepInbox` preserves pending work.
      */
     cancel: (cause, options) => { cancels.push({ cause, options }) },
-  }
+  })
 }
 
 /**
@@ -433,6 +462,21 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
   const resumed = []
   const hires = []
   const selects = []
+  /**
+   * The preset each agent's scope is bound to, as the real registry binds an agent to the
+   * generation its session's preset mounted. A live colleague the office has to repair is one this
+   * map has no entry for.
+   */
+  const presetBindings = new Map()
+  /**
+   * Every preset mount the office asked for, in the order it asked, with the path it came through:
+   * `resume` is the `setup` a cold resume hands the harness, `recompose` is the rebind a live
+   * colleague is given back. A resume that mounts nothing leaves a colleague holding no preset
+   * tool at all, which is the failure this record exists to catch.
+   */
+  const presetMounts = []
+  /** The preset ids this fake deployment declares; `personal` models a second real declaration. */
+  const presetIds = ['standard', 'broken', ...(features.presets ?? [])]
   /** One-shot failures the harness was asked to inject, so a check can fail an operation once. */
   const failures = {}
   /**
@@ -481,6 +525,16 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     return inboxes.get(sessionId)
   }
 
+  /**
+   * The tools one agent's scope actually inherits: a preset contributes them, and an agent composed
+   * without one inherits nothing. That is the whole of the failure this suite pins — a colleague
+   * the office woke without a `setup` is a live agent holding the office's tools and no preset tool
+   * at all — so the plane is read through the binding rather than handed to every agent.
+   * @param agentCtx - the agent's own scope context.
+   * @returns the inherited tool map this scope sees.
+   */
+  const planeOf = (agentCtx) => (presetBindings.has(agentCtx) ? inheritedTools : new Map())
+
   function publish(sessionId, options = {}) {
     const agent = makeAgent(
       sessionId,
@@ -488,8 +542,13 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       options.cwd,
       options.preset,
       inboxOf(sessionId),
-      inheritedTools,
+      planeOf,
     )
+    // An agent the Web surface composed carries the preset its session named, and one composed
+    // without a name carries the deployment default — which is what `mount` resolves an undefined
+    // id to. `bound: false` models the colleague that came up without one, the state the office
+    // must notice and repair.
+    if (options.bound !== false) presetBindings.set(agent.ctx, options.preset ?? 'standard')
     liveAgents.set(sessionId, agent)
     for (const listener of createdListeners) listener({ agent })
     return agent
@@ -497,6 +556,10 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
 
   /**
    * Bring one cold session up, on whichever plane the caller reached the service through.
+   *
+   * The real loop builds the agent around the persisted session and runs the caller's `setup`
+   * **before** publishing it, so a setup that throws publishes nothing. The session it opens is
+   * the logged one, whose own preset is what a correct `setup` mounts.
    * @param options - the resume request the office sent.
    * @returns the published handle.
    */
@@ -517,7 +580,17 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
       // message being stored and the colleague being handed it.
       await new Promise(resolve => setTimeout(resolve, features.slowResumeMs))
     }
-    const agent = publish(options.resumeSessionId)
+    const agent = makeAgent(
+      options.resumeSessionId,
+      'idle',
+      undefined,
+      features.sessionPresets?.[options.resumeSessionId],
+      inboxOf(options.resumeSessionId),
+      planeOf,
+    )
+    await options.setup?.(agent.ctx, agent)
+    liveAgents.set(options.resumeSessionId, agent)
+    for (const listener of createdListeners) listener({ agent })
     return { agent, dispose: async () => {} }
   }
 
@@ -669,7 +742,28 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
         return features.profileContext === false ? undefined : { patchPath: PATCH_PATH }
       }
       if (name === 'agentPresets') {
-        return { list: async () => [{ id: 'standard', name: 'Standard' }, { id: 'broken', broken: 'nope' }] }
+        if (features.agentPresets === null) return undefined
+        /**
+         * Mount one preset on one agent's scope, with the real registry's two refusals: an id no
+         * declaration carries, and a declaration whose rows cannot activate. A fake that mounted
+         * anything would let the office strip a colleague in silence.
+         * @param agentCtx - the agent's own scope context.
+         * @param id - the requested preset, or undefined for the deployment default.
+         */
+        const mountPreset = (agentCtx, id, via) => {
+          const wanted = id ?? 'standard'
+          presetMounts.push({ id: wanted, via })
+          if (wanted === 'broken') throw new Error(`agent preset ${wanted}: a row is waiting for a service`)
+          if (!presetIds.includes(wanted)) throw new Error(`Unknown agent preset: ${wanted}`)
+          presetBindings.set(agentCtx, wanted)
+          return { id: wanted }
+        }
+        return {
+          list: async () => [{ id: 'standard', name: 'Standard' }, { id: 'broken', broken: 'nope' }],
+          mount: (agentCtx, id) => mountPreset(agentCtx, id, 'resume'),
+          recompose: async (agentCtx, id) => mountPreset(agentCtx, id, 'recompose'),
+          composedPreset: (agentCtx) => presetBindings.get(agentCtx),
+        }
       }
       if (name === 'permissionPresets') {
         if (features.permissionPresets === null) return undefined
@@ -683,16 +777,25 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
         }
       }
       if (name === 'sessionProjections') {
-        // Only the harnesses that declare one model selection per session expose the registry, so
-        // the checks below can tell a read of the projection from a read of `agent.options`. The
+        // Only the harnesses that declare one projection per session expose the registry, so the
+        // checks below can tell a read of the projection from a read of `agent.options`. The
         // `title` unit is what the Web session list displays: the latest title event a session's
         // log carries, which the `titles` rename store is the fake of, before any feature-provided
-        // static titles. A registry without the unit carries no title at all.
-        if (features.modelSelection === undefined && features.titles === undefined) return undefined
+        // static titles. A registry without the unit carries no title at all. The `agentPreset`
+        // unit is the real one's contract: initialized from the creation header and advanced by a
+        // selection event, which is the value a resume must compose rather than the header alone.
+        if (features.modelSelection === undefined && features.titles === undefined
+          && features.agentPresetProjection === undefined) return undefined
         return {
           stateOf: (session, key) => {
             if (key === 'modelSelection') return features.modelSelection?.[session.header.id]
             if (key === 'title') return titles.get(session.header.id) ?? features.titles?.[session.header.id] ?? null
+            if (key === 'agentPreset') {
+              if (features.agentPresetProjection !== undefined) {
+                return features.agentPresetProjection[session.header.id] ?? null
+              }
+              return session.header.agentPreset ?? null
+            }
             return undefined
           },
         }
@@ -769,6 +872,8 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     selects,
     permissions,
     warnings,
+    presetMounts,
+    presetBindings,
     publish,
     close,
     /**
@@ -4323,6 +4428,143 @@ await check("naming the roster reads the title projections, never a session's lo
     'and a session renamed anywhere renames the colleague with no log read either',
   )
   assert.equal(naming.titleFolds.count, 0, 'a rename is not an excuse to fold the history')
+})
+
+await check('a cold resume mounts the preset the session log names, so the colleague keeps its own tools', async () => {
+  const plane = makeHarness({ officeName: 'plane' }, undefined, {
+    rowId: 'office_plane',
+    sessionPresets: { 'session-cold': 'standard' },
+  })
+  await plane.ready
+  const chief = plane.publish('session-plane-boss', { preset: 'office-boss' })
+  plane.titles.set('session-cold', 'cold')
+  await callBoss(chief, 'plane', 'office_adopt', { session_id: 'session-cold' })
+
+  const posted = await callBoss(chief, 'plane', 'office_post', { text: 'please look', wake: ['@cold'] })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'cold', status: 'delivered' }])
+  // The harness mounts a preset only through the `setup` the resuming caller passes, so a resume
+  // without one publishes an agent that holds no preset tool at all. The mount is the difference
+  // between a colleague that can work and one that only answers.
+  assert.ok(
+    plane.presetMounts.some(mount => mount.id === 'standard' && mount.via === 'resume'),
+    'the cold resume must hand the harness a setup that mounts the session preset',
+  )
+  const cold = plane.liveAgents.get('session-cold')
+  assert.equal(plane.presetBindings.get(cold.ctx), 'standard', 'and the colleague ends up bound to it')
+  const row = (await callBoss(chief, 'plane', 'office_colleagues')).colleagues.find(entry => entry.name === 'cold')
+  assert.equal(row.agentPreset, 'standard', 'the roster reports the preset the colleague actually runs')
+  assert.ok(row.tools >= 6, `a member with its preset holds at least the office tools, got ${String(row.tools)}`)
+})
+
+await check('the preset a session selected outlives its creation header on a resume', async () => {
+  const switched = makeHarness({ officeName: 'switched' }, undefined, {
+    rowId: 'office_switched',
+    presets: ['personal'],
+    sessionPresets: { 'session-picked': 'standard' },
+    agentPresetProjection: { 'session-picked': 'personal' },
+  })
+  await switched.ready
+  const chief = switched.publish('session-switched-boss', { preset: 'office-boss' })
+  switched.titles.set('session-picked', 'picked')
+  await callBoss(chief, 'switched', 'office_adopt', { session_id: 'session-picked' })
+  await callBoss(chief, 'switched', 'office_post', { text: 'wake up', wake: ['@picked'] })
+
+  // A session may change preset while it is blank, and the change is what later turns ran under:
+  // composing from the frozen creation header would rebuild the composition the session left.
+  assert.deepEqual(
+    switched.presetMounts.filter(mount => mount.via === 'resume').map(mount => mount.id),
+    ['personal'],
+    'the resume composes the projected preset, not the header',
+  )
+})
+
+await check('a live colleague that holds no preset plane gets one back before its turn', async () => {
+  const stripped = makeHarness({ officeName: 'stripped' }, undefined, { rowId: 'office_stripped' })
+  await stripped.ready
+  const chief = stripped.publish('session-stripped-boss', { preset: 'office-boss' })
+  stripped.titles.set('session-stripped', 'stripped')
+  // Live, and composed with no preset: the state every colleague the office woke before it passed
+  // a `setup` is in. It answers turns it cannot work with until something rebinds it.
+  const bare = stripped.publish('session-stripped', { preset: 'standard', bound: false })
+  assert.equal(stripped.presetBindings.get(bare.ctx), undefined, 'the fake starts it with no plane')
+  await callBoss(chief, 'stripped', 'office_adopt', { session_id: 'session-stripped' })
+
+  const before = bare.sent.length
+  const posted = await callBoss(chief, 'stripped', 'office_post', { text: 'are you there?', wake: ['@stripped'] })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'stripped', status: 'delivered' }])
+  assert.ok(
+    stripped.presetMounts.some(mount => mount.id === 'standard' && mount.via === 'recompose'),
+    'a colleague found without its preset is rebound, not handed a turn it cannot work with',
+  )
+  assert.equal(stripped.presetBindings.get(bare.ctx), 'standard', 'and it keeps its history and its session')
+  assert.equal(bare.sent.length, before + 1, 'the turn it was woken for still arrives, once')
+})
+
+await check('a colleague whose plane is restored is armed with the same withdrawal a fresh one gets', async () => {
+  const repaired = makeHarness({ officeName: 'repaired' }, undefined, {
+    rowId: 'office_repaired',
+    askUserTool: true,
+  })
+  await repaired.ready
+  const chief = repaired.publish('session-repaired-boss', { preset: 'office-boss' })
+  repaired.titles.set('session-repaired-member', 'member')
+  repaired.titles.set('session-repaired-leader', 'leader')
+  const member = repaired.publish('session-repaired-member', { preset: 'standard', bound: false })
+  const leader = repaired.publish('session-repaired-leader', { preset: 'standard', bound: false })
+  // An agent with no preset plane inherits nothing at all, so the tool this row decides about is
+  // simply absent from it — which is why the arming that ran had no decision to make.
+  assert.ok(!seesAskUser(member), 'a stripped colleague holds no preset tool, not even the question one')
+
+  await callBoss(chief, 'repaired', 'office_adopt', { session_id: 'session-repaired-member', role: 'member' })
+  await callBoss(chief, 'repaired', 'office_adopt', { session_id: 'session-repaired-leader', role: 'leader' })
+  await callBoss(chief, 'repaired', 'office_post', { text: 'work please', wake: ['@member', '@leader'] })
+
+  // The plane handed back carries the harness question tool, and the role decides who keeps it: the
+  // set has to be rebuilt around the restored plane, or every repaired colleague would come back
+  // holding it and a member could block a turn waiting for a human who is not in that Chat.
+  assert.ok(!seesAskUser(member), 'a repaired member still asks by mail rather than holding a turn open')
+  assert.ok(seesAskUser(leader), 'while a repaired leader keeps the tool its role is left with')
+  assert.ok(member.tools.has('office_post'), 'and the office tools are installed beside the restored plane')
+})
+
+await check('a deployment that mounts no preset registry resumes a colleague as it always did', async () => {
+  const bareDeployment = makeHarness({ officeName: 'noregistry' }, undefined, {
+    rowId: 'office_noregistry',
+    agentPresets: null,
+  })
+  await bareDeployment.ready
+  const chief = bareDeployment.publish('session-noregistry-boss', { preset: 'office-boss' })
+  bareDeployment.titles.set('session-noregistry-cold', 'cold')
+  await callBoss(chief, 'noregistry', 'office_adopt', { session_id: 'session-noregistry-cold' })
+  const posted = await callBoss(chief, 'noregistry', 'office_post', {
+    text: 'wake up',
+    wake: ['@cold'],
+  })
+  assert.deepEqual(posted.deliveries, [{ colleague: 'cold', status: 'delivered' }])
+  assert.deepEqual(bareDeployment.presetMounts, [], 'a deployment with no registry mounts nothing')
+  const row = (await callBoss(chief, 'noregistry', 'office_colleagues'))
+    .colleagues.find(entry => entry.name === 'cold')
+  assert.equal(row.agentPreset, undefined, 'and the roster claims no preset it cannot know')
+})
+
+await check('a colleague whose preset nobody declares fails the wake instead of coming up stripped', async () => {
+  const gone = makeHarness({ officeName: 'gone' }, undefined, {
+    rowId: 'office_gone',
+    sessionPresets: { 'session-gone': 'retired-preset' },
+  })
+  await gone.ready
+  const chief = gone.publish('session-gone-boss', { preset: 'office-boss' })
+  gone.titles.set('session-gone', 'gonecolleague')
+  await callBoss(chief, 'gone', 'office_adopt', { session_id: 'session-gone' })
+
+  const posted = await callBoss(chief, 'gone', 'office_post', { text: 'wake up', wake: ['@gonecolleague'] })
+  assert.equal(posted.deliveries[0].status, 'failed', 'the wake is reported, not half-done')
+  assert.match(posted.deliveries[0].detail, /Unknown agent preset: retired-preset/)
+  assert.equal(
+    gone.liveAgents.has('session-gone'),
+    false,
+    'a colleague that cannot be composed is not published as one that holds nothing',
+  )
 })
 
 for (const label of checks) console.log(`  ok  ${label}`)
