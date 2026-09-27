@@ -2669,15 +2669,20 @@ function createOffice(ctx, domain, config, hooks) {
    * composed **before** the snapshot it stamps, never after: a change that lands while the snapshot
    * is being built then leaves the client holding a token older than its content, which costs one
    * redundant answer, where a token newer than the content would hide a message for good.
+   *
+   * What travels is a digest of those parts rather than the parts themselves, because the token is
+   * a query parameter: the office's own records — every colleague with its description, every
+   * channel with its members — are kilobytes, and a request line carrying them would meet the HTTP
+   * server's header limit on a large enough office. A digest cannot be read, which is also the right
+   * shape for a value whose whole meaning is "the same as the one I gave you"; a collision would
+   * cost one missed refresh, and the periodic full read is what bounds that.
    * @param channelId - the channel the panel is reading.
    * @returns the token for this office, this channel, and the mailbox.
    */
-  const panelTick = (channelId) => [
-    structureTick(),
-    channelTick(channelId),
-    channelTick(MAILBOX_CHANNEL),
-    liveTick(),
-  ].join('|')
+  const panelTick = (channelId) => createHash('sha256')
+    .update([structureTick(), channelTick(channelId), channelTick(MAILBOX_CHANNEL), liveTick()].join('\u0000'))
+    .digest('hex')
+    .slice(0, 16)
 
   /** Set while one idle notice is being sent, so two idle transitions cannot send two. */
   let idleNoticeInFlight = false

@@ -484,10 +484,13 @@ matches the office's own tick, the answer is a few dozen bytes. What the token m
 the interesting part. It is **derived from the office's records** — a walk of its own small tables,
 never of a session's history — rather than counted by the writers: a counter a writer has to
 remember to move goes stale the first time a write path is added, and a stale token is worse than a
-slow one, because the page then stops refreshing altogether with nothing to show for it. For the
-same reason the token is composed **before** the snapshot it stamps: a change that lands while the
-snapshot is being built then leaves the client holding a token older than its content, which costs
-one redundant answer, where a token newer than the content would hide a message for good.
+slow one, because the page then stops refreshing altogether with nothing to show for it. What
+travels is a **digest** of those parts and not the parts themselves, because the token is a query
+parameter: the roster's descriptions and the channels' members are kilobytes, and a large enough
+office would meet the HTTP server's header limit with them in a request line. For the same reason
+the token is composed **before** the snapshot it stamps: a change that lands while the snapshot is
+being built then leaves the client holding a token older than its content, which costs one
+redundant answer, where a token newer than the content would hide a message for good.
 
 **Naming a colleague reads a listing, not a log.** The tick and the snapshot both need each
 colleague's name, and a name is the session's title. The cheap read is the one every listing in the

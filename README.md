@@ -664,10 +664,12 @@ unauthenticated.
 The state route's token describes what the snapshot draws — the roster with its live status and
 held counts, the channels, the channel being read, and the mailbox — and it is derived from the
 office's own records on each request rather than counted by the writers, so no write path can
-forget to move it. It is **not stored**: a plugin reload restarts every office's counters, which
-is exactly right, because the panel that held a token then holds a stale one and is answered with
-a snapshot. A change the office never wrote — a session renamed from the sidebar, a storage file
-edited by hand — moves no token, which is what the panel's own periodic full read covers.
+forget to move it. What travels is a digest of those records, because the token is a query
+parameter and a roster with its descriptions is kilobytes. It is **not stored**: a plugin reload
+restarts every office's counters, which is exactly right, because the panel that held a token then
+holds a stale one and is answered with a snapshot. A change the office never wrote — a session
+renamed from the sidebar, a storage file edited by hand — moves no token, which is what the
+panel's own periodic full read covers.
 
 ## Known limitations
 

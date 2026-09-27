@@ -4229,7 +4229,11 @@ await check('every cold resume is owned by the process context, not by this plug
 
 await check('a panel poll holding the snapshot token is told nothing moved, until something does', async () => {
   const first = await callRoute(routes, officeRoute('state', 'office'))
-  assert.equal(typeof first.payload.revision, 'string', 'the snapshot carries the token its next poll hands back')
+  assert.match(
+    first.payload.revision,
+    /^[0-9a-f]{16}$/,
+    'the token is a short digest: it travels as a query parameter, so the office itself cannot ride in it',
+  )
   assert.equal(first.payload.unchanged, undefined, 'and a full snapshot never claims that nothing moved')
 
   const held = `${officeRoute('state', 'office')}&since=${encodeURIComponent(first.payload.revision)}`
