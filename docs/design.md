@@ -285,7 +285,7 @@ started by a delivered message and the user is reading the office rather than th
 so a question asked inside it waits for a human who is not in the room. The harness already refuses
 the tool to an agent owned by another agent (`DELEGATED_CALLER`) for exactly this reason; a
 colleague needs the same rule, and is invisible to that check because the session controller created
-it and `ctx.agents.resume` wakes it, which makes it a live runtime root.
+it and `ctx.root.agents.resume` wakes it, which makes it a live runtime root.
 
 `askUserRoles` is therefore a list of roles an office **leaves** the tool with, not one it grants:
 the office never mounts it, so a listed role in an office whose preset carries no `tool-ask-user`

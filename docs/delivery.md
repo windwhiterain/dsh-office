@@ -189,10 +189,23 @@ turn.
 
 ## Cold resume
 
-An inactive colleague is reached with `ctx.agents.resume({ resumeSessionId, agentOptions })`, the
+An inactive colleague is reached with `ctx.root.agents.resume({ resumeSessionId, agentOptions })`, the
 only harness operation that reaches an unloaded ordinary session. `AgentRegistry.resume` takes the
 options object alone; the `(ownerCtx, options)` form is the lower-level `agentLoop` factory
 contract.
+
+The **context the call is made through is the ownership decision**, not an implementation detail:
+`agentLoop` registers the agent's and its session's teardown on the accessing context's fiber, so
+`ctx.agents.resume` makes the colleague a child of this plugin's row — a generation that a source
+hot reload, a profile-patch reload, or a row remount replaces. Resuming through the row therefore
+means that reloading the plugin disposes every colleague the office has woken, mid-turn: the
+session's last event becomes `turn/end {"reason":{"kind":"aborted","reason":{"kind":"disposed"}}}`,
+and because the harness reports `session/disposed` as `api-session/removed`, the colleague's row
+leaves the Web sidebar until something wakes it again. The process root context outlives every
+plugin generation, so `ctx.root` is what a wake resumes through; reads (`agents.get`, `agents.list`)
+may stay on the row's own context, because only a resume takes ownership. A hire is unaffected: the
+session controller creates that agent through its own context, which is the harness's own owner for
+a session it materializes.
 
 `agentOptions` is **mandatory**, not optional: the `provider` and `model` prompt variables read
 `agent.options`, so a resume without a route fails prompt assembly with
@@ -205,9 +218,8 @@ contract.
 With neither source, the delivery fails and says so, rather than resuming into an assembly that
 cannot run.
 
-The resumed agent handle is deliberately not retained: the agent stays live in the registry for
-the plugin's lifetime, because disposing the handle would tear the session down underneath a
-browser that has it open.
+The resumed agent handle is deliberately not retained: the agent stays live in the registry, because
+disposing the handle would tear the session down underneath a browser that has it open.
 
 ## The delivered turn
 

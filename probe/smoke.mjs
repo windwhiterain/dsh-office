@@ -388,6 +388,15 @@ const statusListeners = []
  * step-end wake when the harness takes that message into a step, and the claim is process-wide.
  */
 const inboxClaimListeners = []
+/**
+ * The context plane every cold resume went through, collected across every harness.
+ *
+ * A resume binds the agent's and its session's teardown to the accessing context's fiber, so a
+ * resume through an office row makes the colleague a child of one plugin generation, and reloading
+ * this plugin disposes it mid-turn. The fakes therefore accept a resume only on the process
+ * context (`ctx.root`) and refuse the row plane, and the last check pins that rule.
+ */
+const resumePlanes = []
 
 function makeHarness(rawConfig, loggedRoute, features = {}) {
   const tables = new Map()
@@ -478,6 +487,49 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     return agent
   }
 
+  /**
+   * Bring one cold session up, on whichever plane the caller reached the service through.
+   * @param options - the resume request the office sent.
+   * @returns the published handle.
+   */
+  async function resumeAgent(options) {
+    if (options?.agentOptions === undefined) {
+      throw new Error('resume must carry agentOptions: the provider/model prompt variables read agent.options')
+    }
+    // A single failed resume models the transient failure a real deployment hits (a
+    // session that cannot be brought up right now). The message stays stored and unseen,
+    // which is the case a later wake has to carry.
+    if (features.failResumeOnce === true && !failures.resume) {
+      failures.resume = options.resumeSessionId
+      throw new Error(`resume failed for ${options.resumeSessionId}`)
+    }
+    resumed.push({ sessionId: options.resumeSessionId, agentOptions: options.agentOptions })
+    if (features.slowResumeMs !== undefined) {
+      // A cold start that takes a moment, which is when the channel can move on between the
+      // message being stored and the colleague being handed it.
+      await new Promise(resolve => setTimeout(resolve, features.slowResumeMs))
+    }
+    const agent = publish(options.resumeSessionId)
+    return { agent, dispose: async () => {} }
+  }
+
+  /**
+   * The agent service an office row reaches, which owns nothing.
+   *
+   * Reads are shared with the process plane because the real registry is one store; only a resume
+   * differs, and a row-plane resume is refused rather than modelled.
+   */
+  const rowAgents = {
+    get: sessionId => liveAgents.get(sessionId),
+    list: () => [...liveAgents.values()],
+    resume: () => {
+      resumePlanes.push('row')
+      throw new Error(
+        'the office resumed a colleague through its own row context; a source reload would dispose that colleague mid-turn',
+      )
+    },
+  }
+
   const ctx = {
     storageDomain: {
       open: async (spec) => {
@@ -503,28 +555,17 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
         return () => globalTools.delete(definition.name)
       },
     },
-    agents: {
-      get: sessionId => liveAgents.get(sessionId),
-      list: () => [...liveAgents.values()],
-      resume: async (options) => {
-        if (options?.agentOptions === undefined) {
-          throw new Error('resume must carry agentOptions: the provider/model prompt variables read agent.options')
-        }
-        // A single failed resume models the transient failure a real deployment hits (a
-        // session that cannot be brought up right now). The message stays stored and unseen,
-        // which is the case a later wake has to carry.
-        if (features.failResumeOnce === true && !failures.resume) {
-          failures.resume = options.resumeSessionId
-          throw new Error(`resume failed for ${options.resumeSessionId}`)
-        }
-        resumed.push({ sessionId: options.resumeSessionId, agentOptions: options.agentOptions })
-        if (features.slowResumeMs !== undefined) {
-          // A cold start that takes a moment, which is when the channel can move on between the
-          // message being stored and the colleague being handed it.
-          await new Promise(resolve => setTimeout(resolve, features.slowResumeMs))
-        }
-        const agent = publish(options.resumeSessionId)
-        return { agent, dispose: async () => {} }
+    agents: rowAgents,
+    // Cordis hands every context the application root, and the office resumes a colleague
+    // through it so the colleague outlives this plugin generation.
+    root: {
+      agents: {
+        get: sessionId => liveAgents.get(sessionId),
+        list: () => [...liveAgents.values()],
+        resume: (options) => {
+          resumePlanes.push('process')
+          return resumeAgent(options)
+        },
       },
     },
     on: (event, listener) => {
@@ -3962,6 +4003,15 @@ await check('an idle notice that could not reach anybody is refused with the row
   await assert.rejects(
     () => makeHarness({ idleNotice: { enabled: true, wake: ['boss'] } }).ready,
     /wake addresses colleagues as "@name"/,
+  )
+})
+
+await check('every cold resume is owned by the process context, not by this plugin generation', () => {
+  assert.ok(resumePlanes.length > 0, 'the suite resumed a colleague, so the plane was observed')
+  assert.deepEqual(
+    [...new Set(resumePlanes)],
+    ['process'],
+    'a resume through the office row would make a source reload dispose the colleague mid-turn',
   )
 })
 

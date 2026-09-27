@@ -1272,6 +1272,23 @@ function createOffice(ctx, domain, config, hooks) {
   const pendingWakes = domain.table('pending')
   const notices = domain.table('notices')
 
+  /**
+   * The context a colleague's agent is resumed through.
+   *
+   * `agents.resume()` binds the agent's and its session's teardown to the **fiber of the context
+   * it is accessed through**: the loop registers `agentLoop.lifecycle(<id>)` on that context, and
+   * unloading the fiber disposes the agent and the session with it. This row is a generation that
+   * a source hot reload, a profile-patch reload, or a remount replaces, so resuming through the
+   * row's own context makes every colleague the office has woken a child of that generation:
+   * reloading this plugin then disposes them mid-turn — their last event is `turn/end`
+   * `{"reason":{"kind":"aborted","reason":{"kind":"disposed"}}}` — and, because the harness
+   * reports `session/disposed` as `api-session/removed`, their rows leave the Web sidebar until
+   * something wakes them again. The process root context outlives every plugin generation, so a
+   * colleague resumed through it keeps its context across one. Reads (`agents.get`, `agents.list`)
+   * stay on this row's context: only a resume takes ownership.
+   */
+  const processCtx = ctx.root
+
   /** The session's committed title, or undefined when none exists yet. */
   const readTitle = async (sessionId) => {
     const query = ctx.get('sessionQuery')
@@ -1573,20 +1590,21 @@ function createOffice(ctx, domain, config, hooks) {
   /**
    * The live agent of one colleague, cold-resuming its session when it is not loaded.
    *
-   * `ctx.agents.resume` is the only harness operation that reaches an inactive ordinary
-   * session. The handle is deliberately not retained: the agent stays live in the registry for
-   * the plugin's lifetime, because disposing it would tear the session down underneath a
-   * browser that has it open.
+   * `agents.resume` is the only harness operation that reaches an inactive ordinary session. The
+   * handle is deliberately not retained: the agent stays live in the registry, because disposing
+   * it would tear the session down underneath a browser that has it open.
+   *
+   * The resume goes through {@link processCtx} rather than this row's own context, because the
+   * call decides who owns the resumed agent: see that constant for what a row-owned colleague
+   * costs a reload. The two-argument `(ownerCtx, options)` form is the lower-level agentLoop
+   * factory contract, not a service call.
    * @param sessionId - the colleague's session id.
    * @returns the agent that can be handed a turn.
    */
   const ensureAgent = async (sessionId) => {
     const live = ctx.agents.get(sessionId)
     if (live !== undefined) return live
-    // AgentRegistry.resume takes only the options and binds ownership to the
-    // calling fiber; the two-argument (ownerCtx, options) form is the
-    // lower-level agentLoop factory contract.
-    const handle = await ctx.agents.resume({
+    const handle = await processCtx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: await resolveRoute(sessionId),
     })

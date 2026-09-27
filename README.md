@@ -325,6 +325,13 @@ with them, so dismissing a colleague hands the session back its own preset's too
 installs or withdraws anything: an office mounting or unmounting, and a roster gaining, losing, or
 re-roling a session, each only ask the host to bring the affected agents back in line.
 
+**A colleague's agent is not owned by the office row.** Waking a cold colleague resumes its session
+through the process root context rather than the row's own, because Cordis binds a resumed agent's
+teardown to the context the resume was made through: a row-owned colleague would be disposed by the
+next source hot reload, profile-patch reload, or remount of that row — killed mid-turn if it was
+working — and the harness reports that disposal as a removal from the Web session list. The office
+is developed against a live host, so a generation reload has to be an event colleagues survive.
+
 ### Result shape
 
 Every office tool's result carries `office`, the name of the office that produced it, so a

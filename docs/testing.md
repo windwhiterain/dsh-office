@@ -42,7 +42,9 @@ What it covers, by area:
   the user and carry the one delivery line. A `step-end` wake is covered too: the steer into a
   running turn, the hold released when the harness claims the message, the recovery of a wake
   nothing claimed (still pending, discarded, or carried across a restart), and the hold deleted with
-  a deleted channel.
+  a deleted channel. Every cold resume the suite performs is also checked for its **owning context**:
+  the fakes accept a resume only on the process context (`ctx.root`) and refuse one on an office row,
+  because a row-owned colleague is what a plugin reload would dispose mid-turn.
 - **`office_read_notifications`** — taking a steered and a held notification in one read, the inbox
   copy going back with the hold so no step delivers it twice, the delivery recorded as `delivered`,
   the message left in its channel and in `office_read`, reading twice taking nothing, a colleague
