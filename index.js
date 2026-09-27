@@ -213,11 +213,9 @@ const DEFAULT_IDLE_NOTICE = {
   enabled: false,
   channel: GENERAL_CHANNEL,
   wake: ['#leader'],
-  text: 'The office is idle: every colleague has stopped and no turn is running. Leaders, decide '
-    + 'what happens next — name the work and who takes it, and post the decision where the office '
-    + 'records it, so the colleagues it concerns are woken. This notice arrives only when something '
-    + 'new happened in the office; if nothing should happen next, answer nothing and the office '
-    + 'stays quiet.',
+  text: 'The office is idle. Leaders, decide what happens next — post the work and who takes it, '
+    + 'waking whoever it concerns. If nothing should happen, answer nothing: the office asks again '
+    + 'only after something new is written.',
 }
 
 /** The one record the `notices` table holds: the idle notice the office sent last. */

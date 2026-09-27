@@ -391,10 +391,9 @@ idleNotice:
   channel: general
   wake: ['#leader']
   text: >-
-    The office is idle: every colleague has stopped and no turn is running. Leaders, decide what
-    happens next — name the work and who takes it, and post the decision where the office records
-    it, so the colleagues it concerns are woken. This notice arrives only when something new
-    happened in the office; if nothing should happen next, answer nothing and the office stays quiet.
+    The office is idle. Leaders, decide what happens next — post the work and who takes it, waking
+    whoever it concerns. If nothing should happen, answer nothing: the office asks again only after
+    something new is written.
 ```
 
 `wake` takes the same spellings every other message takes, so a deployment that would rather ask a

@@ -592,6 +592,14 @@ Three properties decide its shape.
   the user speaking, and naming a colleague would attribute the office's question to that
   colleague.
 
+**The default text is a prompt, not an announcement.** It is written into the session of every
+leader it wakes and re-sent with every later request of that session, so the default is 216
+characters where it used to be 373. What the cut removed was the state the frame already carries:
+the notice arrives as a delivery frame, and a leader's frame now states the office's load, so
+"every colleague has stopped and no turn is running" was a second reading of the same fact. What
+the text keeps is what a leader cannot read anywhere else at that moment — decide what happens
+next, and silence is a legitimate answer, because the office asks again only after new work.
+
 Two conditions are refusals rather than defaults. `wakesEnabled: false` is a promise that no session
 is ever woken, and a question nobody is woken for is not a question, so such an office writes
 nothing. And a configured channel the office does not hold fails the send rather than the question:
