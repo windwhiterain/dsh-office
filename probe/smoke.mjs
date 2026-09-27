@@ -1476,8 +1476,17 @@ await check('a leader reading its held mail is told the office it is reading it 
     'Office parallelism: 2/2 — 2 colleague(s) in the roster, 2 working.',
     'the figure is read in the turn that asks for the mail',
   )
+  assert.equal(
+    read.rosterChanges,
+    'Roster changed since you were last notified.',
+    'the roster line is read at the call too: the member that joined after this leader was recorded moved it',
+  )
   const rendered = lead.tools.get('office_read_notifications').output.render({}, read)[0].text
-  assert.match(rendered, /Office parallelism: 2\/2 — 2 colleague\(s\) in the roster, 2 working\./)
+  assert.match(
+    rendered,
+    /Roster changed since you were last notified\.\n\nOffice parallelism: 2\/2 — 2 colleague\(s\) in the roster, 2 working\./,
+    'the read frame orders the two lines the way a delivered frame does',
+  )
   assert.ok(
     rendered.endsWith('(What you write yourself reaches only the user; only an office tool notifies a colleague.)'),
     'the rule a frame ends with stays last',
@@ -1915,6 +1924,77 @@ await check('a leader is told how loaded the office is, and a member is not', as
     !memberFrame.includes('Office parallelism'),
     'the office load is a leader\'s context, not a line every colleague reads',
   )
+})
+
+await check('a leader is told the roster moved, once per change and for itself alone', async () => {
+  const shifts = makeHarness({ officeName: 'shifts' })
+  await shifts.ready
+  const chief = shifts.publish('session-shifts-boss', { preset: 'office-boss' })
+  shifts.titles.set('session-shifts-boss', 'chief')
+  for (const [sessionId, title] of [
+    ['session-shifts-lea', 'lea'],
+    ['session-shifts-lia', 'lia'],
+    ['session-shifts-mal', 'mal'],
+  ]) {
+    shifts.titles.set(sessionId, title)
+  }
+  const lea = shifts.publish('session-shifts-lea')
+  const lia = shifts.publish('session-shifts-lia')
+  const mal = shifts.publish('session-shifts-mal')
+  await callBoss(chief, 'shifts', 'office_adopt', { session_id: 'session-shifts-lea', role: 'leader' })
+  await callBoss(chief, 'shifts', 'office_adopt', { session_id: 'session-shifts-lia', role: 'leader' })
+  await callBoss(chief, 'shifts', 'office_adopt', { session_id: 'session-shifts-mal' })
+  const frame = agent => agent.sent.at(-1).message.content[0].text
+
+  // The member that joined after both leaders were recorded is what moved the roster, and the frame
+  // that follows says so — once. The next frame has nothing to add, so it says nothing.
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lea'], text: 'first' })
+  assert.match(frame(lea), /Roster changed since you were last notified\./)
+  assert.match(
+    frame(lea),
+    /Roster changed since you were last notified\.\n\nOffice parallelism: /,
+    'the roster line comes before the load line and above the one rule the frame carries',
+  )
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lea'], text: 'second' })
+  assert.ok(
+    !frame(lea).includes('Roster changed'),
+    'a change is reported once, not on every frame that follows it',
+  )
+
+  // The baseline is per reader: the same change reaches the second leader on its own frame rather
+  // than being consumed by whoever was notified first.
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lia'], text: 'lia, first' })
+  assert.match(frame(lia), /Roster changed since you were last notified\./)
+
+  // What a colleague is, and who a colleague is, are roster changes too: a description, a rename,
+  // and a dismissal each make the office say it again.
+  await callBoss(chief, 'shifts', 'office_configure', { name: 'mal', description: 'owns the parser' })
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lea'], text: 'after the notes changed' })
+  assert.match(frame(lea), /Roster changed since you were last notified\./)
+  await callBoss(chief, 'shifts', 'office_adopt', { session_id: 'session-shifts-mal', name: 'mal two' })
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lea'], text: 'after the rename' })
+  assert.match(frame(lea), /Roster changed since you were last notified\./)
+  await callBoss(chief, 'shifts', 'office_configure', { name: 'mal two', description: 'owns the parser' })
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lea'], text: 'the same notes again' })
+  assert.ok(
+    !frame(lea).includes('Roster changed'),
+    'configuring what the office already holds is not a change',
+  )
+  // A member is told nothing about the roster and keeps no baseline of its own: the line is a
+  // leader's, and a member's frame is the message it has to answer.
+  mal.sent.length = 0
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@mal two'], text: 'mal, take a look' })
+  assert.ok(!frame(mal).includes('Roster changed'))
+  assert.ok(!frame(mal).includes('Office parallelism'))
+  assert.equal(
+    shifts.tables.get('colleagues').get('session-shifts-mal').rosterSeen,
+    undefined,
+    'a member holds no roster baseline, because it is told nothing about the roster',
+  )
+
+  await callBoss(chief, 'shifts', 'office_dismiss', { name: 'mal two' })
+  await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lea'], text: 'after the dismissal' })
+  assert.match(frame(lea), /Roster changed since you were last notified\./)
 })
 
 await check('the panel routes read state and post to the public channel', async () => {

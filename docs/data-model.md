@@ -21,8 +21,11 @@ slot, and five tables:
 
 The unit is named by the id rather than by the name because the storage hub requires a unit name
 to match `/^[a-z][a-z0-9_]*$/` — a backend turns it into a file-name or SQL-identifier segment —
-while an office name accepts any script. The **global slot holds `{ officeId, name }`**: the name
-is data, which is what lets an office be renamed without moving its storage.
+while an office name accepts any script. The **global slot holds `{ officeId, name, rosterRevision? }`**:
+the name is data, which is what lets an office be renamed without moving its storage, and the
+revision is how many times the roster has changed since the office activated. A field of its own
+rather than a table record, because it is office-wide state and every write to it restates the whole
+slot — see [the roster line](delivery.md#the-roster-line) for what advances it and who reads it.
 
 The global is read on activation and treated as authoritative from then on:
 
@@ -44,7 +47,7 @@ as a malformed tool result.
 
 | Table | Key | Record |
 |---|---|---|
-| `colleagues` | session id | `{ sessionId, role, description?, adoptedAt }` |
+| `colleagues` | session id | `{ sessionId, role, description?, adoptedAt, rosterSeen? }` |
 | `channels` | channel id | `{ channelId, kind, name, topic, members, createdAt, nextSeq }` |
 | `messages` | `<channelId>#<seq>` | `{ messageId, channelId, channelName, kind, seq, senderName, senderSessionId?, recipients, text, createdAt, deliveries, covers?, replaced?, origin? }` |
 | `pending` | `<sessionId>#<messageId>` | `{ sessionId, channelId, seq, at }` |
@@ -61,14 +64,17 @@ session is a colleague of an office at most once.
 | `role` | One of `member`, `leader`, `consultant`. Canonicalized on **every** write, so a stored value that is absent or no longer predefined reads as `member` and is rewritten as such. |
 | `description` | Optional. Trimmed, at most 2000 characters, and removed entirely when the caller passes an empty string, so the field is absent rather than empty. It reaches the colleague's onboarding turn, the roster, and the panel. |
 | `adoptedAt` | When the session entered the roster; preserved across a re-adopt or a role change. |
+| `rosterSeen` | On a **leader** only: the [roster revision](delivery.md#the-roster-line) this colleague has been told. Absent until the office tells it one, which is what makes a promoted member start from the office it finds rather than from a change it never saw. |
 
 `validateColleague` requires `sessionId` to be a string and, when present, `role` and
 `description` to be strings. Both optional fields reach a declared tool result schema, which
 types every key it lists, so a hand-edited medium carrying a number there must fail at the read
 rather than at the tool.
 
-`role` and `description` are the only per-colleague facts the office stores. Everything else a
-roster reports — status, effective permission, model route, held messages, last activity — is
+`role` and `description` are the only per-colleague facts the office stores about **what a colleague
+is**; `rosterSeen` is a fact about **what it has been told**, reaches no tool result, and is absent
+on every colleague that is told nothing. Everything else a roster reports — status, effective
+permission, model route, held messages, last activity — is
 read at the moment it is asked for and is therefore never stale in storage. The model route in
 particular is read from the session's own `modelSelection` projection, which is the value the Web
 UI shows (a pending selection wins over the one last used), not from `agent.options`: that field

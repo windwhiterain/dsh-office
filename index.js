@@ -1186,6 +1186,17 @@ function parallelismLine(parallelism) {
 }
 
 /**
+ * The line a leader's frame carries when the roster moved since the office last told it.
+ *
+ * It states the fact and stops, because the fact is the whole message: a leader dispatches from
+ * what it knows about the people in the office, and a colleague hired, dismissed, renamed, or
+ * re-described since makes that knowledge wrong. What changed is one `office_colleagues` call away,
+ * and quoting it here would put a roster listing into the history of every frame — see
+ * {@link rosterRevision} for what counts as a change and {@link leaderLines} for when it is said.
+ */
+const ROSTER_CHANGED_LINE = 'Roster changed since you were last notified.'
+
+/**
  * Compose the model-visible framing of one delivered office message.
  *
  * The frame names the sender as a colleague or as the user, the destination, and the message
@@ -1198,10 +1209,11 @@ function parallelismLine(parallelism) {
  * @param message - the stored message record that triggered the wake.
  * @param newestSeq - the channel's newest sequence when this turn was queued, when known.
  * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
- * @param parallelism - the office's load line, when this reader is told it.
+ * @param lines - the office's own lines for this reader: `rosterChanges` when the roster moved since
+ *   it was last told, and `parallelism`, each absent for a reader that is told neither.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameDelivery(message, newestSeq, userName, parallelism) {
+function frameDelivery(message, newestSeq, userName, lines = {}) {
   const freshness = newestSeq === undefined || newestSeq <= message.seq
     ? undefined
     : `(${channelLabel(message)} had already reached ${message.channelId}-${String(newestSeq)} when this turn was queued; newer messages are not in it.)`
@@ -1209,7 +1221,8 @@ function frameDelivery(message, newestSeq, userName, parallelism) {
     `[office ${whereOf(message, userName)} | ${message.messageId}]`,
     message.text,
     freshness,
-    parallelism,
+    lines.rosterChanges,
+    lines.parallelism,
     OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined)
     .join('\n\n')
@@ -1227,11 +1240,11 @@ function frameDelivery(message, newestSeq, userName, parallelism) {
  * @param messages - the batched messages, oldest first.
  * @param newestSeq - the newest sequence of the last message's channel, when known.
  * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
- * @param parallelism - the office's load line, when this reader is told it.
+ * @param lines - the office's own lines for this reader, as {@link frameDelivery} takes them.
  * @returns the framed text delivered as the colleague's user turn.
  */
-function frameBatch(officeName, messages, newestSeq, userName, parallelism) {
-  if (messages.length === 1) return frameDelivery(messages[0], newestSeq, userName, parallelism)
+function frameBatch(officeName, messages, newestSeq, userName, lines) {
+  if (messages.length === 1) return frameDelivery(messages[0], newestSeq, userName, lines)
   const last = messages.at(-1)
   const freshness = newestSeq === undefined || newestSeq <= last.seq
     ? undefined
@@ -1240,7 +1253,8 @@ function frameBatch(officeName, messages, newestSeq, userName, parallelism) {
     `[office ${officeName} | ${String(messages.length)} messages arrived while you were working]`,
     ...messages.map(message => `[office ${whereOf(message, userName)} | ${message.messageId}]\n${message.text}`),
     freshness,
-    parallelism,
+    lines?.rosterChanges,
+    lines?.parallelism,
     OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined).join('\n\n')
 }
@@ -1257,10 +1271,10 @@ function frameBatch(officeName, messages, newestSeq, userName, parallelism) {
  * @param officeName - the office the notifications came from.
  * @param notifications - the read notifications, oldest first, as the tool reported them.
  * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
- * @param parallelism - the office's load line, when this reader is told it.
+ * @param lines - the office's own lines for this reader, as {@link frameDelivery} takes them.
  * @returns the framed text of the tool result.
  */
-function frameNotifications(officeName, notifications, userName, parallelism) {
+function frameNotifications(officeName, notifications, userName, lines = {}) {
   const headline = notifications.length === 1
     ? '1 notification was held for you, read here on request:'
     : `${String(notifications.length)} notifications were held for you, read here on request:`
@@ -1270,9 +1284,13 @@ function frameNotifications(officeName, notifications, userName, parallelism) {
       : ''
     return `[office ${whereOf(notification, userName)} | ${notification.messageId}]${held}\n${notification.text}`
   })
-  return [ `[office ${officeName}] ${headline}`, ...frames, parallelism, OFFICE_DELIVERY_NOTE ]
-    .filter(line => line !== undefined)
-    .join('\n\n')
+  return [
+    `[office ${officeName}] ${headline}`,
+    ...frames,
+    lines.rosterChanges,
+    lines.parallelism,
+    OFFICE_DELIVERY_NOTE,
+  ].filter(line => line !== undefined).join('\n\n')
 }
 
 /** Distinguishing short form of a session id, for an unnamed sender in a transcript. */
@@ -1713,15 +1731,15 @@ function createOffice(ctx, domain, config, hooks) {
    *   delivery that opens a turn, {@link STEERED_MESSAGE_KIND} for a splice into a running one.
    * @returns the message payload to hand to the colleague's session.
    */
-  const batchPayload = (batch, newestSeq, recipient, sourceKind = OFFICE_MESSAGE_KIND) => {
+  const batchPayload = async (batch, newestSeq, recipient, sourceKind = OFFICE_MESSAGE_KIND) => {
     const newest = batch.at(-1)
-    // The line is composed here — at the moment the office hands the turn over — rather than when
-    // the message was written or held, and never stored: see {@link parallelismLine}.
-    const parallelism = parallelismFor(recipient?.role)
+    // The lines are composed here — at the moment the office hands the turn over — and the roster
+    // revision this reader has been told advances with them: see {@link leaderLines}.
+    const lines = await leaderLines(recipient)
     return {
       id: wakeIdOf(newest),
       role: 'user',
-      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, config.userName, parallelism) }],
+      content: [{ type: 'text', text: frameBatch(name(), batch, newestSeq, config.userName, lines) }],
       // Every field here reaches the session log, which is JSON, and the harness rejects a
       // value JSON cannot round-trip — `undefined` among them. A message the user posted
       // from the panel has no sender session, so that field must be absent rather than present
@@ -1763,7 +1781,7 @@ function createOffice(ctx, domain, config, hooks) {
   /** Release one colleague's held wakes: the records go only after their turn is queued. */
   const releaseWakes = async (sessionId, held, agent) => {
     const colleague = colleagueBySession(sessionId)
-    agent.followup(batchPayload(held.map(entry => entry.message), undefined, colleague))
+    agent.followup(await batchPayload(held.map(entry => entry.message), undefined, colleague))
     for (const entry of held) await recordReleased(entry, sessionId, held.length)
   }
 
@@ -1945,7 +1963,7 @@ function createOffice(ctx, domain, config, hooks) {
     const agent = await ensureAgent(colleague.sessionId)
     if (agent.status !== 'idle' && notify === NOTIFY_STEP_END) {
       await holdWake(colleague.sessionId, message, NOTIFY_STEP_END)
-      agent.steer(batchPayload([message], undefined, colleague, STEERED_MESSAGE_KIND))
+      agent.steer(await batchPayload([message], undefined, colleague, STEERED_MESSAGE_KIND))
       await recordDelivery(key, colleague.sessionId, {
         status: 'steered',
         at: Date.now(),
@@ -1965,7 +1983,7 @@ function createOffice(ctx, domain, config, hooks) {
     const held = await recoverStepEndWakes(colleague.sessionId, heldWakes(colleague.sessionId), agent)
     const batch = [...held.map(entry => entry.message), message]
     const newest = readMessages(message.channelId, 1).at(-1)
-    agent.followup(batchPayload(batch, newest?.seq, colleague))
+    agent.followup(await batchPayload(batch, newest?.seq, colleague))
     for (const entry of held) await recordReleased(entry, colleague.sessionId, batch.length)
     await recordDelivery(key, colleague.sessionId, {
       status: 'delivered',
@@ -2248,7 +2266,21 @@ function createOffice(ctx, domain, config, hooks) {
       role: nextRole,
       description: description === undefined ? existing?.description : normalizeDescription(description, 'adopt'),
       adoptedAt: existing?.adoptedAt ?? Date.now(),
+      // What this colleague has already been told about the roster travels with it: a re-adopt is
+      // not news to the colleague being adopted.
+      rosterSeen: existing?.rosterSeen,
     })
+    // A colleague joining is a change to the roster; so is a re-adopt that changed what it is. A
+    // change back to what the office already held is not.
+    const joined = existing === undefined
+    const changed = joined
+      || canonicalRole(existing.role) !== nextRole
+      || existing.description !== record.description
+    const revision = changed ? await noteRosterChange() : undefined
+    // A leader that joins is recorded at the revision its own arrival created, so the first frames
+    // it receives are not a report of itself. A member keeps no baseline: it is told nothing about
+    // the roster, and a promotion starts one at whatever the office holds by then.
+    if (joined && nextRole === ROLE_LEADER) record.rosterSeen = revision
     await colleagues.put(sessionId, record)
     hooks.onAdopted(sessionId)
     return { record, permission }
@@ -2283,6 +2315,11 @@ function createOffice(ctx, domain, config, hooks) {
         ? (changes.description === undefined ? undefined : normalizeDescription(changes.description, 'configure'))
         : existing.description,
     })
+    // A role or a description a leader dispatched from is a change to the roster, and a change back
+    // to what the office already held is not.
+    if (canonicalRole(existing.role) !== nextRole || existing.description !== record.description) {
+      await noteRosterChange()
+    }
     await colleagues.put(sessionId, record)
     hooks.onConfigured(sessionId)
     return { record, permission }
@@ -2387,18 +2424,82 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
-   * The load line one reader's frame carries, or undefined when that reader is told nothing.
+   * The roster revision: one number that moves whenever the roster or a colleague's facts change.
    *
-   * Only a leader is told, because the figure is what a colleague deciding what the office does
-   * next reads, and a member's frame is the message it has to answer rather than a status board.
-   * The tally is taken per frame and never cached, so the reader sees the office as it was when
-   * the office handed the turn over.
-   * @param role - the recipient's stored role, in this office.
-   * @returns the model-visible line, or undefined.
+   * A version number rather than a snapshot of the roster, because the office only ever tells a
+   * leader **that** the roster moved, never what it moved to: what a colleague needs is to know
+   * that what it learned about the people here is no longer true, and the current roster is one
+   * `office_colleagues` call away. Storing the difference would mean keeping one copy of the roster
+   * per leader — a listing in storage that nothing reads.
+   *
+   * It is a monotonic number and not a timestamp for the reason the idle notice compares message
+   * identities: a colleague hired in the same millisecond as a frame was composed is exactly as new
+   * as that frame, so a clock would have to guess which of the two it was looking at. The revision
+   * lives in the domain's global slot and is absent until the first change, which reads as revision
+   * 0: the roster the office activated with.
+   * @returns the current revision.
    */
-  const parallelismFor = (role) => (canonicalRole(role) === ROLE_LEADER
-    ? parallelismLine(officeParallelism())
-    : undefined)
+  const rosterRevision = () => {
+    const value = domain.global.get()?.rosterRevision
+    return typeof value === 'number' ? value : 0
+  }
+
+  /**
+   * Advance the roster revision, for one change to who is in the roster or to what a colleague is.
+   *
+   * `set` replaces the global wholesale, so the stored value is restated rather than one field
+   * written: a write that dropped the office name would be a rename undone by the next hire.
+   * @returns the new revision.
+   */
+  const noteRosterChange = async () => {
+    const next = rosterRevision() + 1
+    await domain.global.set({ ...domain.global.get(), rosterRevision: next })
+    return next
+  }
+
+  /**
+   * Record the roster revision one colleague has just been told.
+   *
+   * The write is `update` rather than `put` so it cannot lose a change made while the frame was
+   * being composed: the storage layer applies it to the record current at its queue slot. A
+   * colleague that left the roster in that window has no record to write, and nothing depends on
+   * the write, so that failure is contained.
+   * @param sessionId - the colleague that was told.
+   * @param revision - the revision it was told.
+   */
+  const markRosterSeen = async (sessionId, revision) => {
+    try {
+      await colleagues.update(sessionId, record => ({ ...record, rosterSeen: revision }))
+    } catch {
+      // The record is gone: the colleague was dismissed while this frame was being composed.
+    }
+  }
+
+  /**
+   * The lines only a leader's frame carries, or an empty object for every other reader.
+   *
+   * Both say something a leader decides with, and neither is stored on the message. The roster line
+   * is the office saying that what this reader knows about the people here is out of date; the load
+   * line is where the office stands at this instant. The roster line is said once per change rather
+   * than once per frame: the revision the reader has been told advances with the frame that reports
+   * it, so a burst tells it the same thing once, and only the next change makes it speak again.
+   *
+   * A reader with no revision recorded has nothing to be told about — it is a session adopted before
+   * this line existed, or a member that has just been made a leader — so the office records the
+   * revision it sees instead of greeting it with a change it never saw.
+   * @param recipient - the reader's roster record, or undefined when it is not a colleague.
+   * @returns the lines this reader's frame carries.
+   */
+  const leaderLines = async (recipient) => {
+    if (canonicalRole(recipient?.role) !== ROLE_LEADER) return {}
+    const revision = rosterRevision()
+    const seen = typeof recipient.rosterSeen === 'number' ? recipient.rosterSeen : undefined
+    if (seen !== revision) await markRosterSeen(recipient.sessionId, revision)
+    return compact({
+      rosterChanges: seen === undefined || seen === revision ? undefined : ROSTER_CHANGED_LINE,
+      parallelism: parallelismLine(officeParallelism()),
+    })
+  }
 
   /**
    * The roster with each colleague's live status, for the roster tools and the panel.
@@ -2550,6 +2651,9 @@ function createOffice(ctx, domain, config, hooks) {
       throw new Error('dsh-office: renaming requires the session controller; mount @deepseek-ai/dsh-api-session-controller')
     }
     await controller.rename({ sessionId, title: trimmed })
+    // A colleague's name is its session title, so renaming one is a change to the roster. A session
+    // the office never adopted is not one of its people, and renaming it changes nothing here.
+    if (colleagueBySession(sessionId) !== undefined) await noteRosterChange()
     return trimmed
   }
 
@@ -2700,6 +2804,8 @@ function createOffice(ctx, domain, config, hooks) {
     if (existing === undefined) return undefined
     const name = await nameOf(sessionId)
     await colleagues.delete(sessionId)
+    // A dismissal is a change to the roster whether or not anybody asks about it afterwards.
+    await noteRosterChange()
     // A dismissed colleague does not keep the office's messages pending: nothing will deliver
     // them, and the office would hold them for ever.
     for (const entry of heldWakes(sessionId)) await pendingWakes.delete(entry.pendingKey)
@@ -2792,7 +2898,7 @@ function createOffice(ctx, domain, config, hooks) {
     if (typeof next !== 'string' || !OFFICE_NAME_RE.test(canonical)) {
       throw new TypeError(`an office name must be letters, digits, or underscores in any script, got ${JSON.stringify(next)}`)
     }
-    await domain.global.set({ officeId: config.officeId, name: canonical })
+    await domain.global.set({ ...domain.global.get(), officeId: config.officeId, name: canonical })
     return canonical
   }
 
@@ -2827,7 +2933,7 @@ function createOffice(ctx, domain, config, hooks) {
     configure,
     applyRolePermission,
     rosterStatus,
-    parallelismFor,
+    leaderLines,
     liveAgent,
     dismiss,
     rename,
@@ -4406,9 +4512,10 @@ function createNotificationsTool(agent, tool, userName) {
         required: ['office', 'notifications'],
         properties: {
           office: { type: 'string' },
-          // The office's load line, present only for a leader and only when something was held:
-          // the render below puts it in the frame rather than leaving it as a separate fact beside
-          // it, because what the reader is handed is one piece of mail, not a status report.
+          // The office's own lines, present only for a leader and only when something was held:
+          // the render below puts them in the frame rather than leaving them as separate facts
+          // beside it, because what the reader is handed is one piece of mail, not a status report.
+          rosterChanges: { type: 'string' },
           parallelism: { type: 'string' },
           notifications: {
             type: 'array',
@@ -4434,7 +4541,10 @@ function createNotificationsTool(agent, tool, userName) {
       },
       render: (_args, value) => (value.notifications.length === 0
         ? text(`[office ${value.office}] Nothing was held for you.`)
-        : text(frameNotifications(value.office, value.notifications, userName, value.parallelism))),
+        : text(frameNotifications(value.office, value.notifications, userName, {
+          rosterChanges: value.rosterChanges,
+          parallelism: value.parallelism,
+        }))),
     },
     async execute(args) {
       const resolved = tool.entry(args, name)
@@ -4443,11 +4553,13 @@ function createNotificationsTool(agent, tool, userName) {
       // The caller is executing a tool inside its own turn, so its agent is live: the handle is
       // read rather than resumed, because taking a hold must never be what loads a session.
       const taken = await office.takeWakes(sender.sessionId, office.liveAgent(sender.sessionId))
+      // Read at the call, so the lines describe the office the leader is reading its mail in. An
+      // empty read takes nothing, so it is handed no frame and composes no lines.
+      const lines = taken.length === 0 ? {} : await office.leaderLines(office.colleagueBySession(sender.sessionId))
       return compact({
         office: officeName,
-        // Read at the call, so the figure is the office the leader is reading its mail in; an
-        // empty read carries none, because the render hands back a sentence and no frame.
-        parallelism: taken.length === 0 ? undefined : office.parallelismFor(tool.roleIn(resolved)),
+        rosterChanges: lines.rosterChanges,
+        parallelism: lines.parallelism,
         notifications: taken.map(({ message, stepEnd }) => compact({
           messageId: message.messageId,
           channelId: message.channelId,
@@ -5733,7 +5845,10 @@ async function applyOffice(ctx, raw, rowId) {
     ? canonicalName(stored.name)
     : canonicalName(legacyName ?? config.officeName)
   if (stored?.name !== name || stored?.officeId !== config.officeId) {
-    await domain.global.set({ officeId: config.officeId, name })
+    // Restated rather than replaced: the slot also carries the roster revision, which a seeding
+    // write must not reset. `label` is the older spelling of `name` and is not carried forward.
+    const { label: _legacyLabel, ...rest } = stored ?? {}
+    await domain.global.set({ ...rest, officeId: config.officeId, name })
   }
 
   // Both halves of the identity must be unique in this process. A storage backend rejects a

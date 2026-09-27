@@ -308,9 +308,51 @@ The frame carries **only** the messages it names. The office does not replay the
 wake and a colleague has no read position: `office_read` is how anyone sees what they were not
 notified about, which keeps a turn's cost proportional to the messages in it.
 
+### The roster line
+
+A **leader**'s frame carries one more line when there is something to say:
+
+```text
+Roster changed since you were last notified.
+```
+
+It states the fact and stops. What changed is what `office_colleagues` answers, and quoting it here
+would put a roster listing into the receiving session's history once per delivered message, for the
+life of that history — the reason [the frame carries so little](#the-frame) in the first place. What
+the reader needs is not the listing: it is to know that what it learned about the people here is no
+longer true.
+
+One number decides when the line is said. The office keeps a **roster revision** that advances on
+every change to who is in the roster or to what a colleague is — a colleague adopted or dismissed, a
+role or a description configured, a colleague renamed — and each leader's own record carries the
+revision it was last told. A frame whose reader is behind says the line, and advances that record to
+the revision it reported, which is what makes it **one line per change rather than one per frame**:
+a burst tells a leader the same thing once, and only the next change makes the office speak again.
+
+A version number rather than a timestamp, for the reason the idle notice compares message identities
+rather than clocks: a colleague hired in the same millisecond as a frame was composed is exactly as
+new as that frame, and a clock would have to guess which of the two it was looking at. The revision
+lives in the office's [global slot](data-model.md#one-domain-per-office); the revision a colleague
+has been told lives on [its own roster record](data-model.md#colleagues).
+
+Only a leader is told, and only a leader keeps the baseline. A reader that has none — a session
+adopted before this line existed, or a member that has just been promoted — is recorded at whatever
+the office holds then, rather than greeted with a change it never saw: a member is told nothing about
+the roster, so its baseline starts at its promotion.
+
+Two changes the revision does **not** move for are worth knowing. A **rename from outside the
+office** — the Web sidebar, or any tool other than an office tool — changes the name every surface
+shows without passing through the office, so the line stays quiet for it; `office_colleagues` is what
+answers what a colleague is called. And a write to the storage medium by hand moves nothing at all.
+
+The baseline advances with the frame, so a frame that then fails to deliver has still been reported:
+the office does not repeat a change for a colleague it could not reach, and `office_colleagues`
+answers the roster itself whenever that colleague is next reached. What the line is for is a reader
+that is working from memory, and a reader the office could not hand a turn to is not acting on one.
+
 ### The load line
 
-A **leader**'s frame carries a second line, taken from the live registry as the frame is composed:
+A **leader**'s frame carries this line too, taken from the live registry as the frame is composed:
 
 ```text
 [office #general from colleague carol | general-9]
@@ -335,8 +377,9 @@ is **every** colleague, loaded or not: a colleague whose session is not loaded c
 and it is still one of the office's people, so the reader is given both numbers rather than a
 ratio that hides which of the two it is.
 
-The line costs 66 characters for a single-digit roster and 70 for a two-digit one, and it is the
-only delivered text a frame adds besides its own rule line; the budget it belongs to is in
+The line costs 66 characters for a single-digit roster and 70 for a two-digit one. In a frame that
+carries both of the office's lines, the roster line comes first: it explains why the roster is the
+size it is, and the load line is where that roster stands. The budget both belong to is in
 [design.md](design.md#the-model-facing-text-budget).
 
 ## The answering rule
@@ -467,9 +510,10 @@ release is cut
 - **It is not a substitute for `office_read`.** A wake carries only what was addressed to the
   colleague, so a notification read this way is exactly that and no more; the channel record the
   colleague was not notified about is still read with `office_read`.
-- **A leader's read carries [the load line](#the-load-line).** The tool is held by every role, but
-  the figure is read at the call and reported only to a leader, because the reader is deciding in
-  the office it is reading about. The rest of the frame is what a delivery would have handed over.
+- **A leader's read carries [the roster line](#the-roster-line) and [the load line](#the-load-line).**
+  The tool is held by every role, but both lines are read at the call and reported only to a leader,
+  because the reader is deciding in the office it is reading about. The rest of the frame is what a
+  delivery would have handed over.
 
 ## Delivery statuses
 

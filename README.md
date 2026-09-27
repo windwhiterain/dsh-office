@@ -692,6 +692,14 @@ unauthenticated.
   leader is told: the figure is what a colleague deciding what the office does next reads, and a
   member's frame is the message it has to answer. See
   [delivery.md](docs/delivery.md#the-load-line).
+- **A leader is told that the roster moved, and not what it moved to.** One line — `Roster changed
+  since you were last notified.` — says that a colleague was adopted, dismissed, renamed, or
+  re-described since the office last told this leader, because a leader dispatches from what it
+  knows about the people in the office. What changed is what `office_colleagues` answers; a listing
+  in the frame would be copied into that session's history once per delivered message. A roster
+  revision advances on each change and each leader's record carries the revision it was last told,
+  so the line is said once per change rather than once per frame. See
+  [delivery.md](docs/delivery.md#the-roster-line).
 - **Only a hire carries the leader's guide.** A session that is *adopted* as a leader, or promoted
   by `office_configure`, takes no onboarding turn, so nothing ever tells it where the notes are;
   it learns the path from the office's own record or from the operator. The path is resolved

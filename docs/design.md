@@ -117,6 +117,7 @@ carries it, so the surfaces are kept deliberately terse:
 | the delivery contract | `index.js`, `OFFICE_DELIVERY_CONTRACT`, a prompt section in each armed agent's scope | every request of every office session |
 | the onboarding turn | `index.js`, `greet()` | every request of a hired colleague, for the life of its history |
 | one line per delivery frame | `index.js`, `OFFICE_DELIVERY_NOTE` | every request that carries the frame, for the life of that history |
+| the roster line, on a leader's frame | `index.js`, `ROSTER_CHANGED_LINE` | every request that carries a leader's frame that says it, for the life of that history |
 | the load line, on a leader's frame | `index.js`, `parallelismLine` | every request that carries a leader's frame, for the life of that history |
 
 The split of responsibility is the rule that keeps them from growing back:
@@ -167,6 +168,18 @@ reads it and not on every colleague's history: 66 characters for a single-digit 
 two-digit one, plus the blank line it is joined with. The line is in
 [delivery.md](delivery.md#the-load-line).
 
+**The same frame says whether the roster moved, and says nothing more than that.** A leader
+dispatches from what it knows about the people in the office, so a colleague hired, dismissed,
+renamed, or re-described since is a fact its next decision depends on — but *what* changed is one
+`office_colleagues` call away, while a listing in the frame would be copied into that session's
+history once per delivered message. The office therefore keeps a **roster revision** that advances
+on each change, each leader's record carries the revision it was last told, and the frame says one
+44-character line when the two differ. A number rather than a copy of the roster: the office never
+tells a leader what the roster became, so storing it per leader would be a listing that nothing
+reads. A monotonic number rather than a timestamp, for the reason the idle notice compares message
+identities — see [delivery.md](delivery.md#the-roster-line) for the line and what does and does not
+move the revision.
+
 Shared parameters are declared once, by a builder, so a wording change lands in every tool that
 carries them: `officeArgument()`, `roleProperty()`, `descriptionProperty()`, and
 `notifyProperty()`. The `office` argument is the one worth watching, because a boss emits it in
@@ -183,6 +196,7 @@ Measured with the literals concatenated the way the model receives them:
 | a leader's onboarding turn | 2,248 | 857 |
 | the delivery contract, once per request | 0 | 323 |
 | one frame's rule tail | 396 | 90 |
+| the roster line, when a change makes it speak | 0 | 44 |
 | the load line, on a leader's frame | 0 | 66 |
 
 The tool figures include 182 characters that moved *into* `office_post`. The frame tail came down
