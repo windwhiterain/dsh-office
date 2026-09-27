@@ -1680,9 +1680,11 @@ await check('a leader reading its held mail is told the office it is reading it 
     'the read frame orders the two lines the way a delivered frame does',
   )
   assert.ok(
-    rendered.endsWith('(What you write yourself reaches only the user; only an office tool notifies a colleague.)'),
-    'the rule a frame ends with stays last',
-  )
+    rendered.endsWith(
+      "(if you need reply to your colleagues, use office tool with `wake` parameter.)",
+    ),
+    "the rule a frame ends with stays last",
+  );
 
   const memberRead = await call(hand, 'office_read_notifications', {})
   assert.deepEqual(
@@ -2005,25 +2007,31 @@ await check('office_hire passes the agent preset and model route through', async
   assert.equal(fresh.hires.length, before, 'and no session was created on the way to that failure')
 })
 
-await check('a broadcast wakes every colleague except the sender', async () => {
-  const roster = (await callBoss(boss, 'office', 'office_roster', {})).colleagues
-  const all = await call(alice, 'office_post', { text: 'all hands', wake: ['$member'] })
+await check("a broadcast wakes every colleague except the sender", async () => {
+  const roster = (await callBoss(boss, "office", "office_roster", {}))
+    .colleagues;
+  const all = await call(alice, "office_post", {
+    text: "all hands",
+    wake: ["$member"],
+  });
   assert.deepEqual(
-    all.deliveries.map(entry => entry.colleague).sort(),
-    roster.map(entry => entry.name).filter(name => name !== 'Alice Smith').sort(),
-    'every colleague except the sender is addressed',
-  )
-  assert.ok(all.deliveries.every(entry => entry.status === 'delivered'))
-})
-
+    all.deliveries.map((entry) => entry.colleague).sort(),
+    roster
+      .map((entry) => entry.name)
+      .filter((name) => name !== "Alice Smith")
+      .sort(),
+    "every colleague except the sender is addressed",
+  );
+  assert.ok(all.deliveries.every((entry) => entry.status === "delivered"));
+});
 await check('a delivery frame names the sender, the wake, the message, and the one rule it carries', async () => {
   await call(alice, 'office_dm', { wake: ['@bob'], text: 'private note' })
   const dmText = bob.sent.at(-1).message.content[0].text
   assert.match(
     dmText,
-    /^\[office DM from colleague Alice Smith \| wake @bob \| dm-\S+\]\n\nprivate note\n\n\(What you write yourself reaches only the user; only an office tool notifies a colleague\.\)$/,
-    'the frame is the sender, the identity, the wake, the body, and the one line the next action depends on',
-  )
+    /^\[office DM from colleague Alice Smith \| wake @bob \| dm-\S+\]\n\nprivate note\n\n\(if you need reply to your colleagues, use office tool with `wake` parameter\.\)$/,
+    "the frame is the sender, the identity, the wake, the body, and the one line the next action depends on",
+  );
   await call(alice, 'office_post', { text: 'public note', wake: ['@bob'] })
   const publicText = bob.sent.at(-1).message.content[0].text
   assert.match(
@@ -2103,9 +2111,9 @@ await check('a leader is told how loaded the office is, and a member is not', as
   )
   assert.match(
     first,
-    /\(What you write yourself reaches only the user; only an office tool notifies a colleague\.\)$/,
-    'the load line sits above the one rule a frame carries',
-  )
+    /\(if you need reply to your colleagues, use office tool with `wake` parameter\.\)$/,
+    "the load line sits above the one rule a frame carries",
+  );
 
   // The line is composed per frame rather than stored with the message or cached for the office:
   // the same leader is told a different office a moment later, and the frame it already holds

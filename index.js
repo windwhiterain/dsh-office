@@ -1266,7 +1266,8 @@ function channelLabel(message) {
  * the message just delivered, so "this reply reaches the user alone" reads as a remark about the
  * colleague that sent the message rather than about what the reader is about to write.
  */
-const OFFICE_DELIVERY_NOTE = '(What you write yourself reaches only the user; only an office tool notifies a colleague.)'
+const OFFICE_DELIVERY_NOTE =
+  "(if you need reply to your colleagues, use office tool with `wake` parameter.)";
 
 /**
  * The office's delivery contract, contributed to every armed agent's system prompt.

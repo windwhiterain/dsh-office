@@ -18,21 +18,32 @@ its **name**, in any script; an internal id — never the name — is the storag
 The package is **third-party**: it imports nothing from the harness and reaches every capability
 through the Cordis context, so it survives harness upgrades.
 
-- [What it looks like](#what-it-looks-like)
-- [Quick start](#quick-start)
-- [Roles and permissions](#roles-and-permissions)
-- [Who a message wakes](#who-a-message-wakes)
-- [Tools](#tools)
-- [Channels](#channels)
-- [The user mailbox](#the-user-mailbox)
-- [The idle notice](#the-idle-notice)
-- [The boss preset](#the-boss-preset)
-- [Configuration](#configuration)
-- [Multiple offices](#multiple-offices)
-- [Web panel](#web-panel)
-- [Web routes](#web-routes)
-- [Known limitations](#known-limitations)
-- [Documentation](#documentation)
+- [dsh-office](#dsh-office)
+  - [What it looks like](#what-it-looks-like)
+  - [Quick start](#quick-start)
+  - [Roles and permissions](#roles-and-permissions)
+  - [Who a message wakes](#who-a-message-wakes)
+  - [Tools](#tools)
+    - [The boss's complete tool set](#the-bosss-complete-tool-set)
+    - [Colleagues](#colleagues)
+    - [Installation lifetime](#installation-lifetime)
+    - [Result shape](#result-shape)
+  - [Channels](#channels)
+  - [The user mailbox](#the-user-mailbox)
+  - [The idle notice](#the-idle-notice)
+  - [The boss preset](#the-boss-preset)
+  - [Configuration](#configuration)
+    - [The host row — row id `office-host`](#the-host-row--row-id-office-host)
+    - [An office row — any other row id](#an-office-row--any-other-row-id)
+  - [Multiple offices](#multiple-offices)
+  - [Web panel](#web-panel)
+    - [Folding a long history](#folding-a-long-history)
+    - [Panel state](#panel-state)
+    - [Mentions, levels, and channels](#mentions-levels-and-channels)
+  - [Web routes](#web-routes)
+  - [Known limitations](#known-limitations)
+  - [Documentation](#documentation)
+  - [License](#license)
 
 ## What it looks like
 
@@ -54,7 +65,7 @@ Each colleague receives its own turn in its own conversation — not a line in a
 [office #general from the user | wake $member | general-12]
 release is cut — review the diff before I tag it
 
-(What you write yourself reaches only the user; only an office tool notifies a colleague.)
+(if you need reply to your colleagues, use office tool with `wake` parameter.)
 ```
 
 The frame names the sender as a colleague or as the user, states the wake the message was written
@@ -88,7 +99,7 @@ office_read_notifications  {}
 [office #general from the user | wake $member | general-12]
 release is cut — review the diff before I tag it
 
-(What you write yourself reaches only the user; only an office tool notifies a colleague.)
+(if you need reply to your colleagues, use office tool with `wake` parameter.)
 ```
 
 Address the user and the message lands in the user's mailbox instead of waking anybody:

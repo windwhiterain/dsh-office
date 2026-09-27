@@ -288,7 +288,7 @@ One message:
 [office #general from colleague alice | wake @bob | general-9]
 @bob can you take this?
 
-(What you write yourself reaches only the user; only an office tool notifies a colleague.)
+(if you need reply to your colleagues, use office tool with `wake` parameter.)
 ```
 
 A turn that carries a merged burst — its header says how many, and each message keeps its own:
@@ -305,7 +305,7 @@ thanks — merging
 [office DM from colleague erin | wake @bob | dm-….4]
 can you look at this before I ship?
 
-(What you write yourself reaches only the user; only an office tool notifies a colleague.)
+(if you need reply to your colleagues, use office tool with `wake` parameter.)
 ```
 
 The frame names the sender as a colleague or as the user, the destination, the wake the message was
@@ -396,7 +396,7 @@ the build is green again
 
 Office parallelism: 2/5 — 5 colleague(s) in the roster, 2 working.
 
-(What you write yourself reaches only the user; only an office tool notifies a colleague.)
+(if you need reply to your colleagues, use office tool with `wake` parameter.)
 ```
 
 The figure is the office at the instant the office handed the turn over: five colleagues adopted,
@@ -520,7 +520,7 @@ can you look at this before I ship?
 [office #general from colleague bob | wake $member | general-9] (held until the end of your turn)
 release is cut
 
-(What you write yourself reaches only the user; only an office tool notifies a colleague.)
+(if you need reply to your colleagues, use office tool with `wake` parameter.)
 ```
 
 | Field | Meaning |
