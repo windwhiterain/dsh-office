@@ -423,13 +423,13 @@ says how much of the office is at work and not **which** colleague can take the 
 a leader holding only the tally has to spend an `office_colleagues` call to find out. A member's
 frame is the message it has to answer rather than a status board.
 
-The line replaced that tally — `Office parallelism: 2/5 — 5 colleague(s) in the roster, 2 working.`
-— and the price of naming the colleagues is that it grows with the roster where the tally did not:
-15 characters of prefix, one full stop, two characters between entries, and each colleague's own
-name and status. For the three colleagues above it is 56 characters, against the 66 the tally cost
-at any roster size. In a frame that carries both of the office's lines, the roster line comes first:
-it is where a reader is told that a name it knows may no longer hold, and the status line is where
-those names stand. The budget both belong to is in
+It replaced a tally — `Office parallelism: 2/5 — 5 colleague(s) in the roster, 2 working.` — and the
+price of naming the colleagues is that the line grows with the roster where the tally did not: 15
+characters of prefix, one full stop, two characters between entries, and each colleague's own name
+and status. For the three colleagues above it is 56 characters, against the 66 the tally cost at any
+roster size. In a frame that carries both of the office's lines, the roster line comes first: it
+says that what the reader knows about these people may be out of date, and the status line is where
+they actually stand. The budget both belong to is in
 [design.md](design.md#the-model-facing-text-budget).
 
 ## The answering rule
