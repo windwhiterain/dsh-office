@@ -394,7 +394,7 @@ the office does not repeat a change for a colleague it could not reach, and `off
 answers the roster itself whenever that colleague is next reached. What the line is for is a reader
 that is working from memory, and a reader the office could not hand a turn to is not acting on one.
 
-### The load line
+### The status line
 
 A **leader**'s frame carries this line too, taken from the live registry as the frame is composed:
 
@@ -402,28 +402,34 @@ A **leader**'s frame carries this line too, taken from the live registry as the 
 [office #general from colleague carol | wake $member | general-9]
 the build is green again
 
-Office parallelism: 2/5 — 5 colleague(s) in the roster, 2 working.
+Office status: chief running; carol idle; hand inactive.
 
 (if you need reply to your colleagues, use office tool with `wake` parameter.)
 ```
 
-The figure is the office at the instant the office handed the turn over: five colleagues adopted,
-two of them mid-turn. It is taken **then** rather than when the message was written or held, so a
-message that waited for a turn to end states the office it was handed over in; and it is neither
-stored with the message nor cached on the office, so the next frame takes a fresh tally while the
-frame already written keeps the office it was written in. That is what makes it a snapshot rather
-than a reading — a leader re-reading an old frame sees the office as it was, which is why the line
-names the roster instead of claiming to be current.
+It names **every** colleague of the roster with the status that colleague reports in
+`office_colleagues`: `running`, `quota-retry` while it waits out an exhausted account, `idle` when
+its session is loaded and waiting, and `inactive` when its session is not loaded — which is why an
+unloaded colleague is still named. The statuses are read at the instant the office hands the turn
+over — or, on `office_read_notifications`, at the call — rather than when the message was written or
+held, so a message that waited for a turn to end states the office it was handed over in; and the
+line is neither stored with the message nor cached on the office, so the next frame reads the
+registry afresh while the frame already written keeps the office it was written in. That is what
+makes it a snapshot rather than a reading — a leader re-reading an old frame sees the office as it
+was, which is why the line names the colleagues instead of claiming to be current.
 
-Only a leader is told. The figure is what a colleague deciding what the office does next reads,
-and a member's frame is the message it has to answer rather than a status board. The roster count
-is **every** colleague, loaded or not: a colleague whose session is not loaded cannot be at work,
-and it is still one of the office's people, so the reader is given both numbers rather than a
-ratio that hides which of the two it is.
+Only a leader is told. A leader dispatches from who is busy, and a tally of the busy is not that: it
+says how much of the office is at work and not **which** colleague can take the next piece of it, so
+a leader holding only the tally has to spend an `office_colleagues` call to find out. A member's
+frame is the message it has to answer rather than a status board.
 
-The line costs 66 characters for a single-digit roster and 70 for a two-digit one. In a frame that
-carries both of the office's lines, the roster line comes first: it explains why the roster is the
-size it is, and the load line is where that roster stands. The budget both belong to is in
+The line replaced that tally — `Office parallelism: 2/5 — 5 colleague(s) in the roster, 2 working.`
+— and the price of naming the colleagues is that it grows with the roster where the tally did not:
+15 characters of prefix, one full stop, two characters between entries, and each colleague's own
+name and status. For the three colleagues above it is 56 characters, against the 66 the tally cost
+at any roster size. In a frame that carries both of the office's lines, the roster line comes first:
+it is where a reader is told that a name it knows may no longer hold, and the status line is where
+those names stand. The budget both belong to is in
 [design.md](design.md#the-model-facing-text-budget).
 
 ## The answering rule
@@ -555,7 +561,7 @@ release is cut
 - **It is not a substitute for `office_read`.** A wake carries only what was addressed to the
   colleague, so a notification read this way is exactly that and no more; the channel record the
   colleague was not notified about is still read with `office_read`.
-- **A leader's read carries [the roster line](#the-roster-line) and [the load line](#the-load-line).**
+- **A leader's read carries [the roster line](#the-roster-line) and [the status line](#the-status-line).**
   The tool is held by every role, but both lines are read at the call and reported only to a leader,
   because the reader is deciding in the office it is reading about. The rest of the frame is what a
   delivery would have handed over.

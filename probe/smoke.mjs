@@ -1945,9 +1945,9 @@ await check('a leader reading its held mail is told the office it is reading it 
 
   const read = await call(lead, 'office_read_notifications', {})
   assert.equal(
-    read.parallelism,
-    'Office parallelism: 2/2 — 2 colleague(s) in the roster, 2 working.',
-    'the figure is read in the turn that asks for the mail',
+    read.memberStatus,
+    'Office status: lead running; hand running.',
+    'every colleague of the roster is named with the status it holds at the call',
   )
   assert.equal(
     read.rosterChanges,
@@ -1957,7 +1957,7 @@ await check('a leader reading its held mail is told the office it is reading it 
   const rendered = lead.tools.get('office_read_notifications').output.render({}, read)[0].text
   assert.match(
     rendered,
-    /Roster changed since you were last notified\.\n\nOffice parallelism: 2\/2 — 2 colleague\(s\) in the roster, 2 working\./,
+    /Roster changed since you were last notified\.\n\nOffice status: lead running; hand running\./,
     'the read frame orders the two lines the way a delivered frame does',
   )
   assert.ok(
@@ -1974,7 +1974,7 @@ await check('a leader reading its held mail is told the office it is reading it 
     'a member is handed its mail and nothing about the office',
   )
   assert.ok(
-    !hand.tools.get('office_read_notifications').output.render({}, memberRead)[0].text.includes('Office parallelism'),
+    !hand.tools.get('office_read_notifications').output.render({}, memberRead)[0].text.includes('Office status'),
   )
 })
 
@@ -2356,7 +2356,7 @@ await check('a delivery frame names the sender, the wake, the message, and the o
   )
 })
 
-await check('a leader is told how loaded the office is, and a member is not', async () => {
+await check('a leader is told where each colleague stands, and a member is not', async () => {
   const floor = makeHarness({ officeName: 'load' })
   await floor.ready
   const chief = floor.publish('session-load-boss', { preset: 'office-boss' })
@@ -2377,8 +2377,8 @@ await check('a leader is told how loaded the office is, and a member is not', as
   for (const sessionId of ['session-load-hand', 'session-load-away', 'session-load-plain']) {
     await callBoss(chief, 'load', 'office_adopt', { session_id: sessionId })
   }
-  // An unloaded colleague is still one of the office's people: it is counted in the roster, and it
-  // is not something the office can report as working.
+  // An unloaded colleague is still one of the office's people: it is named in the roster, and its
+  // status is the one that says its session is not loaded.
   floor.dispose(away)
 
   // A leader that is idle is handed the message now, and reads the office as it was handed over.
@@ -2387,13 +2387,13 @@ await check('a leader is told how loaded the office is, and a member is not', as
   const first = lead.sent.at(-1).message.content[0].text
   assert.match(
     first,
-    /Office parallelism: 1\/4 — 4 colleague\(s\) in the roster, 1 working\./,
-    'the roster is everyone, and the working are the ones mid-turn',
+    /Office status: lead idle; hand running; away inactive; plain idle\./,
+    'the roster is everyone, and each is named with the status the office reads for it',
   )
   assert.match(
     first,
     /\(if you need reply to your colleagues, use office tool with `wake` parameter\.\)$/,
-    "the load line sits above the one rule a frame carries",
+    "the status line sits above the one rule a frame carries",
   );
 
   // The line is composed per frame rather than stored with the message or cached for the office:
@@ -2404,10 +2404,10 @@ await check('a leader is told how loaded the office is, and a member is not', as
   assert.equal(lead.sent.at(-1).via, 'steer')
   assert.match(
     lead.sent.at(-1).message.content[0].text,
-    /Office parallelism: 2\/4 — 4 colleague\(s\) in the roster, 2 working\./,
-    'a leader reading a splice into its own turn is one of the working',
+    /Office status: lead running; hand running; away inactive; plain idle\./,
+    'a leader reading a splice into its own turn is one of the running',
   )
-  assert.match(first, /Office parallelism: 1\/4/, 'and the earlier frame is not rewritten')
+  assert.match(first, /Office status: lead idle/, 'and the earlier frame is not rewritten')
   assert.equal(floor.claim('session-load-lead').length, 1, 'the leader takes the splice at its next step')
 
   // A burst held for the leader while it worked is handed over as one turn, which carries the line
@@ -2424,19 +2424,19 @@ await check('a leader is told how loaded the office is, and a member is not', as
     'each held message keeps its own header and its own wake inside the one turn',
   )
   assert.equal(
-    merged.message.content[0].text.match(/Office parallelism/g).length,
+    merged.message.content[0].text.match(/Office status/g).length,
     1,
     'the merged turn states the office once, however many messages it carries',
   )
-  assert.match(merged.message.content[0].text, /Office parallelism: 1\/4 — 4 colleague\(s\) in the roster, 1 working\./)
+  assert.match(merged.message.content[0].text, /Office status: lead idle; hand running; away inactive; plain idle\./)
 
   // A member is told nothing about the office: its frame is the message it has to answer.
   await callBoss(chief, 'load', 'office_dm', { wake: ['@plain'], text: 'plain, take a look' })
   const memberFrame = plain.sent.at(-1).message.content[0].text
   assert.match(memberFrame, /^\[office DM from colleague chief \| wake @plain \| dm-\S+\]\n\nplain, take a look\n\n/)
   assert.ok(
-    !memberFrame.includes('Office parallelism'),
-    'the office load is a leader\'s context, not a line every colleague reads',
+    !memberFrame.includes('Office status'),
+    'where the office stands is a leader\'s context, not a line every colleague reads',
   )
 })
 
@@ -2466,8 +2466,8 @@ await check('a leader is told the roster moved, once per change and for itself a
   assert.match(frame(lea), /Roster changed since you were last notified\./)
   assert.match(
     frame(lea),
-    /Roster changed since you were last notified\.\n\nOffice parallelism: /,
-    'the roster line comes before the load line and above the one rule the frame carries',
+    /Roster changed since you were last notified\.\n\nOffice status: lea idle; lia idle; mal idle\./,
+    'the roster line comes before the status line and above the one rule the frame carries',
   )
   await callBoss(chief, 'shifts', 'office_dm', { wake: ['@lea'], text: 'second' })
   assert.ok(
@@ -2499,7 +2499,7 @@ await check('a leader is told the roster moved, once per change and for itself a
   mal.sent.length = 0
   await callBoss(chief, 'shifts', 'office_dm', { wake: ['@mal two'], text: 'mal, take a look' })
   assert.ok(!frame(mal).includes('Roster changed'))
-  assert.ok(!frame(mal).includes('Office parallelism'))
+  assert.ok(!frame(mal).includes('Office status'))
   assert.equal(
     shifts.tables.get('colleagues').get('session-shifts-mal').rosterSeen,
     undefined,
@@ -3834,7 +3834,10 @@ await check('a colleague waiting out an exhausted quota reports a status of its 
   waiting.titles.set('session-busy', 'busy')
   const waiter = waiting.publish('session-wait', { status: 'running' })
   const busy = waiting.publish('session-busy', { status: 'running' })
-  await callBoss(chief, 'waiting', 'office_adopt', { session_id: 'session-wait' })
+  // The waiting colleague is adopted as a leader so the frame it is handed carries the office's own
+  // status line: the wait this check is about is what that line has to name, not the `running` the
+  // harness still reports for a step the retry row holds open.
+  await callBoss(chief, 'waiting', 'office_adopt', { session_id: 'session-wait', role: 'leader' })
   await callBoss(chief, 'waiting', 'office_adopt', { session_id: 'session-busy' })
 
   const statusOf = async (colleague) => {
@@ -3868,6 +3871,11 @@ await check('a colleague waiting out an exhausted quota reports a status of its 
     chief.tools.get('office_dm').output.render({}, mailed)[0].text,
     /\[colleague status: quota-retry\]/,
     'the private message names the state it found the colleague in',
+  )
+  assert.match(
+    waiter.sent.at(-1).message.content[0].text,
+    /Office status: waiter quota-retry; busy inactive\./,
+    'and the line a leader reads names the wait, not the running the harness reports for it',
   )
 
   // A post is a report of delivery outcomes, and what a colleague is belongs in the roster, so the

@@ -1327,8 +1327,8 @@ function channelLabel(message) {
  * the receiving colleague's session and re-sent with every later request for the life of that
  * history. This line is the exception, and it is one sentence rather than a paragraph: it is the
  * single fact the colleague's next action depends on, and the colleague reads it in the message it
- * was just handed. A frame can carry one more line — the load line a leader is told, which is
- * {@link parallelismLine} — and this one stays last, because it is the one the reader acts on.
+ * was just handed. A frame can carry one more line — the status line a leader is told, which is
+ * {@link memberStatusLine} — and this one stays last, because it is the one the reader acts on.
  *
  * It replaced "Your reply stays in this session and reaches nobody", which was wrong in the way
  * that matters: the user does see the reply. A colleague told that nothing reaches anybody has no
@@ -1367,23 +1367,28 @@ const OFFICE_DELIVERY_SECTION = 'office:delivery'
 const OFFICE_DELIVERY_ORDER = 1650
 
 /**
- * The line a frame carries about how loaded the office is, for the readers told it.
+ * The line a frame carries about where each colleague stands, for the readers told it.
  *
- * It is a snapshot rather than a reading. The office takes the tally at the instant it composes
+ * It is a snapshot rather than a reading. The office takes each status at the instant it composes
  * the frame — when it hands the turn over, or when the reader takes its held mail — and the text
  * then lives in that session's history, so a leader reading an old frame sees the office as it was
- * when the frame was written. That is why the line names the roster instead of claiming to be the
- * current state, and why {@link officeParallelism} is counted at the frame rather than cached.
+ * when the frame was written. That is why the line names the colleagues instead of claiming to be
+ * the current state, and why {@link rosterStanding} reads the registry at the frame rather than
+ * caching.
  *
- * The tally is verbless on purpose. "1 of 1 colleagues are working" is what a sentence would have
- * to say, and a grammatical fault in a line every delivery repeats is worse than a fragment.
- * @param parallelism - how many colleagues are mid-turn, and how many the roster holds.
+ * It names every colleague rather than tallying them, because who is busy is what a leader
+ * dispatches on: a count says how much of the office is at work and not which colleague can take
+ * the next piece of it, so a leader holding only the count has to spend an `office_colleagues` call
+ * to find out. The price is that the line grows with the roster where the count did not.
+ *
+ * The list is verbless on purpose. "Office status: one colleague is running" is what a sentence
+ * would have to say, and a grammatical fault in a line every delivery repeats is worse than a
+ * fragment.
+ * @param members - one entry per colleague, in roster order: its name and its status.
  * @returns the model-visible line.
  */
-function parallelismLine(parallelism) {
-  const { working, total } = parallelism
-  return `Office parallelism: ${String(working)}/${String(total)} — ${String(total)} colleague(s) `
-    + `in the roster, ${String(working)} working.`
+function memberStatusLine(members) {
+  return `Office status: ${members.map(member => `${member.name} ${member.status}`).join('; ')}.`
 }
 
 /**
@@ -1411,7 +1416,7 @@ const ROSTER_CHANGED_LINE = 'Roster changed since you were last notified.'
  * @param newestSeq - the channel's newest sequence when this turn was queued, when known.
  * @param userName - the office's name for the user, which is how a frame tells the user from a colleague.
  * @param lines - the office's own lines for this reader: `rosterChanges` when the roster moved since
- *   it was last told, and `parallelism`, each absent for a reader that is told neither.
+ *   it was last told, and `memberStatus`, each absent for a reader that is told neither.
  * @returns the framed text delivered as the colleague's user turn.
  */
 function frameDelivery(message, newestSeq, userName, lines = {}) {
@@ -1423,7 +1428,7 @@ function frameDelivery(message, newestSeq, userName, lines = {}) {
     message.text,
     freshness,
     lines.rosterChanges,
-    lines.parallelism,
+    lines.memberStatus,
     OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined)
     .join('\n\n')
@@ -1455,7 +1460,7 @@ function frameBatch(officeName, messages, newestSeq, userName, lines) {
     ...messages.map(message => `[office ${whereOf(message, userName)} | ${message.messageId}]\n${message.text}`),
     freshness,
     lines?.rosterChanges,
-    lines?.parallelism,
+    lines?.memberStatus,
     OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined).join('\n\n')
 }
@@ -1489,7 +1494,7 @@ function frameNotifications(officeName, notifications, userName, lines = {}) {
     `[office ${officeName}] ${headline}`,
     ...frames,
     lines.rosterChanges,
-    lines.parallelism,
+    lines.memberStatus,
     OFFICE_DELIVERY_NOTE,
   ].filter(line => line !== undefined).join('\n\n')
 }
@@ -2097,7 +2102,7 @@ function createOffice(ctx, domain, config, hooks) {
    * @param batch - the batched messages, oldest first.
    * @param newestSeq - the newest sequence of the last message's channel, when known.
    * @param recipient - the colleague the turn is for, whose role decides whether the frame also
-   *   carries the office's load line.
+   *   carries the office's status line.
    * @param sourceKind - the kind the payload's source claims: {@link OFFICE_MESSAGE_KIND} for a
    *   delivery that opens a turn, {@link STEERED_MESSAGE_KIND} for a splice into a running one.
    * @returns the message payload to hand to the colleague's session.
@@ -3016,27 +3021,26 @@ function createOffice(ctx, domain, config, hooks) {
   const heldCount = (sessionId) => heldWakes(sessionId).length
 
   /**
-   * How loaded the office is at this instant: how many colleagues of the roster are mid-turn.
+   * Where every colleague of the roster stands at this instant, in roster order.
    *
-   * "Working" is read from the live registry, because it is a property of a running session and of
-   * nothing the office stores: a colleague whose session is not loaded cannot be at work, and it
-   * is still one of the people the office holds. The roster count is therefore every colleague,
-   * loaded or not, and a reader of the line is told both numbers rather than a ratio that hides
-   * which of the two it is.
+   * The status is {@link colleagueStatus}'s — the registry's, refined by the wait a colleague may
+   * be held in — so a colleague waiting out an exhausted account is reported as
+   * {@link QUOTA_RETRY_STATUS} rather than as the `running` the harness still reports, and the
+   * reader can tell a colleague that is working from one that cannot answer. The list is the whole
+   * roster and not the live sessions: a colleague whose session is not loaded cannot be at work,
+   * and it is still one of the people the office holds.
    *
-   * This reads the harness status rather than {@link colleagueStatus} on purpose: a colleague
-   * waiting out an exhausted quota is holding a turn, so it counts as working here, and the load
-   * line is about turns rather than about progress.
-   * @returns how many colleagues are running a turn, and how many the roster holds.
+   * Names are resolved through {@link listColleagues}, the one way this office names a roster, so
+   * the line and `office_colleagues` cannot disagree about what a colleague is called. That listing
+   * is what naming anybody costs, and it is paid once per composed frame.
+   * @returns one `{ name, status }` per colleague, in roster order.
    */
-  const officeParallelism = () => {
-    let working = 0
-    let total = 0
-    for (const [sessionId] of colleagues.entries()) {
-      total += 1
-      if (liveAgent(sessionId)?.status === 'running') working += 1
-    }
-    return { working, total }
+  const rosterStanding = async () => {
+    const listed = await listColleagues()
+    return listed.map(colleague => ({
+      name: colleague.name,
+      status: colleagueStatus(colleague.sessionId),
+    }))
   }
 
   /**
@@ -3095,10 +3099,11 @@ function createOffice(ctx, domain, config, hooks) {
    * The lines only a leader's frame carries, or an empty object for every other reader.
    *
    * Both say something a leader decides with, and neither is stored on the message. The roster line
-   * is the office saying that what this reader knows about the people here is out of date; the load
-   * line is where the office stands at this instant. The roster line is said once per change rather
-   * than once per frame: the revision the reader has been told advances with the frame that reports
-   * it, so a burst tells it the same thing once, and only the next change makes it speak again.
+   * is the office saying that what this reader knows about the people here is out of date; the
+   * status line is where those people stand at this instant. The roster line is said once per
+   * change rather than once per frame: the revision the reader has been told advances with the
+   * frame that reports it, so a burst tells it the same thing once, and only the next change makes
+   * it speak again.
    *
    * A reader with no revision recorded has nothing to be told about — it is a session adopted before
    * this line existed, or a member that has just been made a leader — so the office records the
@@ -3113,7 +3118,7 @@ function createOffice(ctx, domain, config, hooks) {
     if (seen !== revision) await markRosterSeen(recipient.sessionId, revision)
     return compact({
       rosterChanges: seen === undefined || seen === revision ? undefined : ROSTER_CHANGED_LINE,
-      parallelism: parallelismLine(officeParallelism()),
+      memberStatus: memberStatusLine(await rosterStanding()),
     })
   }
 
@@ -5599,9 +5604,10 @@ function createNotificationsTool(agent, tool, userName) {
           office: { type: 'string' },
           // The office's own lines, present only for a leader and only when something was held:
           // the render below puts them in the frame rather than leaving them as separate facts
-          // beside it, because what the reader is handed is one piece of mail, not a status report.
+          // beside it, because what the reader is handed is one piece of mail that carries the
+          // office's own lines, not a mail with a status board next to it.
           rosterChanges: { type: 'string' },
-          parallelism: { type: 'string' },
+          memberStatus: { type: 'string' },
           notifications: {
             type: 'array',
             items: {
@@ -5630,7 +5636,7 @@ function createNotificationsTool(agent, tool, userName) {
         ? text(`[office ${value.office}] Nothing was held for you.`)
         : text(frameNotifications(value.office, value.notifications, userName, {
           rosterChanges: value.rosterChanges,
-          parallelism: value.parallelism,
+          memberStatus: value.memberStatus,
         }))),
     },
     async execute(args) {
@@ -5647,7 +5653,7 @@ function createNotificationsTool(agent, tool, userName) {
       return compact({
         office: officeName,
         rosterChanges: lines.rosterChanges,
-        parallelism: lines.parallelism,
+        memberStatus: lines.memberStatus,
         notifications: taken.map(({ message, stepEnd }) => compact({
           messageId: message.messageId,
           channelId: message.channelId,

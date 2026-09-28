@@ -118,7 +118,7 @@ carries it, so the surfaces are kept deliberately terse:
 | the onboarding turn | `index.js`, `greet()` | every request of a hired colleague, for the life of its history |
 | one line per delivery frame | `index.js`, `OFFICE_DELIVERY_NOTE` | every request that carries the frame, for the life of that history |
 | the roster line, on a leader's frame | `index.js`, `ROSTER_CHANGED_LINE` | every request that carries a leader's frame that says it, for the life of that history |
-| the load line, on a leader's frame | `index.js`, `parallelismLine` | every request that carries a leader's frame, for the life of that history |
+| the status line, on a leader's frame | `index.js`, `memberStatusLine` | every request that carries a leader's frame, for the life of that history |
 
 The split of responsibility is the rule that keeps them from growing back:
 
@@ -157,16 +157,17 @@ incident is why the contract is a prompt section and not only a tool description
 was already being sent, and a colleague reads a section as instruction rather than as documentation
 for a tool it is not currently reaching for.
 
-**A leader's frame also says how loaded the office is**, because a leader is the colleague whose
-next action is usually a decision about the office rather than about the message: how many of the
-office's people are mid-turn is the fact it would otherwise have to spend a call on
+**A leader's frame also says where each of the office's people stands**, because a leader is the
+colleague whose next action is usually a decision about the office rather than about the message:
+which colleague can take the next piece of work is what it would otherwise have to spend a call on
 `office_colleagues` to get. It is a line rather than a section for the reason above — the reader is
 holding the message when it decides — and it is taken fresh at each hand-over rather than cached or
 stored, so every frame states the office it was written in instead of a reading that could go stale
-in the history that keeps re-sending it. Only a leader is told, so the cost lands on the seat that
-reads it and not on every colleague's history: 66 characters for a single-digit roster, 70 for a
-two-digit one, plus the blank line it is joined with. The line is in
-[delivery.md](delivery.md#the-load-line).
+in the history that keeps re-sending it. Naming the colleagues is what makes the line grow with the
+roster, where the tally it replaced did not: 15 characters of prefix, one full stop, two characters
+between entries, and each colleague's own name and status. Only a leader is told, so the cost lands
+on the seat that reads it and not on every colleague's history. The line is in
+[delivery.md](delivery.md#the-status-line).
 
 **The same frame says whether the roster moved, and says nothing more than that.** A leader
 dispatches from what it knows about the people in the office, so a colleague hired, dismissed,
@@ -204,6 +205,10 @@ change moves again:
 The tool figures include 182 characters that moved *into* `office_post`. The frame tail came down
 from the full paragraph to the one line, so a colleague woken twenty times carries roughly 6,300
 characters less than it did before either change, and pays for the contract once per request.
+
+The load line that row measured was later replaced by the status line, which names the roster
+instead of tallying it: that line grows with the roster, where 66 characters was the whole of the
+tally at any size. See [delivery.md](delivery.md#the-status-line).
 
 Output schemas are not part of these figures: a canonical request carries `parameters` only, so
 `output.schema` costs nothing outside PTC presentation.
@@ -779,10 +784,11 @@ Three properties decide its shape.
 **The default text is a prompt, not an announcement.** It is written into the session of every
 leader it wakes and re-sent with every later request of that session, so the default is 216
 characters where it used to be 373. What the cut removed was the state the frame already carries:
-the notice arrives as a delivery frame, and a leader's frame now states the office's load, so
-"every colleague has stopped and no turn is running" was a second reading of the same fact. What
-the text keeps is what a leader cannot read anywhere else at that moment — decide what happens
-next, and silence is a legitimate answer, because the office asks again only after new work.
+the notice arrives as a delivery frame, and a leader's frame now states where each colleague
+stands, so "every colleague has stopped and no turn is running" was a second reading of the same
+fact. What the text keeps is what a leader cannot read anywhere else at that moment — decide what
+happens next, and silence is a legitimate answer, because the office asks again only after new
+work.
 
 Two conditions are refusals rather than defaults. `wakesEnabled: false` is a promise that no session
 is ever woken, and a question nobody is woken for is not a question, so such an office writes
