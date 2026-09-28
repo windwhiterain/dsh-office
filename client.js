@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
     const CREATE_OFFICE_ROUTE = '/dsh-office/offices/create'
     const DELETE_OFFICE_ROUTE = '/dsh-office/offices/delete'
     const RENAME_OFFICE_ROUTE = '/dsh-office/offices/rename'
+    const PAUSE_ROUTE = '/dsh-office/offices/pause'
     /** The routes that manage one office's channels, all sharing the office query parameter. */
     const CHANNELS_CREATE_ROUTE = '/dsh-office/offices/channels/create'
     const CHANNELS_DELETE_ROUTE = '/dsh-office/offices/channels/delete'
@@ -527,6 +528,25 @@ window.__ModuleLoader__.load({
       cursor: 'pointer',
     }
     const notice = { margin: '0 20px 12px', fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' }
+    /**
+     * The band a paused office draws above its columns.
+     *
+     * The brand color rather than the error color, because a pause is a state the operator chose
+     * and not a failure to report; the surface beside the text is what separates it from the
+     * columns rather than a rule, so the band does not push the feed down by more than a line.
+     */
+    const pauseBanner = {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '12px',
+      margin: '0 20px 12px',
+      padding: '8px 10px',
+      borderRadius: '8px',
+      border: '1px solid var(--dsw-alias-brand-primary)',
+      color: 'var(--dsw-alias-label-primary)',
+      fontSize: '12px',
+    }
     /**
      * The composer's text layers. The input renders the draft with transparent text and the
      * layer behind it paints the same characters, so a mention can carry the reference color
@@ -1479,6 +1499,78 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The pause dialog: suspend the office, or bring it back.
+     *
+     * A pause is one fact about the whole office, so this is one dialog rather than a control per
+     * colleague: what it stops is the office waking anybody, and what a resume delivers is whatever
+     * arrived while it was stopped. The form is deliberately asymmetric — a reason belongs to the
+     * state being set, so the field exists only while the office is running, and a resume carries
+     * none. The office that is already paused shows what it published instead of an empty field,
+     * because the reason is quoted to every sender until the state is released.
+     */
+    function PauseDialog(props) {
+      const { open, onClose, officeName, snapshot, onChanged } = props
+      const [note, setNote] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [failure, setFailure] = useState(undefined)
+      const paused = snapshot?.paused === true
+      const published = snapshot?.pauseNote
+
+      const apply = async (enabled) => {
+        if (busy) return
+        setBusy(true)
+        try {
+          await submitJson(`${PAUSE_ROUTE}?${new URLSearchParams({ office: officeName })}`, {
+            enabled,
+            ...(enabled && note.trim().length > 0 ? { note: note.trim() } : {}),
+          })
+          setNote('')
+          setFailure(undefined)
+          await onChanged()
+          onClose()
+        } catch (error) {
+          setFailure(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h(Modal, {
+        open,
+        onClose,
+        title: paused ? `Resume ${officeName}` : `Pause ${officeName}`,
+        closeLabel: 'Close',
+        description: paused
+          ? 'Nothing the office is addressed wakes anybody while it is paused: every message is held, and '
+            + 'every sender is told so. Posting and reading go on. Resuming delivers the held messages, merged '
+            + 'into one turn per colleague, and wakes nobody the office had nothing held for.'
+          : 'While the office is paused nothing it is addressed wakes anybody — a post, a direct message, and '
+            + 'the office\'s own idle notice are all held, and every sender is told why. Colleagues already '
+            + 'mid-turn are not interrupted; they finish what they are doing. Posting and reading go on.',
+        footer: h('div', { style: dialogActions },
+          h('button', { type: 'button', style: smallButton, onClick: onClose }, 'Cancel'),
+          h('button', {
+            type: 'button',
+            style: button,
+            disabled: busy,
+            onClick: () => { void apply(!paused) },
+          }, busy ? (paused ? 'Resuming…' : 'Pausing…') : (paused ? 'Resume' : 'Pause'))),
+      },
+      paused
+        ? h('p', { style: dialogNotice },
+          `Paused since ${new Date(snapshot?.pausedAt ?? 0).toLocaleString()}`
+          + `${published === undefined ? '.' : ` — ${published}`}`)
+        : h('input', {
+          style: field,
+          value: note,
+          placeholder: 'Reason quoted to senders (optional)',
+          'aria-label': 'Reason the office is paused',
+          onChange: event => setNote(event.target.value),
+        }),
+      failure === undefined ? null : h('p', { style: dialogFailure }, failure))
+    }
+
+    /**
      * The colleague dialog: the role and the description of one colleague already on the roster.
      *
      * The two fields are the ones the office lets a boss or a leader change without touching the
@@ -2038,6 +2130,24 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Resume the office from the banner.
+       *
+       * One request and one refresh, because the route releases the pause *and* delivers what the
+       * pause held: the colleagues it woke have mail the reader is now waiting for, so clearing the
+       * band without redrawing the roster would leave the page showing an office that has gone
+       * quiet again. A refusal is reported where the composer's own failures are.
+       */
+      const resumeOffice = async () => {
+        try {
+          await submitJson(`${PAUSE_ROUTE}?${new URLSearchParams({ office: officeName })}`, { enabled: false })
+          setPostError(undefined)
+          await refresh()
+        } catch (failure) {
+          setPostError(failure instanceof Error ? failure.message : String(failure))
+        }
+      }
+
       const colleagues = snapshot?.colleagues ?? []
       // The roster column reads the channel the feed reads; the composer does not, because
       // naming a colleague addresses that colleague wherever the post goes.
@@ -2238,6 +2348,21 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
         error === undefined ? null : h('p', { style: notice }, `Cannot reach office "${officeName}": ${error}`),
+        // The one band above the columns, because a suspended office is the one fact a reader must
+        // not have to infer from a feed that stopped moving: every message a post addresses is held
+        // rather than delivered, so a channel that looks quiet is not one nobody answered in.
+        snapshot?.paused === true
+          ? h('div', { style: pauseBanner, role: 'status' },
+            h('span', null,
+              'This office is paused: nothing it is addressed wakes anybody until it is resumed. '
+              + `${snapshot.pauseNote === undefined ? '' : `${snapshot.pauseNote} `}`
+              + 'Posts are still written and read; they are held, not delivered.'),
+            h('button', {
+              type: 'button',
+              style: smallButton,
+              onClick: () => { void resumeOffice() },
+            }, 'Resume'))
+          : null,
         h('div', { style: body },
           railShown
             ? h('div', { id: RAIL_PANEL_ID, style: rail },
@@ -2502,6 +2627,15 @@ window.__ModuleLoader__.load({
                   style: smallButton,
                   onClick: () => { openDialog('channels') },
                 }, 'Channels'),
+                // The one header control that reports a state rather than opening a surface: the
+                // brand color is the same cue an open column uses, because a suspended office is
+                // the one thing a reader must be able to see without reading the feed.
+                h('button', {
+                  type: 'button',
+                  style: snapshot?.paused === true ? openedSmallButton : smallButton,
+                  'aria-pressed': snapshot?.paused === true,
+                  onClick: () => { openDialog('pause') },
+                }, snapshot?.paused === true ? 'Resume office' : 'Pause office'),
               ),
             h('button', {
               type: 'button',
@@ -2565,6 +2699,15 @@ window.__ModuleLoader__.load({
             activeChannel: channelId,
             onSelectChannel: setChannelChoice,
             refresh,
+          }),
+        offices.length === 0
+          ? null
+          : h(PauseDialog, {
+            open: dialog === 'pause',
+            onClose: () => { setDialog(undefined) },
+            officeName: active,
+            snapshot,
+            onChanged: refresh,
           }),
         h(OfficesDialog, {
           open: dialog === 'offices',

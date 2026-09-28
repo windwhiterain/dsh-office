@@ -89,11 +89,11 @@ const COLLEAGUE_ROLES = [ROLE_MEMBER, ROLE_LEADER]
  */
 const ROLE_CAPABILITIES = {
   [ROLE_MEMBER]: ['read', 'colleagues', 'post', 'dm'],
-  [ROLE_LEADER]: ['read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure', 'channels'],
+  [ROLE_LEADER]: ['read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure', 'channels', 'pause'],
 }
 
 /** Capabilities a boss holds: it runs the office, so it holds every capability there is. */
-const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure', 'channels']
+const BOSS_CAPABILITIES = ['manage', 'read', 'colleagues', 'post', 'dm', 'interrupt', 'compact', 'configure', 'channels', 'pause']
 
 /** Role a colleague holds when its stored role is absent or no longer predefined. */
 const DEFAULT_COLLEAGUE_ROLE = ROLE_MEMBER
@@ -138,6 +138,26 @@ const DO_NOT_DISTURB_STATUS = 'do-not-disturb'
  * outcome of a call somebody else made.
  */
 const DO_NOT_DISTURB_NOTE_MAX_CHARS = 500
+
+/**
+ * The outcome of a wake the office held back because the **office** is paused.
+ *
+ * A delivery outcome and not a colleague status, for the same reason {@link DO_NOT_DISTURB_STATUS}
+ * is one: the office is suspended and the colleagues in it are exactly as they were, so what a
+ * sender has to decide is not a colleague's state but the office's. It is read before the
+ * do-not-disturb one, because a paused office wakes nobody at all — a colleague that is also away
+ * would still not be woken when it came back.
+ */
+const OFFICE_PAUSED_STATUS = 'office-paused'
+
+/**
+ * Longest reason one caller may publish beside the office's own pause.
+ *
+ * The same bound and the same purpose as {@link DO_NOT_DISTURB_NOTE_MAX_CHARS}: the reason is
+ * never delivered anywhere, it is quoted in the outcome of every call made while the office is
+ * suspended, so it is bounded the way a description is.
+ */
+const OFFICE_PAUSE_NOTE_MAX_CHARS = 500
 
 /**
  * The experience notes written for whoever sits in a leader's seat.
@@ -339,6 +359,32 @@ function normalizeDescription(value, where) {
 }
 
 /**
+ * Validate a reason a caller published beside a state it is setting.
+ *
+ * A reason is never delivered anywhere: it is quoted in the outcome of every call made while the
+ * state is set, so it is bounded the way a description is, and an absent or empty one is no
+ * reason at all.
+ * @param value - the requested note.
+ * @param where - the tool refusing it, for the diagnostic.
+ * @param limit - the longest reason the subject of that state accepts.
+ * @returns the trimmed note, or undefined when it is absent or empty.
+ * @throws {TypeError} when the value is not a string, or is longer than `limit`.
+ */
+function normalizeNote(value, where, limit) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new TypeError(`${where}: note must be a string, got ${JSON.stringify(value)}`)
+  }
+  const trimmed = value.trim()
+  if (trimmed.length > limit) {
+    throw new TypeError(
+      `${where}: note is ${String(trimmed.length)} characters; the limit is ${String(limit)}`,
+    )
+  }
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
+/**
  * Validate a do-not-disturb reason supplied by the colleague that is setting the state.
  * @param value - the requested note.
  * @param where - the tool refusing it, for the diagnostic.
@@ -347,17 +393,7 @@ function normalizeDescription(value, where) {
  *   {@link DO_NOT_DISTURB_NOTE_MAX_CHARS}.
  */
 function normalizeDoNotDisturbNote(value, where) {
-  if (value === undefined) return undefined
-  if (typeof value !== 'string') {
-    throw new TypeError(`${where}: note must be a string, got ${JSON.stringify(value)}`)
-  }
-  const trimmed = value.trim()
-  if (trimmed.length > DO_NOT_DISTURB_NOTE_MAX_CHARS) {
-    throw new TypeError(
-      `${where}: note is ${String(trimmed.length)} characters; the limit is ${String(DO_NOT_DISTURB_NOTE_MAX_CHARS)}`,
-    )
-  }
-  return trimmed.length === 0 ? undefined : trimmed
+  return normalizeNote(value, where, DO_NOT_DISTURB_NOTE_MAX_CHARS)
 }
 
 /**
@@ -374,6 +410,23 @@ function doNotDisturbDetail(state) {
   return `the colleague set itself do-not-disturb at ${new Date(state.at).toISOString()}`
     + `${state.note === undefined ? '' : ` (its reason: ${state.note})`}; the message is held rather `
     + 'than delivered, and arrives when that colleague releases it'
+}
+
+/**
+ * How a sender is told that the office it wrote to is paused.
+ *
+ * The stored state is quoted the way {@link doNotDisturbDetail} quotes a colleague's, because the
+ * sender's next decision is again whether to wait: a message held by a pause that is released in a
+ * minute and one held by a pause that is not are the same message to the sender and nothing else
+ * distinguishes them. The clause says where the message goes — the resume, and nobody else — so a
+ * sender that gives up knows the office still has it.
+ * @param state - the stored state, as {@link createOffice}'s reader reports it.
+ * @returns the delivery detail.
+ */
+function officePausedDetail(state) {
+  return `the office is paused: it was paused at ${new Date(state.at).toISOString()}`
+    + `${state.note === undefined ? '' : ` (the reason published: ${state.note})`}; nothing the office `
+    + 'is addressed wakes anybody, and this message is held rather than delivered until the office is resumed'
 }
 
 /**
@@ -591,6 +644,9 @@ const OFFICES_ROUTE = '/dsh-office/offices'
 const CREATE_OFFICE_ROUTE = '/dsh-office/offices/create'
 const DELETE_OFFICE_ROUTE = '/dsh-office/offices/delete'
 const RENAME_OFFICE_ROUTE = '/dsh-office/offices/rename'
+
+/** Office route that suspends and resumes the office itself, the user's way to the same state. */
+const PAUSE_ROUTE = '/dsh-office/offices/pause'
 
 /** Office routes that manage one office's group channels, all served beside the state routes. */
 const CHANNELS_CREATE_ROUTE = '/dsh-office/offices/channels/create'
@@ -2232,11 +2288,11 @@ function createOffice(ctx, domain, config, hooks) {
   /**
    * Hand one colleague everything it is waiting for, as a single turn.
    *
-   * Called when it goes idle and once at activation, which is what makes a hold survive a
-   * restart. A colleague that is busy again by the time this runs keeps its held wakes: the
-   * next idle transition delivers them. A colleague that set itself do-not-disturb keeps them
-   * too, until it releases the state — the idle transition is exactly the moment the state
-   * exists to refuse.
+   * Called when it goes idle, once at activation — which is what makes a hold survive a restart —
+   * and once when the office is resumed, which is what makes a pause a suspension rather than a
+   * deletion. A colleague that is busy again by the time this runs keeps its held wakes: the next
+   * idle transition delivers them. A colleague that set itself do-not-disturb keeps them too, until
+   * it releases the state — the idle transition is exactly the moment the state exists to refuse.
    * @param sessionId - the colleague to deliver to.
    * @returns how many messages that turn carried.
    */
@@ -2249,10 +2305,11 @@ function createOffice(ctx, domain, config, hooks) {
       for (const entry of held) await pendingWakes.delete(entry.pendingKey)
       return 0
     }
-    // The state is read before the agent is, because loading a session is itself a disturbance: a
-    // colleague that asked to be left alone must not be resumed by the office trying to hand it
-    // something. What is held stays held, where the release and office_read_notifications both
-    // still find it.
+    // Both states are read before the agent is, because loading a session is itself a disturbance:
+    // the office must not resume a colleague in order to hand it something the colleague asked not
+    // to be handed, nor one the office was told not to reach at all. What is held stays held, where
+    // the release, the resume, and office_read_notifications all still find it.
+    if (pausedState() !== undefined) return 0
     if (doNotDisturbOf(sessionId) !== undefined) return 0
     const agent = await ensureAgent(sessionId)
     if (agent.status !== 'idle') return 0
@@ -2322,15 +2379,40 @@ function createOffice(ctx, domain, config, hooks) {
   /**
    * Deliver the wakes a previous process was holding when it stopped.
    *
-   * One turn per colleague, whatever it was waiting for.
+   * One turn per colleague, whatever it was waiting for. A paused office delivers none of them: the
+   * hold the pause was meant to protect outlives the process, which is exactly why the pause itself
+   * is stored.
    */
   const restoreWakes = async () => {
+    await flushEveryHold()
+  }
+
+  /**
+   * Hand every colleague this office holds something to everything it is holding.
+   *
+   * This is the one place that walks the hold table for every session at once, and the two callers
+   * want opposite things from it: activation delivers what a previous process was holding, and a
+   * resume delivers what the pause was holding. Both ask the same question — who is the office
+   * waiting on? — and both hand one turn per colleague to each of them, so a colleague that was
+   * holding three messages still costs one turn.
+   *
+   * A colleague the office holds nothing for is never asked, which is what makes a resume wake
+   * nobody it has nothing to say to: a pause is a barrier on waking, not a task handed to everybody
+   * in the office, so the colleagues that come back are exactly the ones something arrived for.
+   * @returns the colleagues that were handed their mail, each with the number of messages.
+   */
+  const flushEveryHold = async () => {
     const waiting = new Set()
     for (const [, value] of pendingWakes.entries()) {
       const record = requireRecord('pending', value)
       if (typeof record.sessionId === 'string') waiting.add(record.sessionId)
     }
-    for (const sessionId of waiting) await flushWakes(sessionId)
+    const handed = []
+    for (const sessionId of waiting) {
+      const count = await flushWakes(sessionId)
+      if (count > 0) handed.push({ sessionId, count })
+    }
+    return handed
   }
 
   /**
@@ -2353,6 +2435,13 @@ function createOffice(ctx, domain, config, hooks) {
    * delivered while the state is set, and the message joins the same durable hold that a release
    * hands over. The state is the colleague's own act, so the office reports it to the sender once
    * per call instead of asking the colleague again — see {@link doNotDisturbDetail}.
+   *
+   * A **paused office** has no delivery at all, so the check comes before the colleague's own state
+   * and before the session is reached: a suspended office wakes nobody, so reporting one colleague's
+   * absence while the whole room is suspended would describe a restriction that is not the one in
+   * force. The message joins the same hold, with no timing recorded — a turn-end hold is what an
+   * absent field already means — so it merges with everything else and arrives in the turn that
+   * follows the resume.
    * @param message - the stored message.
    * @param key - the message's key in the messages table, where the outcome is recorded.
    * @param colleague - the recipient's roster record.
@@ -2361,12 +2450,23 @@ function createOffice(ctx, domain, config, hooks) {
    * @returns the outcome as the caller is told it: the status alone when the message reached the
    *   colleague the way the call asked for — `delivered`, `queued`, or `steered` — and the status
    *   with the reason beside it when the caller has to decide what to do next, which is what
-   *   `do-not-disturb` carries. The record keeps a reason for every outcome.
+   *   `do-not-disturb` and `office-paused` carry. The record keeps a reason for every outcome.
    */
   const deliver = async (message, key, colleague, notify = DEFAULT_NOTIFY) => {
-    // Read before the agent is, because loading a session is itself a way of reaching it: the
-    // office must not resume the colleague that asked to be left alone in order to hand it the
-    // message it asked not to be handed.
+    // Both states are read before the agent is, because loading a session is itself a way of
+    // reaching it: the office must not resume the colleague that asked to be left alone in order to
+    // hand it the message it asked not to be handed, nor one the office was told not to reach.
+    const paused = pausedState()
+    if (paused !== undefined) {
+      const detail = officePausedDetail(paused)
+      await holdWake(colleague.sessionId, message)
+      await recordDelivery(key, colleague.sessionId, {
+        status: OFFICE_PAUSED_STATUS,
+        at: Date.now(),
+        detail,
+      })
+      return { status: OFFICE_PAUSED_STATUS, detail }
+    }
     const away = doNotDisturbOf(colleague.sessionId)
     if (away !== undefined) {
       const detail = doNotDisturbDetail(away)
@@ -3021,6 +3121,127 @@ function createOffice(ctx, domain, config, hooks) {
   const heldCount = (sessionId) => heldWakes(sessionId).length
 
   /**
+   * The office's own pause, or undefined when the office wakes.
+   *
+   * The state is the office's rather than a colleague's, so it lives in the **global slot** beside
+   * the name and the roster revision: it is one fact about the office, and every write to that slot
+   * already restates the whole record. It is stored rather than held in memory because a pause that
+   * a host restart silently dropped would be a pause nobody can rely on — the office would start
+   * waking colleagues again with nothing to say that it had ever been suspended.
+   *
+   * A hand-edited medium is read the way one is everywhere else here: the flag is a literal `true`
+   * and the moment is what every sender's detail quotes, so a record carrying the flag without the
+   * moment is refused rather than read as a pause nobody can date.
+   * @returns `{ at, note }` while the office is paused, undefined otherwise.
+   */
+  const pausedState = () => {
+    const stored = domain.global.get()
+    if (stored?.paused !== true) return undefined
+    if (!Number.isSafeInteger(stored.pausedAt)) {
+      throw new Error(
+        `dsh-office: office "${name()}" is stored as paused with no time: ${JSON.stringify(stored)}`,
+      )
+    }
+    return compact({ at: stored.pausedAt, note: stored.pauseNote })
+  }
+
+  /**
+   * Pause this office, or release the pause.
+   *
+   * One state in three fields on the global slot, written together: releasing removes all three
+   * rather than storing a `false`, so every reader answers "is this office paused" from the flag's
+   * presence alone — the same rule a colleague's own do-not-disturb state follows, and for the same
+   * reason. The slot is restated rather than patched, because a write that dropped the office name
+   * or the roster revision would undo a rename or a change the office has already told leaders about.
+   * @param state - the state to store, or undefined to release the pause.
+   */
+  const recordPaused = async (state) => {
+    const next = { ...domain.global.get(), officeId: config.officeId, name: name() }
+    delete next.paused
+    delete next.pausedAt
+    delete next.pauseNote
+    if (state !== undefined) {
+      next.paused = true
+      next.pausedAt = state.at
+      if (state.note !== undefined) next.pauseNote = state.note
+    }
+    await domain.global.set(next)
+  }
+
+  /**
+   * How many messages this office is holding in all.
+   *
+   * Over the roster rather than over the hold table, for the reason {@link heldCount} gives: a
+   * hold whose message was compacted away is one the office will not hand over, so counting the raw
+   * records would promise a delivery the release does not make.
+   * @returns the number of held wakes across every colleague.
+   */
+  const heldCountAll = () => [...colleagues.keys()]
+    .reduce((total, sessionId) => total + heldWakes(sessionId).length, 0)
+
+  /**
+   * Pause this office, or resume it.
+   *
+   * Both surfaces that can set the state — the `pause` capability a leader and the boss hold, and
+   * the panel's own route — go through here, so a reason is validated, a release delivers, and the
+   * two surfaces cannot drift into behaving differently on the same request.
+   *
+   * Releasing is what delivers, and it delivers by asking the ordinary question: who is the office
+   * holding something for? A colleague it holds nothing for is never asked, so a resume wakes
+   * **nobody the pause did not owe a message to** — a colleague that was idle with nothing waiting
+   * and was not addressed while the office was paused stays idle, which is the whole difference
+   * between a pause and a message to the whole office. A colleague that is busy again by the time
+   * the office gets to it keeps its holds and takes them at its next idle transition, exactly as a
+   * restart's holds do.
+   *
+   * Setting the state is one stored write and nothing else: a colleague that is mid-turn is **not**
+   * interrupted, because the pause is a barrier on what the office sends next rather than a stop
+   * button on what it is doing. What it sends next is held, and the office's idle notice is not
+   * asked at all until it is resumed.
+   * @param request - `enabled` is the state asked for; `note` is the reason published with it.
+   * @param where - the tool or route refusing the request, for the diagnostic.
+   * @returns what the office now holds and, on a release, who it woke.
+   * @throws {TypeError} when `enabled` is not a boolean, when a note is published beside a release,
+   *   or when a note is longer than {@link OFFICE_PAUSE_NOTE_MAX_CHARS}.
+   */
+  const setPaused = async ({ enabled, note, where }) => {
+    if (typeof enabled !== 'boolean') {
+      throw new TypeError(`${where}: enabled must be true or false, got ${JSON.stringify(enabled)}`)
+    }
+    if (!enabled && note !== undefined) {
+      throw new TypeError(
+        `${where}: note belongs to the state being set; releasing the pause clears the note, so pass note `
+        + 'only with enabled: true',
+      )
+    }
+    if (enabled) {
+      const at = Date.now()
+      const published = normalizeNote(note, where, OFFICE_PAUSE_NOTE_MAX_CHARS)
+      await recordPaused({ at, note: published })
+      return compact({
+        paused: true,
+        note: published,
+        since: at,
+        held: heldCountAll(),
+        resumed: [],
+      })
+    }
+    // Released before the delivery, never after: a release that handed the mail over and then failed
+    // to write the state would leave an office that is paused and has already answered, which no
+    // reader of the record could make sense of.
+    await recordPaused(undefined)
+    const handed = await flushEveryHold()
+    return {
+      paused: false,
+      held: heldCountAll(),
+      resumed: await Promise.all(handed.map(async entry => ({
+        colleague: await nameOf(entry.sessionId),
+        messages: entry.count,
+      }))),
+    }
+  }
+
+  /**
    * Where every colleague of the roster stands at this instant, in roster order.
    *
    * The status is {@link colleagueStatus}'s — the registry's, refined by the wait a colleague may
@@ -3229,11 +3450,14 @@ function createOffice(ctx, domain, config, hooks) {
   }
 
   /**
-   * The office's own records as one tick: its name, its roster, and its channels.
+   * The office's own records as one tick: its name, its pause, its roster, and its channels.
    *
    * Sorted by key so that a table rewritten in another order is not read as a change. The
    * sequence counters are left out because a message moves them, and a message is what
-   * {@link channelTick} already reports.
+   * {@link channelTick} already reports. The pause is read from the global slot beside the name,
+   * because it is office-wide state of the same kind: the panel draws a suspended office differently
+   * from a working one, so a pause that moved and did not move the tick would leave the page
+   * showing a control for the state the office is no longer in.
    * @returns the stored structure of the office, flattened.
    */
   const structureTick = () => {
@@ -3248,7 +3472,9 @@ function createOffice(ctx, domain, config, hooks) {
         const record = validateChannel(value)
         return [channelId, record.kind, record.topic, record.members]
       })
-    return JSON.stringify([name(), collegial, channeled])
+    const stored = domain.global.get()
+    const suspension = [stored?.paused, stored?.pausedAt, stored?.pauseNote]
+    return JSON.stringify([name(), suspension, collegial, channeled])
   }
 
   /**
@@ -3353,8 +3579,11 @@ function createOffice(ctx, domain, config, hooks) {
   const noteIdle = async (sessionId) => {
     const settings = config.idleNotice
     // A deployment that wakes nobody cannot ask anybody anything; the notice would be a message
-    // written for a reader the office promised not to disturb.
+    // written for a reader the office promised not to disturb. A paused office is the same promise
+    // written for everybody: the question would spend a turn of a leader's session to be held, and
+    // the office asks again as soon as the resume makes a delivery, so nothing is lost by waiting.
     if (!settings.enabled || !config.wakesEnabled || idleNoticeInFlight) return undefined
+    if (pausedState() !== undefined) return undefined
     // A status change is process-wide, so it says nothing about this office unless the session
     // that changed is one of its colleagues: another session going idle must not wake the leaders.
     if (sessionId !== undefined && colleagueBySession(sessionId) === undefined) return undefined
@@ -3752,6 +3981,8 @@ function createOffice(ctx, domain, config, hooks) {
     wakeLabels,
     doNotDisturbOf,
     recordDoNotDisturb,
+    pausedState,
+    setPaused,
     heldCount,
     generalChannel: GENERAL_CHANNEL,
     mailboxChannel: MAILBOX_CHANNEL,
@@ -4746,6 +4977,115 @@ function createInterruptTool(agent, tool) {
 }
 
 /**
+ * Build the pause tool.
+ *
+ * Its subject is the **office** rather than one colleague: the state is a property of the whole
+ * room, so — unlike {@link createDoNotDisturbTool} — it takes the ordinary `office` argument and
+ * writes exactly one office, and a colleague that belongs to two of them pauses the one it names.
+ * A boss holds it because it runs the office, and a leader holds it because a room that is spending
+ * tokens on the wrong work is a leader's problem; the capability is re-checked against the office
+ * the call resolved, so a member cannot pause anything.
+ *
+ * What a pause does and does not do is the whole contract, and both halves are in the description
+ * because a caller that guesses wrong either panics the office or believes it stopped work that is
+ * still running. It refuses every wake rather than stopping what is already running, it holds what
+ * it refuses, and it wakes on the resume only the colleagues something arrived for.
+ * @param tool - the caller's shared declaration helpers.
+ * @returns the pause tool definition.
+ */
+function createPauseTool(tool) {
+  const name = 'office_pause'
+  const { text } = tool
+  return {
+    name,
+    description:
+      'Pause the whole office, or resume it. While an office is paused nothing it is addressed wakes anybody: a '
+      + 'post that names a colleague, a level or a channel that reaches one, a private message, and the office\'s '
+      + 'own idle notice are all held rather than delivered, and every sender is told so — with the reason below — '
+      + 'in the result of its own call. A pause is a barrier on waking, not a stop button: a colleague that is '
+      + 'mid-turn finishes what it is doing, and nothing interrupts it. Writing and reading go on; only waking '
+      + 'stops. Resuming delivers every held message, merged into one turn per colleague, and wakes nobody the '
+      + 'office had nothing held for — a colleague with no task is left alone rather than addressed. Unlike a '
+      + 'colleague\'s own do-not-disturb, the pause does not end when a colleague speaks: only this call, or the '
+      + 'panel, resumes the office. Use it to stop an office spending on work that should not continue, and resume '
+      + 'it as soon as the office should answer again.',
+    parameters: tool.parameters(['enabled'], {
+      enabled: {
+        type: 'boolean',
+        description: 'true to pause the office: nothing it is addressed wakes anybody until it is resumed. false '
+          + 'to resume it, which is what delivers everything held.',
+      },
+      note: {
+        type: 'string',
+        description: `A short reason quoted to every sender while the office is paused (at most `
+          + `${String(OFFICE_PAUSE_NOTE_MAX_CHARS)} characters): what the office is waiting for and who to ask `
+          + 'instead. Omit it to publish none, and it is refused beside enabled: false, which clears it.',
+      },
+    }),
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['office', 'paused', 'held', 'resumed'],
+        properties: {
+          office: { type: 'string' },
+          paused: { type: 'boolean' },
+          note: { type: 'string' },
+          since: { type: 'integer' },
+          // What the office is holding: what it already held when it was paused, or what a resume
+          // could not hand over because the colleague is still working.
+          held: { type: 'integer' },
+          // Who the resume woke, and how much each was handed. A colleague the office holds nothing
+          // for is absent, which is what makes a resume reach only the colleagues a pause owed.
+          resumed: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['colleague', 'messages'],
+              properties: {
+                colleague: { type: 'string' },
+                messages: { type: 'integer' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        if (value.paused) {
+          return text(`[office ${value.office}] The office is paused: nothing it is addressed wakes anybody `
+            + 'until it is resumed'
+            + `${value.note === undefined ? '' : ` (reason published: ${value.note})`}.`
+            + `${value.held === 0 ? '' : ` ${String(value.held)} message(s) already held for its colleagues.`}`
+            + ' Colleagues already mid-turn are not interrupted; they finish what they are doing.')
+        }
+        const woken = value.resumed
+          .map(entry => `${entry.colleague} (${String(entry.messages)})`)
+          .join(', ')
+        return text(`[office ${value.office}] The office is running again`
+          + `${woken.length === 0 ? '' : `; woken: ${woken}`}.`
+          + `${value.held === 0
+            ? ''
+            : ` ${String(value.held)} message(s) stay held for colleagues that are still working, and arrive in `
+              + 'the turn that follows their own.'}`)
+      },
+    },
+    async execute(args) {
+      const resolved = tool.entry(args, name)
+      tool.require(resolved, 'pause', name)
+      return {
+        office: resolved.name,
+        ...await resolved.office.setPaused({
+          enabled: args?.enabled,
+          note: args?.note,
+          where: name,
+        }),
+      }
+    },
+  }
+}
+
+/**
  * Build the do-not-disturb tool for one colleague.
  *
  * This is the one office tool whose subject is the **colleague** rather than one office: the state
@@ -4886,7 +5226,10 @@ function createColleaguesTool(tool) {
       + 'subscription, so a colleague may write into a channel it does not subscribe to and cannot read back. '
       + 'Never wakes anybody. It also reports whether a colleague has set itself do-not-disturb, with the '
       + 'reason it published: a message addressed to such a colleague is held rather than delivered, so a '
-      + 'caller that reads the roster knows why nothing will come back before it posts.',
+      + 'caller that reads the roster knows why nothing will come back before it posts. The office\'s own pause '
+      + 'is reported beside the roster, with when it was set and the reason published: while it is set nothing '
+      + 'the office is addressed wakes anybody, whatever the colleagues below say, and a resume wakes only the '
+      + 'ones that hold mail.',
     parameters: tool.parameters([], {}),
     output: {
       schema: {
@@ -4895,6 +5238,12 @@ function createColleaguesTool(tool) {
         required: ['office', 'colleagues'],
         properties: {
           office: { type: 'string' },
+          // The office's own state, beside its roster rather than inside it: a paused office wakes
+          // nobody, so every colleague below is exactly as it was and only these three fields say
+          // why nothing will come back.
+          paused: { type: 'boolean' },
+          pausedAt: { type: 'integer' },
+          pauseNote: { type: 'string' },
           colleagues: {
             type: 'array',
             items: {
@@ -4929,7 +5278,13 @@ function createColleaguesTool(tool) {
         },
       },
       render: (_args, value) => {
-        if (value.colleagues.length === 0) return tool.text(`[${value.office}] No colleagues yet.`)
+        const suspension = value.paused === true
+          ? `; the office is PAUSED (since ${new Date(value.pausedAt).toISOString()}`
+            + `${value.pauseNote === undefined ? '' : `, reason published: ${value.pauseNote}`}) — nothing it is `
+            + 'addressed wakes anybody until it is resumed, and only the colleagues with held mail below are '
+            + 'woken then'
+          : ''
+        if (value.colleagues.length === 0) return tool.text(`[${value.office}] No colleagues yet.${suspension}`)
         const lines = value.colleagues.map((colleague) => {
           const details = [
             `subscribes ${colleague.channels.map(channelId => `#${channelId}`).join(', ')}`,
@@ -4951,7 +5306,8 @@ function createColleaguesTool(tool) {
           return `- ${colleague.name} (${colleague.role}) — ${colleague.status}; ${details.join('; ')}`
             + `${colleague.description === undefined ? '' : `\n  ${colleague.description}`}`
         })
-        return tool.text(`[${value.office}] ${String(value.colleagues.length)} colleague(s):\n${lines.join('\n')}`)
+        return tool.text(`[${value.office}] ${String(value.colleagues.length)} colleague(s)${suspension}:`
+          + `\n${lines.join('\n')}`)
       },
     },
     async execute(args) {
@@ -4963,7 +5319,18 @@ function createColleaguesTool(tool) {
         ...colleague,
         channels: office.subscribedChannels(colleague.sessionId).map(channel => channel.channelId),
       }))
-      return { office: officeName, colleagues }
+      // The office's own pause, read here rather than inside `rosterStatus` for the same reason: it
+      // is one fact about the office, and the panel draws it from the state route instead. The two
+      // fields of the state are absent while it is unset, because a declared result schema types
+      // every key it lists and `undefined` is not a number.
+      const paused = office.pausedState()
+      return compact({
+        office: officeName,
+        colleagues,
+        paused: paused !== undefined,
+        pausedAt: paused?.at,
+        pauseNote: paused?.note,
+      })
     },
   }
 }
@@ -5700,7 +6067,9 @@ function createCommunicationTools(agent, tool) {
         + 'rather than one post each. Never post to acknowledge a message, to agree with one, or to announce '
         + 'that you are working. A colleague that has set itself do-not-disturb is not woken at all: its '
         + 'delivery outcome says `do-not-disturb` and the message is held until that colleague releases the '
-        + 'state, so read that outcome before waiting on an answer.',
+        + 'state, so read that outcome before waiting on an answer. A paused office wakes nobody whatever the '
+        + 'wake says: every outcome reads `office-paused` and the message is held until the office is resumed, '
+        + 'so an answer to a post into a paused office is minutes or hours away rather than a turn away.',
       parameters: tool.parameters(['wake', 'text'], {
         channel: {
           type: 'string',
@@ -5774,8 +6143,9 @@ function createCommunicationTools(agent, tool) {
         + 'it, for as long as the account stays unusable — or `inactive` when its session was not loaded and '
         + 'this message woke it. A colleague that has set itself do-not-disturb reports `do-not-disturb` '
         + 'instead: the office did not wake it, the message is held, and it arrives when that colleague '
-        + 'releases the state. Addressing the user writes to the user mailbox, where nothing is woken and no '
-        + 'colleague status is reported.',
+        + 'releases the state. A paused office reports `office-paused` instead of any of them: it wakes '
+        + 'nobody, the message is held, and it arrives when the office is resumed. Addressing the user '
+        + 'writes to the user mailbox, where nothing is woken and no colleague status is reported.',
       parameters: tool.parameters(['wake', 'text'], {
         wake: {
           type: 'array',
@@ -5845,6 +6215,7 @@ function createOfficeTools(agent, host) {
   const definitions = []
   if (acting.capabilities.includes('manage')) definitions.push(...createManagementTools(agent, host, tool))
   if (acting.capabilities.includes('interrupt')) definitions.push(createInterruptTool(agent, tool))
+  if (acting.capabilities.includes('pause')) definitions.push(createPauseTool(tool))
   if (acting.capabilities.includes('configure')) definitions.push(createConfigureTool(tool))
   if (acting.capabilities.includes('compact')) definitions.push(createCompactTool(agent, tool))
   if (acting.capabilities.includes('channels')) definitions.push(...createChannelManagementTools(tool))
@@ -6304,6 +6675,9 @@ async function officeState(ctx, mounted, requestedChannel, since) {
   const limit = hostConfig().readLimit
   const mailbox = office.readMessages(office.mailboxChannel, Infinity)
   const selected = office.readMessages(channelId, Infinity)
+  // Read once: the pause is one fact of the office, and it is drawn by the control, the banner, and
+  // the poll token that {@link createOffice}'s `panelTick` composes from this office's own records.
+  const paused = office.pausedState()
   return {
     office: mounted.name,
     officeId: mounted.id,
@@ -6325,6 +6699,10 @@ async function officeState(ctx, mounted, requestedChannel, since) {
     // The name `@` addresses to reach the user's mailbox, and the mailbox itself. A colleague
     // cannot read it through any tool, so this route is the only way it reaches a surface.
     user: { name: mounted.config.userName },
+    // Whether this office is suspended, so the panel draws the control and the banner that belong
+    // to the state the office is actually in. It travels beside the roster rather than inside it:
+    // a paused office wakes nobody, so every colleague below is exactly as it was.
+    ...compact({ paused: paused !== undefined, pausedAt: paused?.at, pauseNote: paused?.note }),
     channels: office.listChannels().map(c => compact({
       channelId: c.channelId,
       kind: c.kind,
@@ -6561,6 +6939,32 @@ function registerHostRoutes(ctx, config) {
             // asks for the merge instead.
           })
           return respondJson(res, 200, toPostResult(posted, mounted.name))
+        } catch (error) {
+          return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }))
+
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: PAUSE_ROUTE,
+      handler: async (req, res) => {
+        const refused = refusal(req)
+        if (refused !== undefined) return respondJson(res, refused, { error: 'not authorized' })
+        if (req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
+        const mounted = officeOr404(req, res)
+        if (mounted === undefined) return undefined
+        try {
+          const body = await readJson(req)
+          // The same operation the `pause` capability calls, so the two surfaces cannot disagree
+          // about what a pause does — and the panel needs no boss session to reach it, which is
+          // the point of it: suspending an office is an operator's act, not one a model performs.
+          const paused = await mounted.office.setPaused({
+            enabled: body.enabled,
+            note: body.note,
+            where: 'office',
+          })
+          return respondJson(res, 200, compact({ office: mounted.name, ...paused }))
         } catch (error) {
           return respondJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
         }

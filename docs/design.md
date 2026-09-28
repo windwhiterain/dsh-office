@@ -743,6 +743,49 @@ including the ordering that follows: announce the quiet stretch first, because t
 itself a post. And the result says it happened, because a state that silently ended is a colleague
 that suddenly receives turns it believed it had turned off.
 
+## Why a pause is the office's own state
+
+An office can be suspended as a whole. It is the office-wide sibling of the state above, and four
+decisions define it; each was a choice, and the rejected alternatives are what the design is made
+of.
+
+**It refuses wakes and does not stop turns.** The alternative was a stop button that cancels every
+running turn the way `office_interrupt` cancels one. It was rejected because the two features answer
+different questions — `office_interrupt` is "this is the wrong work", a pause is "no more work
+starts" — and because cancelling every turn in a roster is a destructive act that a leader should
+have to name one colleague at a time. A colleague that is mid-turn finishes its turn, and the mail
+that arrives meanwhile is held for the resume.
+
+**A refused wake is held, not dropped.** Dropping it would have matched "any wake is ineffective"
+more literally, and it was rejected because a wake is a promise the office keeps: a message addressed
+to a colleague that the office then forgets is a message the sender cannot tell apart from one that
+was never sent. So the pause reuses the do-not-disturb machinery exactly — the same `pending` hold,
+the same merge, the same detail quoted to the sender — and the cost is one honest looseness in the
+wording: a colleague that had nothing waiting and *is* addressed during a pause does get a turn on
+the resume, because the office now holds something for it.
+
+**A resume wakes exactly the colleagues the office holds something for.** The tempting alternative
+was to mark the office's members as paused and wake them all on the resume, which is what "resume
+everything" reads like. It was rejected because a pause is not a task handed to the whole room: a
+colleague that was idle with nothing waiting, and was not addressed while the office was suspended,
+has no work to come back to, and waking it would spend a turn of its session to be told that nothing
+has happened. Storing a per-colleague paused set was considered and dropped for the same reason —
+the hold table already *is* that set, and a second copy would be a thing to keep in step with the
+first.
+
+**It is not ended by a colleague speaking.** That is the one place it differs from do not disturb,
+and it is deliberate: a colleague that posts is a statement about itself, while a pause is somebody's
+decision about the room. If speaking released it, a colleague that was mid-turn when the office was
+suspended would clear the state with its next post and wake an office the operator had just stopped.
+So the release belongs to the `pause` capability and the panel, and the tool description says so in
+the sentence a model reads before it acts.
+
+**Authority is the `pause` capability**, which `leader` holds and so does the boss. A member holds
+nothing: a colleague stopping the whole room is not a right a colleague can grant itself, and the
+capability is re-checked against the office a call resolved, so a leader of one office cannot pause
+another. The panel reaches the same operation through its own route, because suspending an office is
+an operator's act that should not require a boss session to exist.
+
 ## Why the office asks a question of its own
 
 Every message the office stores was written by somebody: the user, or a colleague with something to

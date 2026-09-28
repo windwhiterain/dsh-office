@@ -105,6 +105,19 @@ What it covers, by area:
   carries them, and the refusals are covered: a call that names no state, a state that is not a
   boolean, a note sent beside a release, and a note past the bound. A boss holds no such tool,
   because it is on no roster.
+- **The office pause** — a leader's and the boss's `office_pause`, and what the state does to delivery:
+  a post that names a colleague, a private message, and a post into a colleague that is *also* away
+  are each held rather than delivered, every one of them reported to its own sender as
+  `office-paused` with the moment and the published reason quoted, and none of them opening a turn —
+  nor loading the session to do it. A colleague that is mid-turn is not interrupted, and the idle
+  transition that follows its turn is the moment the state refuses. The refusals are covered: a call
+  that names no state, a state that is not a boolean, a note sent beside a release, and a note past
+  the bound; a member's scope carries no such tool at all. The roster and the panel's snapshot report
+  the state beside the roster, and the token moves with it. A **resume** wakes only the colleagues
+  the office was holding something for — a colleague with no task is left alone, a colleague that is
+  busy again keeps its mail for its own next idle transition, and a pause nobody was addressed through
+  wakes nobody — and the state survives a restart, where the office is still suspended, still holding,
+  and still asking nothing of its own.
 - **How the state ends** — a colleague's own `office_post` clears it and reports the offices it
   cleared with the mail that was waiting, which then arrives as the one turn following the turn that
   spoke; a private message to the **user** does the same, on the one `office_dm` path that returns
@@ -151,7 +164,11 @@ the channel column between `#general` and a group channel through the switcher, 
 Channels dialog onto the group channels, seeding the colleague dialog from the colleague it
 was opened on, and asserting the wake each feed message states — the token the office recorded for
 it, and `nobody` for one that woke nobody — and the do-not-disturb state a colleague's roster row
-draws, with the reason it published.
+draws, with the reason it published. A **paused office** is checked the same way: the stub reports
+the state beside the roster and moves the revision with it, and the panel draws the band above the
+columns — carrying the reason the office published — and the header control that now reads **Resume
+office**; the dialog opened from it shows what the office published rather than a field to type a new
+reason into.
 
 The first snapshot is held back, which is the page's loading window: the check asserts the body
 says it is loading, holds **no button and no field at all**, and reports itself busy, and that

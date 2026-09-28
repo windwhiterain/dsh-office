@@ -21,11 +21,20 @@ slot, and five tables:
 
 The unit is named by the id rather than by the name because the storage hub requires a unit name
 to match `/^[a-z][a-z0-9_]*$/` — a backend turns it into a file-name or SQL-identifier segment —
-while an office name accepts any script. The **global slot holds `{ officeId, name, rosterRevision? }`**:
+while an office name accepts any script. The **global slot holds `{ officeId, name, rosterRevision?,
+paused?, pausedAt?, pauseNote? }`**:
 the name is data, which is what lets an office be renamed without moving its storage, and the
 revision is how many times the roster has changed since the office activated. A field of its own
 rather than a table record, because it is office-wide state and every write to it restates the whole
 slot — see [the roster line](delivery.md#the-roster-line) for what advances it and who reads it.
+
+The office's own **pause** is the rest of that slot. It belongs there for the same reason the name
+does: it is a fact about the office and not about any of its colleagues, and a table would have made
+it a per-session state that a pause could only half-apply. Absent means the office wakes, so a reader
+answers "is this office paused" from the flag's presence alone; `pausedAt` is required whenever
+`paused` is `true`, because the moment is what every sender's delivery detail quotes, and a
+hand-edited record carrying the flag without it is refused at the read rather than read as a pause
+nobody can date. See [delivery.md](delivery.md#pausing-the-office).
 
 The global is read on activation and treated as authoritative from then on:
 
@@ -152,7 +161,8 @@ wake at all.
 ### `pending`
 
 One record per message held for one colleague, written when a delivery could not be handed over
-because the colleague was not idle, and deleted only after that message's turn has been queued.
+because the colleague was not idle, had set itself do-not-disturb, or the office was
+[paused](delivery.md#pausing-the-office), and deleted only after that message's turn has been queued.
 The key is `<sessionId>#<messageId>`, so a hold is idempotent per message and the office can
 select a colleague's holds by key prefix.
 

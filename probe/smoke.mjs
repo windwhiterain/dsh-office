@@ -877,6 +877,13 @@ function makeHarness(rawConfig, loggedRoute, features = {}) {
     ctx,
     globalTools,
     tables,
+    /**
+     * The stored global slot of every unit this harness opened, by unit name.
+     *
+     * It is the one record that is not in a table — the office's own identity and its office-wide
+     * state live there — so a check that reads it needs the unit it was written into.
+     */
+    units,
     routes,
     liveAgents,
     titles,
@@ -1158,6 +1165,7 @@ await check('the boss holds the office complete tool set, the colleague only its
     'office_hire',
     'office_interrupt',
     'office_list',
+    'office_pause',
     'office_post',
     'office_read',
     'office_read_notifications',
@@ -1675,6 +1683,197 @@ await check('one do-not-disturb call silences every office that holds the collea
   assert.equal(east.tables.get('colleagues').get('session-tess').doNotDisturb, undefined, 'and clears both records')
 })
 
+await check('a paused office wakes nobody, holds what it refuses, and tells every sender why', async () => {
+  const paused = makeHarness({ officeName: 'paused' }, undefined, { rowId: 'office_paused' })
+  await paused.ready
+  const chief = paused.publish('session-paused-boss', { preset: 'office-boss' })
+  paused.titles.set('session-ada', 'ada')
+  paused.titles.set('session-bo', 'bo')
+  const ada = paused.publish('session-ada')
+  const bo = paused.publish('session-bo')
+  for (const sessionId of ['session-ada', 'session-bo']) {
+    await callBoss(chief, 'paused', 'office_adopt', { session_id: sessionId })
+  }
+  assert.ok(toolNames(chief).includes('office_pause'), 'a boss runs the office, so it holds the pause')
+  assert.ok(
+    !toolNames(ada).includes('office_pause'),
+    'a member holds no pause permission, so its scope never carries the tool at all',
+  )
+
+  ada.status = 'running'
+  const set = await callBoss(chief, 'paused', 'office_pause', {
+    enabled: true,
+    note: 'the migration is wrong; stop answering for ten minutes',
+  })
+  assert.equal(set.paused, true)
+  assert.equal(set.note, 'the migration is wrong; stop answering for ten minutes')
+  assert.ok(Number.isSafeInteger(set.since), 'and the moment the office was paused')
+  assert.equal(
+    paused.units.get('office_paused').value.paused,
+    true,
+    'the state is stored in the office\'s own slot, so a restart keeps it',
+  )
+
+  // The pause is a barrier on waking, not a stop button: the colleague that was mid-turn is
+  // interrupted by nothing, and nothing reaches it afterwards either.
+  const before = ada.sent.length
+  assert.equal(before, 0, 'a colleague already mid-turn is not interrupted')
+  const post = await call(bo, 'office_post', { text: 'ada, the diff is ready', wake: ['@ada'] })
+  assert.equal(post.deliveries[0].colleague, 'ada')
+  assert.equal(post.deliveries[0].status, 'office-paused', 'the sender is told the office is the reason')
+  assert.match(
+    post.deliveries[0].detail,
+    /the office is paused: it was paused at \d{4}-\d\d-\d\dT.*\(the reason published: the migration is wrong/,
+    'and quotes the state, so the sender can decide whether to wait',
+  )
+  assert.match(post.deliveries[0].detail, /held rather than delivered until the office is resumed/)
+  assert.equal(ada.sent.length, before, 'no wake opens a turn in a paused office')
+  assert.equal(
+    storedMessage(paused, post.message.messageId).deliveries['session-ada'].status,
+    'office-paused',
+    'the record keeps the outcome, so a later reader of the channel sees why nothing was answered',
+  )
+  assert.equal(
+    storedMessage(paused, post.message.messageId).text,
+    'ada, the diff is ready',
+    'and the message itself is still written to the channel, where office_read finds it',
+  )
+
+  const dm = await call(bo, 'office_dm', { wake: ['@ada'], text: 'and a private one' })
+  assert.equal(dm.deliveries[0].status, 'office-paused', 'a private message reports the same outcome')
+  assert.equal(dm.deliveries[0].colleagueStatus, 'running', 'beside the status the office read before the attempt')
+
+  // A colleague that set itself away is reported through the office, not around it: a suspended
+  // office wakes nobody at all, so the wider state is the one in force.
+  await call(ada, 'office_do_not_disturb', { enabled: true })
+  const both = await call(bo, 'office_post', { text: 'ada, again', wake: ['@ada'] })
+  assert.equal(both.deliveries[0].status, 'office-paused')
+  await call(ada, 'office_do_not_disturb', { enabled: false })
+
+  const roster = await call(bo, 'office_colleagues', { office: 'paused' })
+  assert.equal(roster.paused, true, 'the roster reports the office\'s own state')
+  assert.equal(roster.pauseNote, 'the migration is wrong; stop answering for ten minutes')
+  assert.ok(Number.isSafeInteger(roster.pausedAt))
+  // The panel draws the same fact from the same read, so the band needs no second route.
+  const state = await callRoute(routes, officeRoute('state', 'paused'))
+  assert.equal(state.payload.paused, true)
+  assert.equal(state.payload.pauseNote, 'the migration is wrong; stop answering for ten minutes')
+
+  await assert.rejects(() => callBoss(chief, 'paused', 'office_pause', {}), /enabled must be true or false/)
+  await assert.rejects(
+    () => callBoss(chief, 'paused', 'office_pause', { enabled: 'yes' }),
+    /enabled must be true or false/,
+    'a call that names no state is refused rather than defaulted',
+  )
+  await assert.rejects(
+    () => callBoss(chief, 'paused', 'office_pause', { enabled: false, note: 'still paused' }),
+    /note belongs to the state being set/,
+  )
+  await assert.rejects(
+    () => callBoss(chief, 'paused', 'office_pause', { enabled: true, note: 'x'.repeat(501) }),
+    /the limit is 500/,
+  )
+
+  // The state is a stored fact of the office, so the panel's poll token moves with it.
+  await callBoss(chief, 'paused', 'office_pause', { enabled: false })
+  const moved = await callRoute(routes, `${officeRoute('state', 'paused')}&since=${state.payload.revision}`)
+  assert.notEqual(moved.payload.unchanged, true, 'resuming moves the token the panel holds')
+})
+
+await check('a resume wakes only the colleagues the office was holding something for', async () => {
+  const resuming = makeHarness({ officeName: 'resuming' }, undefined, { rowId: 'office_resuming' })
+  await resuming.ready
+  const chief = resuming.publish('session-resuming-boss', { preset: 'office-boss' })
+  resuming.titles.set('session-ada', 'ada')
+  resuming.titles.set('session-bo', 'bo')
+  const ada = resuming.publish('session-ada')
+  const bo = resuming.publish('session-bo')
+  await callBoss(chief, 'resuming', 'office_adopt', { session_id: 'session-ada' })
+  await callBoss(chief, 'resuming', 'office_adopt', { session_id: 'session-bo' })
+
+  await callBoss(chief, 'resuming', 'office_pause', { enabled: true })
+  await call(bo, 'office_post', { text: 'ada, the diff is ready', wake: ['@ada'] })
+  // The colleague is working through the pause: it is not interrupted, and the mail that arrived
+  // while the office was suspended is still held when it stops.
+  ada.status = 'running'
+  await resuming.setStatus('session-ada', 'idle')
+  assert.equal(ada.sent.length, 0, 'an idle transition is exactly the moment a pause exists to refuse')
+  const waiting = await call(bo, 'office_colleagues', { office: 'resuming' })
+  assert.equal(
+    waiting.colleagues.find(colleague => colleague.name === 'ada').pending,
+    1,
+    'and the office still holds what it refused',
+  )
+
+  const resumed = await callBoss(chief, 'resuming', 'office_pause', { enabled: false })
+  assert.equal(resumed.paused, false)
+  assert.deepEqual(resumed.resumed, [{ colleague: 'ada', messages: 1 }], 'only the colleague it owed a message to')
+  assert.equal(resumed.held, 0)
+  assert.equal(ada.sent.length, 1, 'and it is handed its mail in one turn')
+  assert.match(ada.sent[0].message.content[0].text, /ada, the diff is ready/)
+  assert.equal(bo.sent.length, 0, 'a colleague with no task is never woken by a resume')
+  assert.equal(
+    storedMessage(resuming, 'general-1').deliveries['session-ada'].status,
+    'delivered',
+    'the held wake is recorded as delivered, so the channel says what happened to it',
+  )
+
+  // A pause nobody was addressed through is a pause that owes nothing, so its resume is silent.
+  await callBoss(chief, 'resuming', 'office_pause', { enabled: true })
+  const second = await callBoss(chief, 'resuming', 'office_pause', { enabled: false })
+  assert.deepEqual(second.resumed, [], 'and it wakes nobody rather than the whole office')
+  assert.equal(ada.sent.length, 1)
+  assert.equal(bo.sent.length, 0)
+})
+
+await check('a pause survives a restart: the office is still suspended and still holding', async () => {
+  const stopping = makeHarness(
+    { officeName: 'stopping', idleNotice: { enabled: true, text: 'the office stopped; leaders, decide' } },
+    undefined,
+    { rowId: 'office_stopping' },
+  )
+  await stopping.ready
+  const chief = stopping.publish('session-stopping-boss', { preset: 'office-boss' })
+  stopping.titles.set('session-stopping-boss', 'chief')
+  stopping.titles.set('session-ivy', 'ivy')
+  stopping.titles.set('session-ada', 'ada')
+  const ivy = stopping.publish('session-ivy')
+  const ada = stopping.publish('session-ada')
+  await callBoss(chief, 'stopping', 'office_adopt', { session_id: 'session-ivy', role: 'leader' })
+  await callBoss(chief, 'stopping', 'office_adopt', { session_id: 'session-ada' })
+
+  await callBoss(chief, 'stopping', 'office_pause', { enabled: true, note: 'restoring the release branch' })
+  await callBoss(chief, 'stopping', 'office_post', { text: 'ivy, please take this', wake: ['@ivy'] })
+  assert.equal(ivy.sent.length, 0)
+
+  // The process stops mid-pause. A pause that a restart dropped would be a pause nobody can rely
+  // on: the office would start waking colleagues again with nothing saying it had been suspended.
+  stopping.dispose(ivy)
+  await stopping.close()
+  stopping.ctx.fiber.entry.options.id = 'office_stopping'
+  await apply(stopping.ctx, { officeName: 'stopping' })
+  await settle()
+
+  assert.equal(stopping.resumed.length, 0, 'a suspended office loads no session to hand it a message')
+  const stored = stopping.units.get('office_stopping').value
+  assert.equal(stored.paused, true, 'and the state is what the storage still holds')
+  assert.equal(stored.pauseNote, 'restoring the release branch')
+
+  // The office is quiet in every direction while it is suspended, its own question included: a
+  // notice spends a turn of a leader's session, and a paused office reaches nobody.
+  const notices = () => [...stopping.tables.get('messages').entries()]
+    .map(([, value]) => value)
+    .filter(message => message.senderName === 'office')
+  assert.equal(notices().length, 0, 'the office asks nothing at activation while it is paused')
+  await stopping.setStatus('session-ada', 'running')
+  await stopping.setStatus('session-ada', 'idle')
+  assert.equal(notices().length, 0, 'and an idle transition is not the moment to start asking')
+
+  const resumed = await callBoss(chief, 'stopping', 'office_pause', { enabled: false })
+  assert.deepEqual(resumed.resumed, [{ colleague: 'ivy', messages: 1 }], 'the resume hands over what the pause held')
+  assert.equal(stopping.liveAgents.get('session-ivy').sent.length, 1)
+})
+
 await check('office_dm notify:step-end steers into the running turn, and the claim releases the hold', async () => {
   const steering = makeHarness({ officeName: 'steering' })
   await steering.ready
@@ -2164,7 +2363,7 @@ await check('office_hire creates a session, titles it, adopts it, and arms it', 
     toolNames(liveAgents.get('session-hired-1')),
     ['office_channel_create', 'office_channel_delete', 'office_channel_members', 'office_channels',
       'office_colleagues', 'office_compact', 'office_configure', 'office_dm', 'office_do_not_disturb',
-      'office_interrupt', 'office_post', 'office_read', 'office_read_notifications'],
+      'office_interrupt', 'office_pause', 'office_post', 'office_read', 'office_read_notifications'],
     'the new colleague is armed with exactly the tools its role holds, in the same activation',
   )
   await assert.rejects(
@@ -3613,6 +3812,7 @@ await check('each predefined role holds exactly the office tools it is defined w
     'office_dm',
     'office_do_not_disturb',
     'office_interrupt',
+    'office_pause',
     'office_post',
     'office_read',
     'office_read_notifications',

@@ -74,7 +74,9 @@
                 existing session, and dismissing removes it without deleting the session. Each
                 colleague's role — member or leader — decides the office tools it holds and the
                 session permission it runs under. You hold every office tool, so
-                manage the roster and its channels, read any channel, and post to it. Your one
+                manage the roster and its channels, read any channel, and post to it. You can
+                suspend the whole office with office_pause when it is spending on work that
+                should not continue, and resume it when it should answer again. Your one
                 other tool is a persistent bash shell, for inspecting what colleagues produced
                 on disk: you hold no file or search tools, so read the roster and the channels
                 instead, and reserve the shell for the files themselves. Running several

@@ -24,6 +24,7 @@ through the Cordis context, so it survives harness upgrades.
   - [Roles and permissions](#roles-and-permissions)
   - [Who a message wakes](#who-a-message-wakes)
   - [Do not disturb](#do-not-disturb)
+  - [Pause](#pause)
   - [Tools](#tools)
     - [The boss's complete tool set](#the-bosss-complete-tool-set)
     - [Colleagues](#colleagues)
@@ -172,6 +173,7 @@ maps it, which session permission that session runs under.
 | `office_read`, `office_read_notifications`, `office_colleagues`, `office_channels` | yes | yes |
 | `office_post`, `office_dm` | yes | yes |
 | `office_do_not_disturb` | yes | yes |
+| `office_pause` (the whole office) | — | yes |
 | `office_interrupt` | — | yes |
 | `office_compact`, `office_configure` | — | yes |
 | `office_channel_create`, `office_channel_delete`, `office_channel_members` | — | yes |
@@ -282,7 +284,8 @@ named colleague is not scoped at all, because naming one is addressing it.
 is one conversation, and `office_post` is how a rung or a channel is reached.
 
 **A colleague that has set itself do-not-disturb is not woken by any of this.** Its delivery
-outcome says so and the message is held; see [Do not disturb](#do-not-disturb).
+outcome says so and the message is held; see [Do not disturb](#do-not-disturb). A **paused office**
+is woken by none of it either, whatever the spelling — see [Pause](#pause).
 
 ## Do not disturb
 
@@ -367,6 +370,58 @@ Only a **colleague** holds the tool — a boss is not on a roster and nothing wa
 office — and it can only set its own state. The state is stored on the colleague's record, so it
 survives a host restart and a plugin reload, and a dismissal takes it with the record.
 
+## Pause
+
+An office can be **paused** as a whole — the room is suspended, nothing it is addressed wakes
+anybody, and what arrives meanwhile waits — and resumed when it should answer again. A leader and
+the boss hold `office_pause`; the Web panel has the same control in its header, and a panel
+post — a user's own wake — is suspended by it like any other:
+
+```text
+office_pause  { "office": "office", "enabled": true, "note": "restoring the release branch — back at noon" }
+
+[office office] The office is paused: nothing it is addressed wakes anybody until it is resumed
+(reason published: restoring the release branch — back at noon). Colleagues already mid-turn are
+not interrupted; they finish what they are doing.
+```
+
+A pause is a **barrier on waking, not a stop button**, and that is the whole contract:
+
+- **Nothing wakes.** A post that names a colleague, a level or a channel that reaches one, a
+  private message, and the office's own idle notice are all **held** rather than delivered, and
+  every sender is told so in the result of its own call, with the moment and the reason quoted.
+  Writing and reading go on: the message is in its channel, and the office keeps it.
+- **Nothing is interrupted.** A colleague that is mid-turn finishes the turn it is running. Pausing
+  does not cancel work, and the state that suspends an office is not a way to abandon a colleague
+  mid-step — that is what `office_interrupt` is for, one colleague at a time.
+- **A resume wakes nobody it has nothing for.** It asks the ordinary question — *who is the office
+  holding something for?* — and answers it with one merged turn each. A colleague that was idle
+  with no mail waiting, and was not addressed while the office was paused, is **not** woken: the
+  pause is not a message to the whole office, and a colleague with no task stays without one.
+
+```text
+office_pause  { "office": "office", "enabled": false }
+
+[office office] The office is running again; woken: alice (2).
+```
+
+Three things make it a state rather than a filter. It is **read before the session is** — resuming
+a session is itself a way of reaching it, so a suspended office loads no colleague to tell it that
+something arrived; it is **stored on the office's own global slot**, so a host restart does not
+quietly start waking colleagues again; and it is **not ended by a colleague speaking**, which is the
+one place it differs from [do not disturb](#do-not-disturb): a pause is somebody's decision about
+the whole room, so only `office_pause` or the panel releases it.
+
+Two things it deliberately leaves alone: a colleague that is already running can still take its own
+held mail with `office_read_notifications` (the pause gates what the office delivers, not what a
+session reads about itself), and hiring into a paused office still greets the new colleague — the
+greeting is what makes its session exist, and there is no hold that could deliver it later.
+
+`office_colleagues` reports it beside the roster — `paused`, `pausedAt`, `pauseNote` — because a
+caller that reads the roster is exactly the caller deciding whether to post, and a colleague's own
+status says nothing about the office around it. The panel draws the same fact as a band above the
+columns, and the poll token moves with the state.
+
 ## Tools
 
 **No office tool is global.** Each is installed into one agent's own scope according to the role
@@ -390,7 +445,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 |---|---|
 | `office_list` | List the offices this session runs, with their names and colleague counts. |
 | `office_roster` | List colleagues and channels; `include_unadopted` also lists sessions available to adopt, each with its workspace and its sidebar title — archived sessions, and sessions no workspace accounts, are not offered. |
-| `office_colleagues` | Every colleague with its role, description, live status — `running`, `idle`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when its session is not loaded — effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, the channels it subscribes to, held-message count, last activity, and whether it has set itself do-not-disturb with the reason it published. A pure query: it wakes nobody. |
+| `office_colleagues` | Every colleague with its role, description, live status — `running`, `idle`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when its session is not loaded — effective permission, the agent preset it is bound to with the number of tools it holds (`none` means no preset tool at all: no shell, files, or skills), model route, the channels it subscribes to, held-message count, last activity, and whether it has set itself do-not-disturb with the reason it published — plus, beside the roster, whether the **office** is paused, when, and why. A pure query: it wakes nobody. |
 | `office_adopt` | Adopt an existing session, with an optional `name`, `role`, and `description`. |
 | `office_hire` | Create a session, title it, adopt it, and greet it **privately**. Accepts `role`, `description`, `agent_preset`, `provider`+`model`, and `reasoning_effort`. |
 | `office_dismiss` | Remove a colleague from the roster and withdraw its tools. The session itself keeps its history and workspace. |
@@ -400,6 +455,7 @@ Installed into an agent whose session preset is *any* mounted office's `bossPres
 | `office_channel_delete` | Delete a group channel the office created; its messages and the holds it owed go with it. The standing channels and the direct ones are refused. |
 | `office_channel_members` | Add or remove a group channel's members, named by session title — or read the current members back with neither list. |
 | `office_interrupt` | Cancel a colleague's running turn; the office then hands it everything held as one turn. Reports `interrupted: false` for a colleague that is idle or not loaded. A colleague waiting out an exhausted account quota holds a turn like any other, so it can be stopped too — the result names that wait, and ending it does not end the exhaustion. |
+| `office_pause` | Pause the whole office, or resume it. While it is paused nothing it is addressed wakes anybody — the message is held and its sender told — and a colleague that is mid-turn is not interrupted. A resume delivers everything held, one merged turn per colleague, and wakes nobody the office had nothing held for. See [Pause](#pause). |
 | `office_post` | Post to a channel: `#general` by default, or any group channel the office holds — a subscription decides who reads a channel and whom a level posted there wakes, never who may write. `wake` **is required** and decides who hears it — names (`["@alice"]`), one level (`["$member"]`, `["$leader"]`), which wakes its rung and every rung above it, or one channel (`["#dev"]`), which wakes that channel's members wherever the post goes — and an empty list writes without waking anyone; naming the user files a copy in the mailbox. A group channel wakes only its own members among the ones the wake addresses. `notify` picks when a colleague that is **mid-turn** receives it: `step-end` (the default) splices it into the running turn to be read at its next step boundary, and `turn-end` holds it until the turn ends and hands it over merged with whatever else arrived. An idle colleague gets it now either way. See [Who a message wakes](#who-a-message-wakes). |
 | `office_dm` | Private message to one colleague named by `wake` (exactly one, no level or channel), or mail to the user, whose name writes to the mailbox. Takes the same `notify` as `office_post`. The delivery reports the colleague's own status too, as the office read it *before* delivering — `idle`, `running`, `quota-retry` while it waits out an exhausted account quota, or `inactive` when this message is what woke it — so a sender learns why nothing comes back. |
 | `office_read` | Read channel history by sequence range and filters, addressed by name, by a colleague's title for a DM, or by `*` for everything you can read. Each message states the wake it was written with — `· wake $member`, `· wake @alice`, or `· wake nobody` for a message that woke nobody — so a reader who was not notified can still see whether the message was aimed at it. |
@@ -432,6 +488,7 @@ Installed into every colleague's session, and into a session the moment it is ad
 | `office_post` | yes | yes |
 | `office_dm` | yes | yes |
 | `office_do_not_disturb` | yes | yes |
+| `office_pause` | — | yes |
 | `office_interrupt` | — | yes |
 | `office_compact` | — | yes |
 | `office_configure` | — | yes |
@@ -468,6 +525,8 @@ Every office tool's result carries `office`, the name of the office that produce
 presenter stays a pure function of the result it is given. `office_do_not_disturb` is the one
 exception, and it is the exception its subject forces: the state belongs to the session rather than
 to one office, so its result carries `offices` — every office it wrote — instead of naming one.
+`office_pause` names one office for the same reason every other tool does: a pause is a fact about
+*this* office, and a colleague of two pauses the one it names.
 
 ## Channels
 
@@ -675,6 +734,15 @@ roster, the channel, and the mailbox — and each of the two side columns is ope
 the header, next to **Hire a colleague**, and closed either from that button again or from the
 **✕** in its own head. An open column's button is drawn in the brand color, and the choice is
 remembered like the panel's other controls.
+
+**Pause office** sits in the same header, and it is the one control there that reports a state
+rather than opening a surface: it reads **Resume office**, in the brand color, while the office is
+suspended. Either opens one dialog — a reason to publish while the office is running, and the
+reason it published plus the moment it was paused once it is not — and a **paused** office draws a
+band above the columns saying so, because a channel that has quietly stopped answering is
+otherwise indistinguishable from one nobody replied in. The band carries its own **Resume**, and
+the office's poll token moves with the state, so a pause made by a leader's `office_pause` shows up
+without a reload. See [Pause](#pause).
 
 Every message row carries its sequence number (`#12`), the number the office anchors a message id
 like `general-12` on and `office_read` addresses a range with, so a human can cite an anchor

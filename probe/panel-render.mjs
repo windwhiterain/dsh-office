@@ -157,7 +157,25 @@ const releaseHeld = () => {
  * It is what the panel hands back on its next poll of the same office and channel, so the stub can
  * answer "nothing moved" the way a quiet office does and the check can see that the poll asked.
  */
+/**
+ * The token every full snapshot carries.
+ *
+ * It is what the panel hands back on its next poll of the same office and channel, so the stub can
+ * answer "nothing moved" the way a quiet office does and the check can see that the poll asked.
+ */
 const SNAPSHOT_REVISION = 'tick-1'
+/**
+ * The token the next full answer carries, and the office's own pause as the state route reports it.
+ *
+ * A pause moves the token, exactly as the office's own records do, so a check that suspends the
+ * office is answered in full on the next poll rather than being told nothing moved.
+ */
+let revision = SNAPSHOT_REVISION
+let officePause = {}
+const suspendOffice = (note) => {
+  officePause = { paused: true, pausedAt: Date.UTC(2026, 0, 1, 12, 0, 0), pauseNote: note }
+  revision = 'tick-2'
+}
 dom.window.__ModuleLoader__ = { load: (module) => { captured = module } }
 globalThis.fetch = async (path) => {
   calls.push(path)
@@ -166,15 +184,15 @@ globalThis.fetch = async (path) => {
   const body = path === '/dsh-office/offices'
     ? { offices: [{ id: 'office', name: 'office' }] }
     : url.pathname.endsWith('/state')
-      ? since === SNAPSHOT_REVISION
+      ? since === revision
         ? {
           office: 'office',
           officeId: 'office',
           channel: url.searchParams.get('channel') ?? 'general',
-          revision: SNAPSHOT_REVISION,
+          revision,
           unchanged: true,
         }
-        : { ...SNAPSHOT, revision: SNAPSHOT_REVISION, channel: url.searchParams.get('channel') ?? 'general' }
+        : { ...SNAPSHOT, ...officePause, revision, channel: url.searchParams.get('channel') ?? 'general' }
       : OLDER
   if (url.pathname.endsWith('/state') && holding(url)) {
     await new Promise(resolve => { held.push(resolve) })
@@ -453,6 +471,32 @@ assert.ok(
   checkboxes.some(box => box.closest('label')?.textContent.includes('nia')),
   'the member editor opens on the channel roster',
 )
+
+// A pause is a state the panel draws rather than a surface it opens: the office reports it beside
+// the roster, and the band above the columns and the header control are what change with it.
+suspendOffice('the migration is wrong; stop answering for ten minutes')
+assert.ok(
+  await until(() => text().includes('This office is paused'), 6000),
+  `a suspended office draws a band; body was: ${text()}`,
+)
+assert.match(text(), /the migration is wrong/, 'the band carries the reason the office published with it')
+assert.match(
+  text(),
+  /they are held, not delivered/,
+  'and says what a post into it does, because a channel that stops moving is otherwise ambiguous',
+)
+assert.ok(
+  buttons().some(entry => entry.textContent.includes('Resume office')),
+  'and the header control offers the way back',
+)
+// The reason belongs to the state being set, so a dialog opened on an office that is already
+// paused shows what it published rather than a field to type a new one into.
+clickOn('Resume office')
+await settle()
+const pauseModal = [...document.querySelectorAll('[data-modal]')].at(-1)
+assert.ok(pauseModal, 'the pause dialog opens')
+assert.match(pauseModal.textContent, /Paused since/)
+assert.match(pauseModal.textContent, /the migration is wrong/)
 
 console.log('panel render check: ok')
 root.unmount()

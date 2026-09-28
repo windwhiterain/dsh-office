@@ -199,7 +199,9 @@ turn.
 One thing overrides the whole table: a colleague that has set itself do-not-disturb is not woken by
 any row of it, whatever spelling addressed it. It is not a fourth spelling and not a property of a
 wake — it is the recipient's own answer to being addressed, and it is answered with a hold and a
-reported outcome instead; see [Do not disturb](#do-not-disturb).
+reported outcome instead; see [Do not disturb](#do-not-disturb). A [paused office](#pausing-the-office)
+overrides it the same way, for the same reason and with a hold of its own: the room is suspended, so
+the question is not who is absent but that nobody is called at all.
 
 The wake the office recorded is also what the panel's message bubble states, beside the sequence
 and the sender: the token a level or a channel addressed, in today's spelling — a message stored
@@ -513,6 +515,9 @@ durable because a wake is a promise the office keeps:
 - Delivery of a batch happens only when the colleague's live agent is idle. A colleague that is
   busy again by the time the office gets to it keeps its holds; the next idle transition delivers
   them.
+- A **paused** office delivers none of them, whoever they are for. The flush that runs on every idle
+  transition, and the one that runs at activation, both refuse while the state is set — which is
+  what makes a hold outlive a pause instead of being lost inside it.
 - The hold records are deleted only **after** the turn has been queued, so a failure while
   releasing them leaves them held and the next idle transition retries.
 
@@ -605,7 +610,63 @@ go the way any dismissed colleague's holds go.
 The office's own idle notice is an ordinary message to this path, so a roster whose whole audience
 is away holds the question instead of refusing to ask it: the notice is written once, becomes the
 newest record — which is what stops the office asking again — and is handed over when the state is
-released.
+released. A [paused office](#pausing-the-office) does not hold the question: it does not ask it at
+all, because a question nobody is woken for would be a message the office wrote for no reader.
+
+## Pausing the office
+
+An office can be paused as a whole, by a leader's or the boss's `office_pause` and by the panel's own
+route. It is the office-wide sibling of [do not disturb](#do-not-disturb): a stored state that makes
+`deliver` hold rather than deliver, and `flushWakes` refuse rather than flush.
+
+| | do not disturb | a paused office |
+|---|---|---|
+| whose state it is | one session's, written to every office that holds it | one office's, on that office's global slot |
+| who sets it | the colleague itself | a leader, the boss, or the panel |
+| what a wake does | held, `do-not-disturb` reported | held, `office-paused` reported |
+| what ends it | the colleague's own next post, or its own call | `office_pause` or the panel, and nothing else |
+| what a release delivers | the mail the state held | the mail the office held, one merged turn per colleague |
+
+Three properties make it a state rather than a filter, and each is the same one do not disturb rests
+on.
+
+- **It is read before the session is.** `deliver` and `flushWakes` both check the stored state
+  before they reach `ensureAgent`, so a suspended office resumes no colleague and mounts no preset
+  to hand it a message. The office's own idle notice is not sent at all while the state is set — a
+  question the office cannot deliver is not a question worth writing.
+- **It is the same hold, released the same way.** A refused wake goes into `pending` with no timing
+  recorded, which is exactly what a `turn-end` hold is, so it merges with everything else that
+  arrived and is carried by the one turn that follows the resume.
+- **It survives a restart.** The state is on the domain's global slot, so `restoreWakes` at
+  activation finds it and delivers nothing, and the office is still suspended afterwards.
+
+**A pause is a barrier on waking, not a stop button.** A colleague that is mid-turn is not
+interrupted; its turn ends, its idle transition finds the state set, and what it was holding stays
+held. `office_interrupt` is the tool that cancels a turn, and it stays the one that does.
+
+**A resume wakes nobody the office had nothing for.** It asks the ordinary question — which
+colleagues have holds — and hands each of them one turn, so the colleagues that come back are
+exactly the ones something arrived for. A colleague that was idle with no mail waiting, and was not
+addressed while the office was paused, has no hold and is never asked: the pause is not a message to
+the whole office. A colleague that is busy again by the time the office reaches it keeps its holds
+and takes them at its next idle transition, which the result reports as what stayed behind.
+
+The wake while suspended is reported as `office-paused` with the moment and the published reason
+quoted in its detail, and the outcome is recorded on the message like any other — so a later reader
+of the channel sees why nothing was answered. The check comes **before** the recipient's own
+do-not-disturb state, because a suspended office wakes nobody at all: reporting that one colleague is
+away while the whole room is suspended would describe a restriction that is not the one in force.
+
+Two things a pause deliberately does not reach, and the reason for each.
+
+- **A colleague's own read.** `office_read_notifications` still returns and takes what is held for
+  the colleague that asks for it, exactly as it does while a colleague is away. The pause gates what
+  the office delivers, not what a session reads about itself — and the colleague can only ask while
+  it is running, which a pause never stops.
+- **A hire.** Hiring into a paused office still greets the new colleague privately. The greeting is
+  not a wake — it has no message, no audience, and no hold — and it is what makes the new session
+  visible in the workspace and tell it which office it joined. Withholding it would leave a blank
+  session with nothing to deliver it later.
 
 ## Delivery statuses
 
@@ -618,6 +679,7 @@ session id — or by the user's name for the mailbox — and reported in the too
 | `queued` | The colleague was mid-turn and the sender asked for `turn-end`, so the message is held in `pending` and goes into its next turn, merged with whatever else is held for it. |
 | `steered` | The colleague was mid-turn and the message was spliced into the turn it was running, to be read at that turn's next step boundary. This is what the default timing reports. |
 | `do-not-disturb` | The colleague had set its own [do-not-disturb](#do-not-disturb) state, so nothing woke it: the message is held, and it arrives in the turn that follows the release. Its detail is the reason quoted to the sender — when the state was set, and the reason the colleague published with it. It is one of the three outcomes that report a detail to the caller, beside `failed` and `mailbox`, because the reason is what decides whether the caller waits. |
+| `office-paused` | The [office is paused](#pausing-the-office), so nothing it is addressed wakes anybody: the message is held, and it arrives in the turn that follows the resume. Its detail quotes when the office was paused and the reason published with it, and the outcome is reported whatever the recipient's own state is, because a suspended office wakes nobody. |
 | `wakes-disabled` | The office runs with `wakesEnabled: false`; the message is stored and no session is touched. |
 | `mailbox` | The message was addressed to the **user**, who has no session to wake, so it waits in the user mailbox. |
 | `failed` | The delivery itself threw; the message stays in its channel and `office_read` still finds it. |
