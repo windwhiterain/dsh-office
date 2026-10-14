@@ -81,7 +81,6 @@
                 on disk: you hold no file or search tools, so read the roster and the channels
                 instead, and reserve the shell for the files themselves. Running several
                 offices, you hold one set of office tools, each taking the office to act on.
-              suffix: Your working directory is {{cwd}}.
 
           # One Git Bash process per session, the same stack the `minimal-git-bash-persistent`
           # agent preset mounts: environment, working directory, and history survive across
